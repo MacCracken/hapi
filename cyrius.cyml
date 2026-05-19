@@ -1,0 +1,15 @@
+[package]
+name = "hapi"
+version = "${file:VERSION}"
+description = "hapi — Home Asset Provisioning Interface. GNU stow-equivalent dotfile / symlink farm manager for AGNOS. Hawaiian: happy."
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "6.0.0"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "hapi"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench"]

@@ -1,0 +1,16 @@
+# hapi — main entry point.
+#
+# Scaffold stage: prints version and exits. Real CLI (link / unlink /
+# adopt / sync / list, CYML manifest reader, capability-bounded
+# execution scoped to $HOME) lands once development begins.
+#
+# Stdlib auto-included via cyrius.cyml [deps].stdlib.
+
+fn main() {
+    alloc_init();
+    println("hapi v0.1.0 — scaffold");
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
