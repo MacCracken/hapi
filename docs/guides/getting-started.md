@@ -3,24 +3,51 @@
 ## Build
 
 ```sh
-cyrius deps                              # resolve dependencies
-cyrius build src/main.cyr build/hapi    # compile
-cyrius test                              # run [build].test + tests/*.tcyr
+cyrius deps                            # resolve stdlib
+cyrius build src/main.cyr build/hapi   # compile
+./build/hapi                            # prints scaffold version line
+cyrius test                             # run tests/*.tcyr
 ```
 
 ## Layout
 
-- `src/main.cyr` — entry point. Top-level `var r = main(); syscall(SYS_EXIT, r);`.
-- `src/test.cyr` — top-level test entry referenced by `cyrius.cyml [build].test`. Add unit cases here or in `tests/hapi.tcyr`.
-- `tests/hapi.tcyr` — primary test suite (`cyrius test` auto-discovers).
-- `tests/hapi.bcyr` — benchmarks (`cyrius bench`).
-- `tests/hapi.fcyr` — fuzz harness (`cyrius fuzz`).
+- `src/main.cyr` — entry point; CLI dispatcher (subcommands land M2+)
+- `tests/hapi.{tcyr,bcyr,fcyr}` — tests / benchmarks / fuzz
 
-## Adding a feature
+Once subcommands ship, additional layout:
 
-1. Edit `src/main.cyr` (or add a new module and `include` it).
-2. Add a test case to `tests/hapi.tcyr`.
-3. Run `cyrius test`.
-4. Bump `VERSION` and add a CHANGELOG entry before tagging.
+- `src/cmd/link.cyr` / `unlink.cyr` / `adopt.cyr` / `list.cyr` /
+  `sync.cyr` / `status.cyr` / `rollback.cyr`
+- `src/manifest.cyr` — `hapi.cyml` parser
+- `src/audit.cyr` — audit-trail writer / reader
 
-See [`../adr/template.md`](../adr/template.md) when a non-trivial design choice deserves an ADR.
+## Adding a command
+
+1. Add a new `src/cmd/<name>.cyr` module with the command handler.
+2. Wire it into `src/main.cyr` dispatch.
+3. Add a guide page at `docs/guides/<name>.md` describing the
+   command's semantics, flags, and exit codes.
+4. Add happy + conflict + capability-denied tests to `tests/hapi.tcyr`.
+5. Update CHANGELOG.
+6. If the design choice is non-trivial (e.g., a new flag with
+   capability implications), file an ADR.
+
+## Adding a feature to an existing command
+
+1. Edit the relevant `src/cmd/<name>.cyr`.
+2. Test additions per the existing matrix.
+3. Update the command's guide page.
+4. CHANGELOG entry + version bump.
+
+## Conventions
+
+- Every path argument is validated before any syscall (bounds,
+  `../` traversal, symlink loop).
+- Every filesystem mutation writes an audit-trail entry — no
+  exceptions.
+- Idempotent operations are the norm; non-idempotent operations
+  (`adopt`, `--force`) are clearly flagged.
+- No `exec_*`, no `sys_system()`. Syscall primitives only.
+
+See [`../adr/template.md`](../adr/template.md) when a non-trivial
+design choice deserves an ADR.
