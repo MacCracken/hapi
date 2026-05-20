@@ -3,8 +3,11 @@
 
 include "src/manifest.cyr"
 include "src/audit.cyr"
+include "src/audit_reader.cyr"
 include "src/fs_link.cyr"
 include "src/cmd/link.cyr"
+include "src/cmd/unlink.cyr"
+include "src/cmd/rollback.cyr"
 
 # Convenience: parse a literal manifest string and assert it
 # returned Err(<expected>). `expected` is one of the HapiMf*
@@ -421,6 +424,269 @@ fn test_cmd_link_force_refuses_directory() {
     return 0;
 }
 
+# ============================================================
+# M3 — audit_reader, unlink, rollback tests
+# ============================================================
+
+# Set up a fresh scope root + audit-trail path for one test;
+# returns the (scope, audit_path) tuple as a 16-byte struct.
+fn _test_fresh_env(): i64 {
+    var pair = alloc(16);
+    var scope = _test_scratch_dir();
+    var audit_path = alloc(strlen(scope) + 32);
+    memcpy(audit_path, scope, strlen(scope));
+    memcpy(audit_path + strlen(scope), "/audit.jsonl\x00", 13);
+    link_set_scope_root(scope);
+    audit_set_trail_path(audit_path);
+    store64(pair, scope);
+    store64(pair + 8, audit_path);
+    return pair;
+}
+
+fn _test_clear_env(): i64 {
+    link_set_scope_root(0);
+    audit_set_trail_path(0);
+    return 0;
+}
+
+# ------------------------------------------------------------
+# audit_reader — round trip writer → reader
+# ------------------------------------------------------------
+
+fn test_audit_reader_roundtrip() {
+    test_group("audit_reader: round trip writer → reader");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+
+    audit_append_link_r("pkgA", "1.0", "sha1:aaa",
+        "srcA", ".tgtA", "/abs/srcA", "/abs/tgtA");
+    audit_append_link_r("pkgB", "2.0", "sha1:bbb",
+        "srcB", ".tgtB", "/abs/srcB", "/abs/tgtB");
+    audit_append_unlink_r("pkgA", "1.0", "sha1:aaa",
+        "srcA", ".tgtA", "/abs/srcA", "/abs/tgtA");
+
+    var entries = audit_read(audit_path);
+    assert_eq(vec_len(entries), 3, "read back 3 entries");
+
+    var e0 = vec_get(entries, 0);
+    assert_eq(_har_cstr_eq(hae_op(e0), "link"), 1, "e0.op = link");
+    assert_eq(_har_cstr_eq(hae_pkg(e0), "pkgA"), 1, "e0.pkg = pkgA");
+    assert_eq(_har_cstr_eq(hae_target(e0), ".tgtA"), 1, "e0.target");
+
+    var e2 = vec_get(entries, 2);
+    assert_eq(_har_cstr_eq(hae_op(e2), "unlink"), 1, "e2.op = unlink");
+    assert_eq(_har_cstr_eq(hae_pkg(e2), "pkgA"), 1, "e2.pkg = pkgA");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_audit_reader_drops_torn_line() {
+    test_group("audit_reader: drops trailing partial line");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+    audit_ensure_dir();
+
+    # Write 1.5 entries — one complete, one without trailing \n.
+    var content = "{\"op\":\"link\",\"pkg\":\"a\",\"abs_target\":\"/x\"}\n{\"op\":\"link\",\"pkg\":\"b\"";
+    var fd = file_open(audit_path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    file_write(fd, content, strlen(content));
+    file_close(fd);
+
+    var entries = audit_read(audit_path);
+    assert_eq(vec_len(entries), 1, "only the complete line is parsed");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_audit_reader_drops_malformed() {
+    test_group("audit_reader: drops malformed lines, keeps good ones");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+    audit_ensure_dir();
+
+    var content = "{\"op\":\"link\",\"pkg\":\"good\"}\nNOT JSON AT ALL\n{\"op\":\"unlink\",\"pkg\":\"good2\"}\n";
+    var fd = file_open(audit_path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    file_write(fd, content, strlen(content));
+    file_close(fd);
+
+    var entries = audit_read(audit_path);
+    assert_eq(vec_len(entries), 2, "two valid lines parsed; junk dropped");
+
+    _test_clear_env();
+    return 0;
+}
+
+# ------------------------------------------------------------
+# unlink — round trip (M3 acceptance)
+# ------------------------------------------------------------
+
+fn test_cmd_unlink_round_trip() {
+    test_group("unlink: link → unlink round trip (M3 acceptance)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+
+    assert_eq(cmd_link("docs/examples/dotfiles-zsh", 0), 0, "link succeeds");
+    var size_after_link = _test_file_size(audit_path);
+    assert(size_after_link > 0, "audit trail written after link");
+
+    # Confirm symlinks exist
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "symlink present after link");
+
+    assert_eq(cmd_unlink("dotfiles-zsh"), 0, "unlink succeeds");
+
+    # All symlinks should be gone
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT, "symlink gone after unlink");
+
+    var size_after_unlink = _test_file_size(audit_path);
+    assert(size_after_unlink > size_after_link, "audit trail grew on unlink");
+
+    # Trail now has 6 entries (3 link + 3 unlink) — the contract says
+    # both ops are recorded.
+    var trail = audit_read(audit_path);
+    assert_eq(vec_len(trail), 6, "6 entries in trail (3 link + 3 unlink)");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_unlink_refuses_user_mutation() {
+    test_group("unlink: refuses to remove a user-modified symlink");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+
+    # User mutates .zshrc to point somewhere else.
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    sys_unlink(zrc);
+    sys_symlink("/tmp/elsewhere", zrc);
+
+    var rc = cmd_unlink("dotfiles-zsh");
+    assert_eq(rc, 1, "unlink exits 1 when one entry refused");
+
+    # The user-mutated symlink is untouched.
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "user-mutated symlink preserved");
+    var probe = link_probe(zrc);
+    assert_eq(_har_cstr_eq(link_probe_target(probe), "/tmp/elsewhere"), 1,
+              "still points where user pointed it");
+
+    # The OTHER two (unmutated) symlinks should be gone.
+    var zenv = alloc(strlen(scope) + 16);
+    memcpy(zenv, scope, strlen(scope));
+    memcpy(zenv + strlen(scope), "/.zshenv\x00", 9);
+    assert_eq(link_probe_kind(link_probe(zenv)), HAPI_LP_ABSENT,
+              "unmutated symlinks still removed");
+
+    _test_clear_env();
+    return 0;
+}
+
+# ------------------------------------------------------------
+# rollback — full reverse replay
+# ------------------------------------------------------------
+
+fn test_cmd_rollback_full() {
+    test_group("rollback: link then rollback leaves clean state");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "linked");
+
+    assert_eq(cmd_rollback(), 0, "rollback exits 0");
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT, "symlink removed by rollback");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_rollback_through_link_unlink_link() {
+    test_group("rollback: reverses link/unlink/link to clean slate");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    cmd_unlink("dotfiles-zsh");
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "symlink present before rollback");
+
+    assert_eq(cmd_rollback(), 0, "rollback succeeds");
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT,
+              "symlink absent after rollback through link/unlink/link");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_rollback_idempotent() {
+    test_group("rollback: running twice = same as once");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+
+    assert_eq(cmd_rollback(), 0, "first rollback");
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT, "absent after first");
+
+    assert_eq(cmd_rollback(), 0, "second rollback");
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT, "still absent after second");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_rollback_stops_at_marker() {
+    test_group("rollback: stops at the most recent marker");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    audit_append_rollback_marker_r();
+    cmd_unlink("dotfiles-zsh");
+
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT, "unlinked before rollback");
+
+    cmd_rollback();
+    # Should reverse only the unlink (back to linked state), not the
+    # original link beyond the marker.
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK,
+              "rollback re-created link (stopped at marker)");
+
+    _test_clear_env();
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -437,6 +703,15 @@ fn main() {
     test_cmd_link_happy_path();
     test_cmd_link_conflict_refuses();
     test_cmd_link_force_refuses_directory();
+    test_audit_reader_roundtrip();
+    test_audit_reader_drops_torn_line();
+    test_audit_reader_drops_malformed();
+    test_cmd_unlink_round_trip();
+    test_cmd_unlink_refuses_user_mutation();
+    test_cmd_rollback_full();
+    test_cmd_rollback_through_link_unlink_link();
+    test_cmd_rollback_idempotent();
+    test_cmd_rollback_stops_at_marker();
     return assert_summary();
 }
 

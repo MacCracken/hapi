@@ -45,6 +45,13 @@ fn link_set_scope_root(root_cstr): i64 {
     return 0;
 }
 
+# Strlen-using print helpers — manual byte counts on string
+# literals are a footgun (off-by-one writes adjacent rodata
+# bytes to the terminal). Use these instead of bare
+# `print(lit, N)` for any literal payload.
+fn _hlnk_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn _hlnk_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
 # Plan item — 48 bytes.
 #   +0   link             (HapiLink ptr from the manifest)
 #   +8   abs_source       (cstring)
@@ -131,30 +138,30 @@ fn _hlnk_print_conflict(plan): i64 {
     var abs_tgt = load64(plan + 16);
     var rel = load64(plan + 24);
     var action = load64(plan + 32);
-    eprint("  ", 2);
+    _hlnk_eputs("  ");
     eprint(abs_tgt, strlen(abs_tgt));
-    eprint("  ", 2);
+    _hlnk_eputs("  ");
     if (action == LINK_ACT_CONFLICT_SYMLINK) {
         var existing = load64(plan + 40);
-        eprint("(symlink -> ", 12);
+        _hlnk_eputs("(symlink -> ");
         if (existing != 0) { eprint(existing, strlen(existing)); }
-        eprint("; expected -> ", 14);
+        _hlnk_eputs("; expected -> ");
         eprint(rel, strlen(rel));
-        eprint(")", 1);
+        _hlnk_eputs(")");
     } elif (action == LINK_ACT_CONFLICT_FILE) {
-        eprint("(existing regular file)", 23);
+        _hlnk_eputs("(existing regular file)");
     } elif (action == LINK_ACT_CONFLICT_DIR) {
-        eprint("(existing directory)", 20);
+        _hlnk_eputs("(existing directory)");
     } else {
-        eprint("(probe error)", 13);
+        _hlnk_eputs("(probe error)");
     }
-    eprint("\n", 1);
+    _hlnk_eputs("\n");
     return 0;
 }
 
 fn cmd_link(pkg_arg, force): i64 {
     if (pkg_arg == 0) {
-        eprint("usage: hapi link <package-dir|hapi.cyml> [--force]\n", 52);
+        _hlnk_eputs("usage: hapi link <package-dir|hapi.cyml> [--force]\n");
         return 2;
     }
 
@@ -165,27 +172,27 @@ fn cmd_link(pkg_arg, force): i64 {
     if (is_err_result(mr) == 1) {
         var code = load64(mr + 8);
         var msg = hapi_mf_err_msg(code);
-        eprint("hapi: ", 6);
+        _hlnk_eputs("hapi: ");
         eprint(msg, strlen(msg));
-        eprint(" (", 2);
+        _hlnk_eputs(" (");
         eprint(manifest_path, strlen(manifest_path));
-        eprint(")\n", 2);
+        _hlnk_eputs(")\n");
         return 1;
     }
     var m = load64(mr + 8);
 
     var manifest_hash = audit_manifest_hash(manifest_path);
     if (manifest_hash == 0) {
-        eprint("hapi: could not hash manifest at ", 33);
+        _hlnk_eputs("hapi: could not hash manifest at ");
         eprint(manifest_path, strlen(manifest_path));
-        eprint("\n", 1);
+        _hlnk_eputs("\n");
         return 1;
     }
 
     var scope_root = _hlnk_scope_root_override;
     if (scope_root == 0) { scope_root = getenv("HOME"); }
     if (scope_root == 0 || strlen(scope_root) == 0) {
-        eprint("hapi: $HOME is unset; cannot resolve link targets\n", 50);
+        _hlnk_eputs("hapi: $HOME is unset; cannot resolve link targets\n");
         return 1;
     }
     var scope_root_abs = fsl_to_absolute(scope_root);
@@ -211,14 +218,14 @@ fn cmd_link(pkg_arg, force): i64 {
 
     # If any conflicts and --force isn't on, refuse and list them.
     if (conflict_count > 0 && force == 0) {
-        eprint("hapi: refusing to link `", 24);
+        _hlnk_eputs("hapi: refusing to link `");
         var pkg_name = hapi_mf_name(m);
         eprint(str_data(pkg_name), str_len(pkg_name));
-        eprint("` — ", 6);
+        _hlnk_eputs("` — ");
         fmt_int_fd(2, conflict_count);
-        eprint(" conflict", 9);
-        if (conflict_count > 1) { eprint("s", 1); }
-        eprint(" (rerun with --force to override):\n", 35);
+        _hlnk_eputs(" conflict");
+        if (conflict_count > 1) { _hlnk_eputs("s"); }
+        _hlnk_eputs(" (rerun with --force to override):\n");
         var k = 0;
         while (k < nlinks) {
             var pl = vec_get(plans, k);
@@ -240,7 +247,7 @@ fn cmd_link(pkg_arg, force): i64 {
         var pl = vec_get(plans, k2);
         if (load64(pl + 32) == LINK_ACT_CONFLICT_DIR) {
             if (dir_blocked == 0) {
-                eprint("hapi: --force does not override existing directories:\n", 55);
+                _hlnk_eputs("hapi: --force does not override existing directories:\n");
             }
             _hlnk_print_conflict(pl);
             dir_blocked = 1;
@@ -266,9 +273,9 @@ fn cmd_link(pkg_arg, force): i64 {
         if (force == 1 && (act == LINK_ACT_CONFLICT_SYMLINK || act == LINK_ACT_CONFLICT_FILE)) {
             var urc = sys_unlink(abs_tgt);
             if (urc < 0) {
-                eprint("hapi: could not remove existing ", 32);
+                _hlnk_eputs("hapi: could not remove existing ");
                 eprint(abs_tgt, strlen(abs_tgt));
-                eprint(" (--force)\n", 11);
+                _hlnk_eputs(" (--force)\n");
                 return 1;
             }
             should_create = 1;
@@ -277,9 +284,9 @@ fn cmd_link(pkg_arg, force): i64 {
         if (should_create == 1) {
             var crc = link_create(rel, abs_tgt);
             if (crc < 0) {
-                eprint("hapi: symlink failed at ", 24);
+                _hlnk_eputs("hapi: symlink failed at ");
                 eprint(abs_tgt, strlen(abs_tgt));
-                eprint("\n", 1);
+                _hlnk_eputs("\n");
                 return 1;
             }
             var lnk = load64(pl);
@@ -290,28 +297,28 @@ fn cmd_link(pkg_arg, force): i64 {
                                          src_cstr, tgt_cstr,
                                          abs_src, abs_tgt);
             if (is_err_result(ar) == 1) {
-                eprint("hapi: audit-trail write failed for ", 35);
+                _hlnk_eputs("hapi: audit-trail write failed for ");
                 eprint(abs_tgt, strlen(abs_tgt));
-                eprint("\n", 1);
+                _hlnk_eputs("\n");
                 return 1;
             }
             written = written + 1;
-            print("  + ", 4);
+            _hlnk_puts("  + ");
             print(abs_tgt, strlen(abs_tgt));
-            print(" -> ", 4);
+            _hlnk_puts(" -> ");
             print(rel, strlen(rel));
-            print("\n", 1);
+            _hlnk_puts("\n");
         }
         j = j + 1;
     }
 
     # Summary line — matches the inspect command's terse output style.
-    print("linked ", 7);
+    _hlnk_puts("linked ");
     fmt_int(written);
-    print(" / ", 3);
+    _hlnk_puts(" / ");
     fmt_int(nlinks);
-    print(" (", 2);
+    _hlnk_puts(" (");
     fmt_int(noop_count);
-    print(" already up-to-date)\n", 21);
+    _hlnk_puts(" already up-to-date)\n");
     return 0;
 }

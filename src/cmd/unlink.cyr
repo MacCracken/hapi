@@ -1,0 +1,226 @@
+# cmd/unlink.cyr — `hapi unlink <package>`
+#
+# Removes the symlinks created by prior `link` operations for
+# the named package. Trail-driven, not manifest-driven: hapi
+# only removes what the audit trail says hapi created.
+#
+# Safety contract (CLAUDE.md / roadmap M3):
+#   - Never deletes a user file
+#   - Never deletes a user-created symlink
+#   - Refuses any target whose current state diverges from
+#     what the trail recorded (user-mutated; out of scope)
+#
+# The trail's `link` entries record both `abs_source` and
+# `abs_target`. We recompute the expected relative-target via
+# fsl_compute_relative and compare to the symlink's actual
+# value — that's the "current state matches what we wrote"
+# check.
+#
+# Exit codes:
+#   0  all in-scope symlinks removed (or none were live)
+#   1  at least one entry was refused (user-mutated); the
+#      rest still get processed
+#   2  bad usage
+
+include "src/audit.cyr"
+include "src/audit_reader.cyr"
+include "src/fs_link.cyr"
+
+fn _hul_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn _hul_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
+# Walk the trail; for the named package, build a vec of
+# "live" HapiAuditEntry pointers — those whose `target` has
+# a link entry not superseded by a later unlink entry for the
+# same target. Returns vec (possibly empty).
+fn _hul_live_entries_for(trail, pkg_cstr): i64 {
+    # Two-pass: walk forward, last-write-wins per target.
+    # We tag each entry's slot by absorbing "unlink" into a
+    # sentinel; final pass collects non-sentinel entries.
+    #
+    # Implementation: a parallel vec of "target -> entry-or-0".
+    # Small N (typical user has < 100 links per package), so
+    # linear search per target is fine.
+    var live_targets = vec_new();
+    var live_entries = vec_new();
+
+    var n = vec_len(trail);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(trail, i);
+        var ep = hae_pkg(e);
+        if (_har_cstr_eq(ep, pkg_cstr) == 1) {
+            var op = hae_op(e);
+            var tgt = hae_abs_target(e);
+            if (tgt != 0) {
+                # Find existing slot for this target
+                var found = 0 - 1;
+                var j = 0;
+                while (j < vec_len(live_targets) && found < 0) {
+                    if (_har_cstr_eq(vec_get(live_targets, j), tgt) == 1) { found = j; }
+                    j = j + 1;
+                }
+                if (_har_cstr_eq(op, "link") == 1) {
+                    if (found < 0) {
+                        vec_push(live_targets, tgt);
+                        vec_push(live_entries, e);
+                    } else {
+                        # Overwrite — re-link of the same target.
+                        # vec doesn't expose set; we mark + clean later.
+                        # Simpler: just leave the old, append the new,
+                        # filter on collection. But that requires uniq.
+                        # Actually: a fresh link entry overrides the
+                        # previous one; remove the previous from both
+                        # vecs by re-creating. Cheap given the small
+                        # N expected.
+                        var nt = vec_new();
+                        var ne = vec_new();
+                        var k = 0;
+                        while (k < vec_len(live_targets)) {
+                            if (k != found) {
+                                vec_push(nt, vec_get(live_targets, k));
+                                vec_push(ne, vec_get(live_entries, k));
+                            }
+                            k = k + 1;
+                        }
+                        vec_push(nt, tgt);
+                        vec_push(ne, e);
+                        live_targets = nt;
+                        live_entries = ne;
+                    }
+                } elif (_har_cstr_eq(op, "unlink") == 1) {
+                    if (found >= 0) {
+                        var nt = vec_new();
+                        var ne = vec_new();
+                        var k = 0;
+                        while (k < vec_len(live_targets)) {
+                            if (k != found) {
+                                vec_push(nt, vec_get(live_targets, k));
+                                vec_push(ne, vec_get(live_entries, k));
+                            }
+                            k = k + 1;
+                        }
+                        live_targets = nt;
+                        live_entries = ne;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return live_entries;
+}
+
+# Compute the relative target that `hapi link` would have written
+# for this audit entry, so we can compare against the current
+# symlink and prove "this is the link we created."
+fn _hul_expected_rel(entry): i64 {
+    var abs_tgt = hae_abs_target(entry);
+    var abs_src = hae_abs_source(entry);
+    if (abs_tgt == 0 || abs_src == 0) { return 0; }
+    var parent = _fsl_path_dirname(abs_tgt);
+    return fsl_compute_relative(parent, abs_src);
+}
+
+# Remove one live entry. Returns:
+#    0 — removed cleanly, audit appended
+#    1 — refused (current state diverges from trail)
+#   -1 — IO error (sys_unlink or audit write failed)
+fn _hul_remove_one(entry): i64 {
+    var abs_tgt = hae_abs_target(entry);
+    if (abs_tgt == 0) { return 1; }
+    var probe = link_probe(abs_tgt);
+    var kind = link_probe_kind(probe);
+    if (kind == HAPI_LP_ABSENT) {
+        # Already gone — nothing to do, but worth a note rather
+        # than treating as an error. We DON'T audit (no state
+        # change occurred). Caller decides how to report.
+        return 0;
+    }
+    if (kind != HAPI_LP_SYMLINK) {
+        return 1;
+    }
+    var current = link_probe_target(probe);
+    var expected = _hul_expected_rel(entry);
+    if (expected == 0 || _hul_cstr_eq(current, expected) == 0) {
+        return 1;
+    }
+    var urc = sys_unlink(abs_tgt);
+    if (urc < 0) { return 0 - 1; }
+    var ar = audit_append_unlink_r(
+        hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
+        hae_source(entry), hae_target(entry),
+        hae_abs_source(entry), hae_abs_target(entry));
+    if (is_err_result(ar) == 1) { return 0 - 1; }
+    return 0;
+}
+
+fn _hul_cstr_eq(a, b): i64 {
+    if (a == 0 || b == 0) { return 0; }
+    var an = strlen(a);
+    var bn = strlen(b);
+    if (an != bn) { return 0; }
+    return memeq(a, b, an);
+}
+
+fn cmd_unlink(pkg_arg): i64 {
+    if (pkg_arg == 0) {
+        _hul_eputs("usage: hapi unlink <package-name>\n");
+        return 2;
+    }
+
+    var trail = audit_read_default();
+    if (vec_len(trail) == 0) {
+        _hul_eputs("hapi: audit trail is empty — nothing to unlink\n");
+        return 0;
+    }
+
+    var live = _hul_live_entries_for(trail, pkg_arg);
+    var nlive = vec_len(live);
+    if (nlive == 0) {
+        _hul_puts("no live links for `");
+        _hul_puts(pkg_arg);
+        _hul_puts("` in the audit trail\n");
+        return 0;
+    }
+
+    var removed = 0;
+    var refused = 0;
+    var errored = 0;
+    var i = 0;
+    while (i < nlive) {
+        var entry = vec_get(live, i);
+        var rc = _hul_remove_one(entry);
+        var abs_tgt = hae_abs_target(entry);
+        if (rc == 0) {
+            _hul_puts("  - ");
+            _hul_puts(abs_tgt);
+            _hul_puts("\n");
+            removed = removed + 1;
+        } elif (rc == 1) {
+            _hul_eputs("  ! ");
+            _hul_eputs(abs_tgt);
+            _hul_eputs("  (user-mutated; skipped)\n");
+            refused = refused + 1;
+        } else {
+            _hul_eputs("  ! ");
+            _hul_eputs(abs_tgt);
+            _hul_eputs("  (IO error)\n");
+            errored = errored + 1;
+        }
+        i = i + 1;
+    }
+
+    _hul_puts("unlinked ");
+    fmt_int(removed);
+    _hul_puts(" / ");
+    fmt_int(nlive);
+    if (refused > 0) {
+        _hul_puts(" (");
+        fmt_int(refused);
+        _hul_puts(" refused)");
+    }
+    _hul_puts("\n");
+    if (refused > 0 || errored > 0) { return 1; }
+    return 0;
+}

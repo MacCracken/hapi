@@ -17,6 +17,11 @@
 
 include "src/manifest.cyr"
 
+# Strlen-using print helpers — avoid hand-counted byte literals
+# (off-by-one writes adjacent rodata bytes to the terminal).
+fn _hi_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn _hi_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
 # Resolve `path` to a concrete manifest-file path. If `path` ends
 # in `.cyml` we use it verbatim; otherwise we join `/hapi.cyml`.
 # Returned cstring is heap-allocated (null-terminated).
@@ -72,9 +77,9 @@ fn _hapi_inspect_pad(count): i64 {
 }
 
 fn _hapi_inspect_print_field(label, val): i64 {
-    print(label, strlen(label));
+    _hi_puts(label);
     str_print(val);
-    print("\n", 1);
+    _hi_puts("\n");
     return 0;
 }
 
@@ -88,11 +93,11 @@ fn _hapi_inspect_print_manifest(m): i64 {
 
     var links = hapi_mf_links(m);
     var nlinks = vec_len(links);
-    print("\nlinks (", 8);
+    _hi_puts("\nlinks (");
     fmt_int(nlinks);
-    print("):\n", 3);
+    _hi_puts("):\n");
     if (nlinks == 0) {
-        print("  (none)\n", 9);
+        _hi_puts("  (none)\n");
     } else {
         var width = _hapi_inspect_max_src_len(links);
         var i = 0;
@@ -100,30 +105,30 @@ fn _hapi_inspect_print_manifest(m): i64 {
             var l = vec_get(links, i);
             var src = hapi_link_source(l);
             var tgt = hapi_link_target(l);
-            print("  ", 2);
+            _hi_puts("  ");
             str_print(src);
             _hapi_inspect_pad(width - str_len(src));
-            print("  -> ", 5);
+            _hi_puts("  -> ");
             str_print(tgt);
-            print("\n", 1);
+            _hi_puts("\n");
             i = i + 1;
         }
     }
 
     var ignore = hapi_mf_ignore(m);
     var nignore = vec_len(ignore);
-    print("\nignore (", 9);
+    _hi_puts("\nignore (");
     fmt_int(nignore);
-    print("):\n", 3);
+    _hi_puts("):\n");
     if (nignore == 0) {
-        print("  (none)\n", 9);
+        _hi_puts("  (none)\n");
     } else {
         var i = 0;
         while (i < nignore) {
             var pat = vec_get(ignore, i);
-            print("  ", 2);
+            _hi_puts("  ");
             str_print(pat);
-            print("\n", 1);
+            _hi_puts("\n");
             i = i + 1;
         }
     }
@@ -134,7 +139,7 @@ fn _hapi_inspect_print_manifest(m): i64 {
 # (argv pointer). Returns the process exit code.
 fn cmd_inspect(path): i64 {
     if (path == 0) {
-        eprint("usage: hapi inspect <package-dir|hapi.cyml>\n", 45);
+        _hi_eputs("usage: hapi inspect <package-dir|hapi.cyml>\n");
         return 2;
     }
     var mpath = _hapi_inspect_resolve(path);
@@ -142,11 +147,11 @@ fn cmd_inspect(path): i64 {
     if (is_err_result(res) == 1) {
         var code = load64(res + 8);
         var msg = hapi_mf_err_msg(code);
-        eprint("hapi: ", 6);
+        _hi_eputs("hapi: ");
         eprint(msg, strlen(msg));
-        eprint(" (", 2);
+        _hi_eputs(" (");
         eprint(mpath, strlen(mpath));
-        eprint(")\n", 2);
+        _hi_eputs(")\n");
         return 1;
     }
     var m = load64(res + 8);

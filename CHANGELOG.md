@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0]
+
+### Added
+- `src/audit_reader.cyr` — JSONL reader. Hand-rolled scanner
+  scoped to the ADR 0002 field set; unescapes `\"`, `\\`,
+  `\n`, `\r`, `\t`, `\uXXXX` (writer only emits `\u00XX`).
+  Drops malformed and torn-final lines silently per the
+  ADR's crash-safety contract.
+- `src/audit.cyr` — `audit_append_unlink_r` and
+  `audit_append_rollback_marker_r`. `audit_format_link`
+  and `audit_format_unlink` share a common formatter.
+- `src/cmd/unlink.cyr` — `hapi unlink <pkg>`. Reads trail,
+  identifies live links for the package (link entries not
+  superseded by a later unlink), removes each only if the
+  current symlink matches what hapi wrote. Refuses
+  user-mutated entries (exit 1), keeps processing the rest.
+- `src/cmd/rollback.cyr` — `hapi rollback`. Walks trail
+  backward to the most recent `op:rollback-marker`,
+  conditionally reverses every entry in between. Idempotent
+  by construction — re-running produces the same end state.
+- `hapi unlink <pkg>` and `hapi rollback` wired into the
+  dispatcher.
+- `docs/guides/unlink.md` and `docs/guides/rollback.md`.
+- Tests: M3 acceptance (link → unlink → no residue, trail
+  records both ops), user-mutation refusal, audit-reader
+  round-trip, torn-line and malformed-line drops, rollback
+  through link/unlink/link → clean slate, rollback
+  idempotency, rollback stops at marker. 100 assertions
+  total (was 69 in v0.3.0).
+
+### Changed
+- `hapi --version` reports 0.4.0; help text lists `unlink`
+  and `rollback`.
+- Refactored hand-counted `print(lit, N)` calls in
+  `src/cmd/inspect.cyr` and `src/cmd/link.cyr` to use
+  strlen-via-helpers (`_hi_puts` / `_hi_eputs` /
+  `_hlnk_puts` / `_hlnk_eputs`). An off-by-one in the
+  directory-blocked message at v0.3.0 leaked an adjacent
+  rodata byte; the helpers eliminate the whole class of bug.
+
+### Fixed
+- Directory-blocked error message no longer prints a stray
+  leading space character (was rendering with three leading
+  spaces, now two — the byte count for the literal was off
+  by one in v0.3.0).
+
 ## [0.3.0]
 
 ### Added

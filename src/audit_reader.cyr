@@ -1,0 +1,256 @@
+# audit_reader.cyr — reads the JSONL audit trail back into
+# structured entries. Pairs with src/audit.cyr (the writer).
+#
+# We hand-roll the JSON object scan instead of pulling in
+# lib/json.cyr's full parser because the per-line shape is
+# pinned by ADR 0002 (always a flat object of "key":"value"
+# pairs, all string-typed) and the scanner is ~80 lines —
+# smaller than the json.cyr include surface.
+#
+# Crash-safety: any trailing line without a `\n` is dropped
+# silently, matching the writer's atomic-append contract.
+# Any line that fails to parse cleanly is also dropped — the
+# reader never crashes on a malformed trail.
+
+include "lib/io.cyr"
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/syscalls.cyr"
+
+# HapiAuditEntry — 80 bytes.
+#   +0   op (cstring)
+#   +8   ts (cstring)
+#   +16  pkg (cstring or 0)
+#   +24  pkg_version (cstring or 0)
+#   +32  manifest_hash (cstring or 0)
+#   +40  source (cstring or 0)
+#   +48  target (cstring or 0)
+#   +56  abs_source (cstring or 0)
+#   +64  abs_target (cstring or 0)
+#   +72  (reserved)
+fn _hae_new(): i64 {
+    var e = alloc(80);
+    var i = 0;
+    while (i < 80) { store8(e + i, 0); i = i + 1; }
+    return e;
+}
+fn hae_op(e): i64 { return load64(e); }
+fn hae_ts(e): i64 { return load64(e + 8); }
+fn hae_pkg(e): i64 { return load64(e + 16); }
+fn hae_pkg_version(e): i64 { return load64(e + 24); }
+fn hae_manifest_hash(e): i64 { return load64(e + 32); }
+fn hae_source(e): i64 { return load64(e + 40); }
+fn hae_target(e): i64 { return load64(e + 48); }
+fn hae_abs_source(e): i64 { return load64(e + 56); }
+fn hae_abs_target(e): i64 { return load64(e + 64); }
+
+fn _har_cstr_eq(a, b): i64 {
+    if (a == 0 || b == 0) { return 0; }
+    var an = strlen(a);
+    var bn = strlen(b);
+    if (an != bn) { return 0; }
+    return memeq(a, b, an);
+}
+
+# Parse a hex digit. Returns 0-15, or -1 on non-hex.
+fn _har_hex(c): i64 {
+    if (c >= 48 && c <= 57)  { return c - 48; }
+    if (c >= 97 && c <= 102) { return c - 87; }
+    if (c >= 65 && c <= 70)  { return c - 55; }
+    return 0 - 1;
+}
+
+# Read a JSON-quoted string starting at buf[*pos] (which must
+# point at the opening `"`). On success, writes the unescaped
+# heap-allocated cstring through *out_cstr and advances *pos
+# past the closing `"`. Returns 0 on success, -1 on malformed.
+fn _har_read_str(buf, len, pos_ptr, out_cstr): i64 {
+    var pos = load64(pos_ptr);
+    if (pos >= len || load8(buf + pos) != 34) { return 0 - 1; }
+    pos = pos + 1;
+    # Two-pass: count needed bytes, then alloc, then fill.
+    var scan = pos;
+    var out_len = 0;
+    var go = 1;
+    while (scan < len && go == 1) {
+        var c = load8(buf + scan);
+        if (c == 34) { go = 0; }
+        elif (c == 92) {
+            scan = scan + 1;
+            if (scan >= len) { return 0 - 1; }
+            var esc = load8(buf + scan);
+            if (esc == 117) {
+                # \uXXXX — for our writer, only control bytes (0x00-0x1F),
+                # which encode in 1 UTF-8 byte. Allow general \u00XX → 1 byte.
+                if (scan + 4 >= len) { return 0 - 1; }
+                out_len = out_len + 1;
+                scan = scan + 4;
+            } else {
+                out_len = out_len + 1;
+            }
+            scan = scan + 1;
+        } else {
+            out_len = out_len + 1;
+            scan = scan + 1;
+        }
+    }
+    if (go == 1) { return 0 - 1; }   # unterminated
+
+    var out = alloc(out_len + 1);
+    var rp = pos;
+    var wp = 0;
+    var go2 = 1;
+    while (rp < len && go2 == 1) {
+        var c = load8(buf + rp);
+        if (c == 34) { go2 = 0; rp = rp + 1; }
+        elif (c == 92) {
+            rp = rp + 1;
+            var esc = load8(buf + rp);
+            if (esc == 110) { store8(out + wp, 10); wp = wp + 1; rp = rp + 1; }
+            elif (esc == 114) { store8(out + wp, 13); wp = wp + 1; rp = rp + 1; }
+            elif (esc == 116) { store8(out + wp, 9);  wp = wp + 1; rp = rp + 1; }
+            elif (esc == 34)  { store8(out + wp, 34); wp = wp + 1; rp = rp + 1; }
+            elif (esc == 92)  { store8(out + wp, 92); wp = wp + 1; rp = rp + 1; }
+            elif (esc == 47)  { store8(out + wp, 47); wp = wp + 1; rp = rp + 1; }
+            elif (esc == 117) {
+                rp = rp + 1;
+                var h1 = _har_hex(load8(buf + rp));
+                var h2 = _har_hex(load8(buf + rp + 1));
+                var h3 = _har_hex(load8(buf + rp + 2));
+                var h4 = _har_hex(load8(buf + rp + 3));
+                var cp = h1 * 4096 + h2 * 256 + h3 * 16 + h4;
+                # Writer only emits \u00XX (control bytes). Treat
+                # anything wider as a single byte too — we don't
+                # need full UTF-8 expansion for the audit trail.
+                store8(out + wp, cp); wp = wp + 1;
+                rp = rp + 4;
+            } else {
+                store8(out + wp, esc); wp = wp + 1; rp = rp + 1;
+            }
+        } else {
+            store8(out + wp, c); wp = wp + 1; rp = rp + 1;
+        }
+    }
+    store8(out + wp, 0);
+    store64(out_cstr, out);
+    store64(pos_ptr, rp);
+    return 0;
+}
+
+# Skip whitespace in a buffer at *pos. JSON allows space/tab/LF/CR.
+fn _har_skip_ws(buf, len, pos_ptr): i64 {
+    var pos = load64(pos_ptr);
+    var go = 1;
+    while (pos < len && go == 1) {
+        var c = load8(buf + pos);
+        if (c == 32 || c == 9 || c == 10 || c == 13) { pos = pos + 1; }
+        else { go = 0; }
+    }
+    store64(pos_ptr, pos);
+    return 0;
+}
+
+# Match the lookup key against a known field name and store
+# the value into the appropriate slot of `entry`.
+fn _har_assign_field(entry, key, value): i64 {
+    if (_har_cstr_eq(key, "op") == 1)            { store64(entry,      value); }
+    elif (_har_cstr_eq(key, "ts") == 1)           { store64(entry + 8,  value); }
+    elif (_har_cstr_eq(key, "pkg") == 1)          { store64(entry + 16, value); }
+    elif (_har_cstr_eq(key, "pkg_version") == 1)  { store64(entry + 24, value); }
+    elif (_har_cstr_eq(key, "manifest_hash") == 1){ store64(entry + 32, value); }
+    elif (_har_cstr_eq(key, "source") == 1)       { store64(entry + 40, value); }
+    elif (_har_cstr_eq(key, "target") == 1)       { store64(entry + 48, value); }
+    elif (_har_cstr_eq(key, "abs_source") == 1)   { store64(entry + 56, value); }
+    elif (_har_cstr_eq(key, "abs_target") == 1)   { store64(entry + 64, value); }
+    # Unknown fields silently dropped — additive growth per ADR 0002.
+    return 0;
+}
+
+# Parse one JSONL line (no trailing newline) into a HapiAuditEntry.
+# Returns the entry on success, 0 on malformed. Per ADR 0002 the
+# value half of every field is a JSON string.
+fn _har_parse_line(buf, len): i64 {
+    var entry = _hae_new();
+    var pos = 0;
+    _har_skip_ws(buf, len, &pos);
+    if (pos >= len || load8(buf + pos) != 123) { return 0; }
+    pos = pos + 1;
+    _har_skip_ws(buf, len, &pos);
+    if (pos < len && load8(buf + pos) == 125) { return entry; }
+
+    var go = 1;
+    while (go == 1) {
+        var key = 0;
+        if (_har_read_str(buf, len, &pos, &key) < 0) { return 0; }
+        _har_skip_ws(buf, len, &pos);
+        if (pos >= len || load8(buf + pos) != 58) { return 0; }
+        pos = pos + 1;
+        _har_skip_ws(buf, len, &pos);
+        var value = 0;
+        if (_har_read_str(buf, len, &pos, &value) < 0) { return 0; }
+        _har_assign_field(entry, key, value);
+        _har_skip_ws(buf, len, &pos);
+        if (pos >= len) { return 0; }
+        var c = load8(buf + pos);
+        if (c == 125) { pos = pos + 1; go = 0; }
+        elif (c == 44) { pos = pos + 1; _har_skip_ws(buf, len, &pos); }
+        else { return 0; }
+    }
+    return entry;
+}
+
+# Read the audit trail at `path` into a vec of HapiAuditEntry
+# pointers. Returns an empty vec when the trail is absent
+# (first hapi run on this host) — that's the M3 default state,
+# not an error. Drops malformed and partial lines silently.
+fn audit_read(path): i64 {
+    var entries = vec_new();
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return entries; }
+
+    # Read the whole file. 256 KB matches the cyml / toml parsers'
+    # default cap. Heavy users (years of dotfile churn) may exceed
+    # this — `hapi trail compact` is the post-v1.0 answer.
+    var buf = alloc(262144);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = file_read(fd, buf + total, 262144 - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= 262144) { rgo = 0; }
+        }
+    }
+    file_close(fd);
+    if (total == 0) { return entries; }
+
+    # Walk line-by-line. Only lines terminated with `\n` are
+    # accepted — torn final writes leave a partial line that we
+    # silently drop.
+    var pos = 0;
+    while (pos < total) {
+        var line_start = pos;
+        var found = 0;
+        while (pos < total && found == 0) {
+            if (load8(buf + pos) == 10) { found = 1; }
+            else { pos = pos + 1; }
+        }
+        if (found == 1) {
+            var line_len = pos - line_start;
+            if (line_len > 0) {
+                var entry = _har_parse_line(buf + line_start, line_len);
+                if (entry != 0) { vec_push(entries, entry); }
+            }
+            pos = pos + 1;
+        }
+        # If no \n found, the trailing partial line falls off here.
+    }
+    return entries;
+}
+
+# Convenience: read the default trail (audit_trail_path()).
+fn audit_read_default(): i64 {
+    return audit_read(audit_trail_path());
+}

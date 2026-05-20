@@ -1,0 +1,180 @@
+# cmd/rollback.cyr — `hapi rollback`
+#
+# Walks the audit trail backward from EOF, stopping at the
+# most recent `rollback-marker` (or at the start of the trail
+# if no marker exists). Within that window, reverses every
+# entry — newer entries first.
+#
+# Reversal semantics:
+#   link entry   → if the symlink at abs_target still matches
+#                  what the trail says we wrote, sys_unlink it
+#                  and append a fresh op=unlink entry.
+#   unlink entry → if the abs_target is currently absent,
+#                  recreate the symlink and append op=link.
+#   marker       → stop (we've reached the boundary).
+#
+# Each reversal is conditional: if the user already
+# unlinked / overwrote / reorganized something, we leave it
+# alone. That makes rollback idempotent — running it twice
+# produces the same end state as running it once.
+
+include "src/audit.cyr"
+include "src/audit_reader.cyr"
+include "src/fs_link.cyr"
+
+fn _hrb_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn _hrb_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
+fn _hrb_cstr_eq(a, b): i64 {
+    if (a == 0 || b == 0) { return 0; }
+    var an = strlen(a);
+    var bn = strlen(b);
+    if (an != bn) { return 0; }
+    return memeq(a, b, an);
+}
+
+# Find the index of the most recent rollback-marker, walking
+# backward from `start` toward 0. Returns -1 if none (meaning
+# "rollback to the beginning of the trail").
+fn _hrb_find_marker(trail, start): i64 {
+    var i = start;
+    var found = 0 - 1;
+    var go = 1;
+    while (i >= 0 && go == 1) {
+        var e = vec_get(trail, i);
+        if (_hrb_cstr_eq(hae_op(e), "rollback-marker") == 1) {
+            found = i;
+            go = 0;
+        }
+        i = i - 1;
+    }
+    return found;
+}
+
+# Reverse one link entry: if the symlink at abs_target still
+# matches what hapi link would have written, unlink it.
+# Returns 1 if the reversal happened, 0 if skipped (state
+# diverged), -1 on IO error.
+fn _hrb_reverse_link(entry): i64 {
+    var abs_tgt = hae_abs_target(entry);
+    var abs_src = hae_abs_source(entry);
+    if (abs_tgt == 0 || abs_src == 0) { return 0; }
+
+    var probe = link_probe(abs_tgt);
+    if (link_probe_kind(probe) != HAPI_LP_SYMLINK) { return 0; }
+
+    var parent = _fsl_path_dirname(abs_tgt);
+    var expected = fsl_compute_relative(parent, abs_src);
+    if (expected == 0) { return 0; }
+    if (_hrb_cstr_eq(link_probe_target(probe), expected) == 0) { return 0; }
+
+    var urc = sys_unlink(abs_tgt);
+    if (urc < 0) { return 0 - 1; }
+    var ar = audit_append_unlink_r(
+        hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
+        hae_source(entry), hae_target(entry),
+        hae_abs_source(entry), hae_abs_target(entry));
+    if (is_err_result(ar) == 1) { return 0 - 1; }
+    return 1;
+}
+
+# Reverse one unlink entry: if abs_target is absent, recreate
+# the symlink. Returns 1 if applied, 0 if skipped, -1 on IO.
+fn _hrb_reverse_unlink(entry): i64 {
+    var abs_tgt = hae_abs_target(entry);
+    var abs_src = hae_abs_source(entry);
+    if (abs_tgt == 0 || abs_src == 0) { return 0; }
+
+    var probe = link_probe(abs_tgt);
+    if (link_probe_kind(probe) != HAPI_LP_ABSENT) { return 0; }
+
+    var parent = _fsl_path_dirname(abs_tgt);
+    var rel = fsl_compute_relative(parent, abs_src);
+    if (rel == 0) { return 0; }
+
+    var crc = link_create(rel, abs_tgt);
+    if (crc < 0) { return 0 - 1; }
+    var ar = audit_append_link_r(
+        hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
+        hae_source(entry), hae_target(entry),
+        hae_abs_source(entry), hae_abs_target(entry));
+    if (is_err_result(ar) == 1) { return 0 - 1; }
+    return 1;
+}
+
+fn cmd_rollback(): i64 {
+    var trail = audit_read_default();
+    var n = vec_len(trail);
+    if (n == 0) {
+        _hrb_eputs("hapi: audit trail is empty — nothing to roll back\n");
+        return 0;
+    }
+
+    var marker = _hrb_find_marker(trail, n - 1);
+    var start = marker + 1;
+
+    if (start >= n) {
+        _hrb_puts("nothing to roll back (already at most recent marker)\n");
+        return 0;
+    }
+
+    var applied = 0;
+    var skipped = 0;
+    var errored = 0;
+
+    var i = n - 1;
+    while (i >= start) {
+        var entry = vec_get(trail, i);
+        var op = hae_op(entry);
+        var rc = 0;
+        if (_hrb_cstr_eq(op, "link") == 1) {
+            rc = _hrb_reverse_link(entry);
+            if (rc == 1) {
+                _hrb_puts("  - ");
+                _hrb_puts(hae_abs_target(entry));
+                _hrb_puts("  (was link)\n");
+                applied = applied + 1;
+            } elif (rc == 0) {
+                skipped = skipped + 1;
+            } else {
+                _hrb_eputs("  ! ");
+                _hrb_eputs(hae_abs_target(entry));
+                _hrb_eputs("  (IO error reversing link)\n");
+                errored = errored + 1;
+            }
+        } elif (_hrb_cstr_eq(op, "unlink") == 1) {
+            rc = _hrb_reverse_unlink(entry);
+            if (rc == 1) {
+                _hrb_puts("  + ");
+                _hrb_puts(hae_abs_target(entry));
+                _hrb_puts("  (was unlink)\n");
+                applied = applied + 1;
+            } elif (rc == 0) {
+                skipped = skipped + 1;
+            } else {
+                _hrb_eputs("  ! ");
+                _hrb_eputs(hae_abs_target(entry));
+                _hrb_eputs("  (IO error reversing unlink)\n");
+                errored = errored + 1;
+            }
+        }
+        # rollback-marker entries are stopping points, not
+        # reversible ops — they fall through silently. We
+        # already excluded those before `start` via _hrb_find_marker.
+        i = i - 1;
+    }
+
+    _hrb_puts("rolled back ");
+    fmt_int(applied);
+    _hrb_puts(" / ");
+    fmt_int(n - start);
+    _hrb_puts(" entries");
+    if (skipped > 0) {
+        _hrb_puts(" (");
+        fmt_int(skipped);
+        _hrb_puts(" already at expected state)");
+    }
+    _hrb_puts("\n");
+    if (errored > 0) { return 1; }
+    return 0;
+}

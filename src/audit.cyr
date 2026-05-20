@@ -186,17 +186,18 @@ fn _audit_emit_comma(out, pos_ptr): i64 {
     return 0;
 }
 
-# Compose a single audit-trail line into `out`, returning the
-# byte length written. Output is a single JSON object terminated
-# with `\n`. Field order is fixed per ADR 0002.
-fn audit_format_link(out, cap, pkg, pkg_version, manifest_hash,
-                     source, target, abs_source, abs_target): i64 {
+# Compose a single audit-trail line for a link-shape op into
+# `out`. Used by both link and unlink entries — same field set,
+# different `op` value. Returns bytes written. Field order is
+# fixed per ADR 0002.
+fn _audit_format_link_op(out, cap, op, pkg, pkg_version, manifest_hash,
+                         source, target, abs_source, abs_target): i64 {
     var pos = 0;
     var ts = iso8601_now();
     store8(out + pos, 123); pos = pos + 1;     # {
     _audit_emit_field(out, &pos, "ts", ts);
     _audit_emit_comma(out, &pos);
-    _audit_emit_field(out, &pos, "op", "link");
+    _audit_emit_field(out, &pos, "op", op);
     _audit_emit_comma(out, &pos);
     _audit_emit_field(out, &pos, "pkg", pkg);
     _audit_emit_comma(out, &pos);
@@ -216,23 +217,69 @@ fn audit_format_link(out, cap, pkg, pkg_version, manifest_hash,
     return pos;
 }
 
-# Append a single link entry to the audit trail. Returns 0 on
-# success, Err(HapiAudit*) otherwise. Creates the parent
-# directory on demand.
-fn audit_append_link_r(pkg, pkg_version, manifest_hash,
-                       source, target, abs_source, abs_target): Result {
+# Compose a link entry. Bytes returned; output is single JSON
+# object + `\n`. Field order per ADR 0002.
+fn audit_format_link(out, cap, pkg, pkg_version, manifest_hash,
+                     source, target, abs_source, abs_target): i64 {
+    return _audit_format_link_op(out, cap, "link",
+        pkg, pkg_version, manifest_hash,
+        source, target, abs_source, abs_target);
+}
+
+# Compose an unlink entry. Same shape as link with op="unlink".
+fn audit_format_unlink(out, cap, pkg, pkg_version, manifest_hash,
+                       source, target, abs_source, abs_target): i64 {
+    return _audit_format_link_op(out, cap, "unlink",
+        pkg, pkg_version, manifest_hash,
+        source, target, abs_source, abs_target);
+}
+
+# Compose a rollback-marker entry. Minimal fields — just `ts`
+# and `op`. Used to delimit rollback windows (ADR 0002).
+fn audit_format_rollback_marker(out, cap): i64 {
+    var pos = 0;
+    var ts = iso8601_now();
+    store8(out + pos, 123); pos = pos + 1;
+    _audit_emit_field(out, &pos, "ts", ts);
+    _audit_emit_comma(out, &pos);
+    _audit_emit_field(out, &pos, "op", "rollback-marker");
+    store8(out + pos, 125); pos = pos + 1;
+    store8(out + pos, 10); pos = pos + 1;
+    return pos;
+}
+
+# Append a formatted entry to the audit trail. Shared core
+# used by the link / unlink / rollback-marker callers.
+fn _audit_append_bytes(buf, n): Result {
     var mkrc = audit_ensure_dir();
     if (mkrc < 0) { return Err(HapiAuditMkdirFailed); }
-
-    var buf = alloc(4096);
-    var n = audit_format_link(buf, 4096, pkg, pkg_version, manifest_hash,
-                              source, target, abs_source, abs_target);
-
     var path = audit_trail_path();
     var wrc = file_append_locked(path, buf, n);
     if (wrc < 0) { return Err(HapiAuditWriteFailed); }
     if (wrc != n) { return Err(HapiAuditWriteFailed); }
     return Ok(n);
+}
+
+fn audit_append_link_r(pkg, pkg_version, manifest_hash,
+                       source, target, abs_source, abs_target): Result {
+    var buf = alloc(4096);
+    var n = audit_format_link(buf, 4096, pkg, pkg_version, manifest_hash,
+                              source, target, abs_source, abs_target);
+    return _audit_append_bytes(buf, n);
+}
+
+fn audit_append_unlink_r(pkg, pkg_version, manifest_hash,
+                         source, target, abs_source, abs_target): Result {
+    var buf = alloc(4096);
+    var n = audit_format_unlink(buf, 4096, pkg, pkg_version, manifest_hash,
+                                source, target, abs_source, abs_target);
+    return _audit_append_bytes(buf, n);
+}
+
+fn audit_append_rollback_marker_r(): Result {
+    var buf = alloc(4096);
+    var n = audit_format_rollback_marker(buf, 4096);
+    return _audit_append_bytes(buf, n);
 }
 
 # Compute the manifest hash. Reads the file from disk and
