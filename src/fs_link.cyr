@@ -1,0 +1,302 @@
+# fs_link.cyr — symlink primitives and path resolution.
+#
+# All path strings here are heap-allocated null-terminated
+# cstrings (so they can hand straight to syscalls without a
+# str_data() detour). Str values from manifest fields get
+# converted to cstrings at the boundary via _fsl_str_to_cstr.
+#
+# Implements the symlink-shape decision from ADR 0003 — links
+# carry a *relative* target computed at link time as the path
+# from the link's parent directory to the absolute source.
+
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+
+enum HapiLinkProbe {
+    HAPI_LP_ABSENT = 0;
+    HAPI_LP_SYMLINK = 1;
+    HAPI_LP_FILE = 2;
+    HAPI_LP_DIRECTORY = 3;
+    HAPI_LP_ERROR = 4;
+}
+
+# Probe result: 16 bytes.
+#   +0  kind (HAPI_LP_*)
+#   +8  symlink target cstring (heap-allocated, null-terminated)
+#       — only meaningful when kind == HAPI_LP_SYMLINK; 0 otherwise.
+fn _fsl_probe_new(kind, target_cstr): i64 {
+    var p = alloc(16);
+    store64(p, kind);
+    store64(p + 8, target_cstr);
+    return p;
+}
+fn link_probe_kind(p): i64 { return load64(p); }
+fn link_probe_target(p): i64 { return load64(p + 8); }
+
+# Probe `path` (cstring) and classify what's there. readlink(2)
+# is the cheap discriminator — its EINVAL is exactly the "exists
+# but not a symlink" signal. We follow up with a directory probe
+# (open + getdents) to split FILE vs DIRECTORY, because --force
+# treats those differently.
+fn link_probe(path): i64 {
+    var buf = alloc(4096);
+    var n = sys_readlink(path, buf, 4096);
+    if (n > 0) {
+        var t = alloc(n + 1);
+        memcpy(t, buf, n);
+        store8(t + n, 0);
+        return _fsl_probe_new(HAPI_LP_SYMLINK, t);
+    }
+    var err = 0 - n;
+    if (err == 2) { return _fsl_probe_new(HAPI_LP_ABSENT, 0); }
+    if (err == 22) {
+        # Path exists, not a symlink. Distinguish file vs directory
+        # via the same trick is_dir uses: open + getdents. ENOTDIR
+        # (errno 20) on getdents = regular file.
+        var fd = syscall(2, path, 0, 0);   # sys_open(path, O_RDONLY, 0)
+        if (fd < 0) { return _fsl_probe_new(HAPI_LP_FILE, 0); }
+        var dbuf = alloc(32);
+        var gd = syscall(SYS_GETDENTS64, fd, dbuf, 32);
+        syscall(3, fd);                    # sys_close
+        if (gd >= 0) { return _fsl_probe_new(HAPI_LP_DIRECTORY, 0); }
+        return _fsl_probe_new(HAPI_LP_FILE, 0);
+    }
+    return _fsl_probe_new(HAPI_LP_ERROR, 0);
+}
+
+# Heap-copy a Str's bytes into a null-terminated cstring.
+fn _fsl_str_to_cstr(s: Str): i64 {
+    var len = str_len(s);
+    var out = alloc(len + 1);
+    memcpy(out, str_data(s), len);
+    store8(out + len, 0);
+    return out;
+}
+
+# Heap-copy a cstring (clone).
+fn _fsl_cstr_dup(c): i64 {
+    var n = strlen(c);
+    var out = alloc(n + 1);
+    memcpy(out, c, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Join `dir` and `name` with a '/' separator (skipping the
+# separator when dir already ends in one). Both inputs are
+# cstrings; output is a fresh heap cstring.
+fn _fsl_path_join(dir, name): i64 {
+    var dl = strlen(dir);
+    var nl = strlen(name);
+    var sep = 1;
+    if (dl > 0 && load8(dir + dl - 1) == 47) { sep = 0; }
+    var out = alloc(dl + sep + nl + 1);
+    memcpy(out, dir, dl);
+    if (sep == 1) { store8(out + dl, 47); }
+    memcpy(out + dl + sep, name, nl);
+    store8(out + dl + sep + nl, 0);
+    return out;
+}
+
+# Get the dirname (everything before the last '/') as a cstring.
+# Returns "." when there's no '/' in the input.
+fn _fsl_path_dirname(path): i64 {
+    var n = strlen(path);
+    var last = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(path + i) == 47) { last = i; }
+        i = i + 1;
+    }
+    if (last < 0) { return _fsl_cstr_dup("."); }
+    if (last == 0) { return _fsl_cstr_dup("/"); }
+    var out = alloc(last + 1);
+    memcpy(out, path, last);
+    store8(out + last, 0);
+    return out;
+}
+
+# Get the process's current working directory as a cstring.
+# Used as the base for resolving the package-dir argument
+# when the user passes a relative path.
+fn _fsl_getcwd(): i64 {
+    var buf = alloc(4096);
+    var n = syscall(SYS_GETCWD, buf, 4096);
+    if (n < 0) {
+        var fb = alloc(2);
+        store8(fb, 46); store8(fb + 1, 0);
+        return fb;
+    }
+    # On Linux, getcwd writes a null-terminated path; the return
+    # value is the length including the trailing null. The buf is
+    # already what we want — just clone it tight.
+    var len = strlen(buf);
+    var out = alloc(len + 1);
+    memcpy(out, buf, len);
+    store8(out + len, 0);
+    return out;
+}
+
+# Resolve `path` (cstring) to an absolute cstring. If already
+# absolute (starts with '/'), returns a clone. Otherwise prefixes
+# the cwd with '/' as separator.
+fn fsl_to_absolute(path): i64 {
+    var n = strlen(path);
+    if (n > 0 && load8(path) == 47) { return _fsl_cstr_dup(path); }
+    var cwd = _fsl_getcwd();
+    return _fsl_path_join(cwd, path);
+}
+
+# Split a cstring path on '/' into a vec of Str slices that
+# borrow into the input. Empty components (from leading '/' or
+# '//') are dropped. Used by fsl_compute_relative.
+fn _fsl_split_path(path): i64 {
+    var v = vec_new();
+    var n = strlen(path);
+    var start = 0;
+    var i = 0;
+    while (i <= n) {
+        var c = 47;
+        if (i < n) { c = load8(path + i); }
+        if (c == 47 || i == n) {
+            if (i > start) {
+                vec_push(v, str_new(path + start, i - start));
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+# Compare two Str values for byte-equality.
+fn _fsl_str_byteeq(a: Str, b: Str): i64 {
+    var an = str_len(a);
+    var bn = str_len(b);
+    if (an != bn) { return 0; }
+    var ap = str_data(a);
+    var bp = str_data(b);
+    var i = 0;
+    while (i < an) {
+        if (load8(ap + i) != load8(bp + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Compute the relative path from `from_dir` (the link's parent
+# directory, absolute) to `to_file` (the source file, absolute).
+# Result is a fresh cstring with `..` segments for the
+# from_dir components not shared by to_file.
+#
+# Both inputs MUST be absolute paths (start with '/'). Caller
+# resolves via fsl_to_absolute.
+fn fsl_compute_relative(from_dir, to_file): i64 {
+    var from_parts = _fsl_split_path(from_dir);
+    var to_parts   = _fsl_split_path(to_file);
+
+    var fn_ = vec_len(from_parts);
+    var tn = vec_len(to_parts);
+    var lim = fn_;
+    if (tn < lim) { lim = tn; }
+    var common = 0;
+    var go = 1;
+    while (common < lim && go == 1) {
+        var fp = vec_get(from_parts, common);
+        var tp = vec_get(to_parts, common);
+        if (_fsl_str_byteeq(fp, tp) == 0) { go = 0; }
+        else { common = common + 1; }
+    }
+
+    # Output: `..` for each from_dir component past `common`,
+    # then each to_file component past `common`.
+    var ups = fn_ - common;
+    # Worst-case length: ups * 3 (`../`) + sum of remaining-to-parts lengths + slashes
+    var cap = ups * 3 + 1;
+    var k = common;
+    while (k < tn) {
+        cap = cap + str_len(vec_get(to_parts, k)) + 1;
+        k = k + 1;
+    }
+    if (cap < 4) { cap = 4; }
+    var out = alloc(cap);
+    var pos = 0;
+    var u = 0;
+    while (u < ups) {
+        store8(out + pos, 46); store8(out + pos + 1, 46); store8(out + pos + 2, 47);
+        pos = pos + 3;
+        u = u + 1;
+    }
+    k = common;
+    var first_tail = 1;
+    while (k < tn) {
+        if (first_tail == 0) { store8(out + pos, 47); pos = pos + 1; }
+        var t = vec_get(to_parts, k);
+        var tlen = str_len(t);
+        memcpy(out + pos, str_data(t), tlen);
+        pos = pos + tlen;
+        first_tail = 0;
+        k = k + 1;
+    }
+    # Strip a trailing slash if we wrote only `..` segments.
+    if (pos > 0 && load8(out + pos - 1) == 47) { pos = pos - 1; }
+    if (pos == 0) {
+        # Same dir, same file. Shouldn't happen for our usage
+        # but emit "." rather than the empty string.
+        store8(out, 46);
+        pos = 1;
+    }
+    store8(out + pos, 0);
+    return out;
+}
+
+# mkdir -p `path`'s parent. Treats EEXIST as success. Mode 0700.
+# Returns 0 on success, negative on first non-EEXIST failure.
+fn fsl_mkdir_parents(file_path): i64 {
+    var n = strlen(file_path);
+    var last_slash = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(file_path + i) == 47) { last_slash = i; }
+        i = i + 1;
+    }
+    if (last_slash <= 0) { return 0; }
+
+    var tmp = alloc(n + 1);
+    memcpy(tmp, file_path, n);
+    store8(tmp + n, 0);
+
+    var j = 1;
+    while (j <= last_slash) {
+        if (load8(tmp + j) == 47) {
+            store8(tmp + j, 0);
+            var rc = sys_mkdir(tmp, 0x1C0);
+            if (rc < 0) {
+                var err = 0 - rc;
+                if (err != 17) { return rc; }
+            }
+            store8(tmp + j, 47);
+        }
+        j = j + 1;
+    }
+    store8(tmp + last_slash, 0);
+    var rc = sys_mkdir(tmp, 0x1C0);
+    if (rc < 0) {
+        var err = 0 - rc;
+        if (err != 17) { return rc; }
+    }
+    return 0;
+}
+
+# Create a symlink at `linkpath` pointing at `target`. Creates
+# the parent directory of `linkpath` on demand. Returns the
+# raw kernel return code (0 on success, -errno on failure).
+fn link_create(target, linkpath): i64 {
+    var mkrc = fsl_mkdir_parents(linkpath);
+    if (mkrc < 0) { return mkrc; }
+    return sys_symlink(target, linkpath);
+}

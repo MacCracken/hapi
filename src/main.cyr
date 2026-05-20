@@ -14,13 +14,14 @@
 # verb is implicitly $HOME-scoped (no `--root` yet).
 
 include "src/cmd/inspect.cyr"
+include "src/cmd/link.cyr"
 include "lib/args.cyr"
 
 # VERSION literal kept in sync with the VERSION file at the
 # project root. CLAUDE.md's work loop calls out "version sync"
 # explicitly — bump this string in the same commit as VERSION.
 fn hapi_print_version(): i64 {
-    println("hapi 0.2.0");
+    println("hapi 0.3.0");
     return 0;
 }
 
@@ -28,11 +29,12 @@ fn hapi_print_usage(): i64 {
     println("usage: hapi <command> [args...]");
     println("");
     println("commands:");
-    println("  inspect <path>     parse and display a package manifest");
+    println("  inspect <path>            parse and display a package manifest");
+    println("  link <path> [--force]     create symlinks for the package");
     println("");
     println("options:");
-    println("  --version, -v      print version and exit");
-    println("  --help, -h         print this message and exit");
+    println("  --version, -v             print version and exit");
+    println("  --help, -h                print this message and exit");
     return 0;
 }
 
@@ -66,6 +68,19 @@ fn main(): i64 {
         var path = 0;
         if (n >= 3) { path = argv(2); }
         return cmd_inspect(path);
+    }
+
+    if (_hapi_argeq(verb, "link") == 1) {
+        var path = 0;
+        var force = 0;
+        var ai = 2;
+        while (ai < n) {
+            var a = argv(ai);
+            if (_hapi_argeq(a, "--force") == 1) { force = 1; }
+            elif (path == 0) { path = a; }
+            ai = ai + 1;
+        }
+        return cmd_link(path, force);
     }
 
     eprint("hapi: unknown command: ", 23);

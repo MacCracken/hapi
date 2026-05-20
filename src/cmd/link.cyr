@@ -1,0 +1,317 @@
+# cmd/link.cyr — `hapi link <package> [--force]`
+#
+# Pre-flight every link target via link_probe, classify each as
+# CREATE / NOOP / CONFLICT_*, refuse the run if any conflict
+# exists (unless --force is on). Then execute the CREATE actions,
+# appending one audit-trail entry per actual link write.
+#
+# Idempotency rule per the M2 acceptance test: a re-run with no
+# state change produces zero CREATE actions, zero audit writes,
+# and exit code 0.
+#
+# --force semantics:
+#   - Replaces a SYMLINK pointing elsewhere
+#   - Replaces a regular FILE (destructive, user-explicit)
+#   - REFUSES a DIRECTORY even with --force (data-holding;
+#     killing one needs more deliberate confirmation than a flag)
+#
+# Exit codes:
+#   0  links applied (or already up-to-date)
+#   1  manifest parse failure, conflict without --force, IO error,
+#      audit-trail write failure
+#   2  bad usage
+
+include "src/manifest.cyr"
+include "src/audit.cyr"
+include "src/fs_link.cyr"
+
+enum HapiLinkAction {
+    LINK_ACT_CREATE = 0;
+    LINK_ACT_NOOP = 1;
+    LINK_ACT_CONFLICT_SYMLINK = 2;
+    LINK_ACT_CONFLICT_FILE = 3;
+    LINK_ACT_CONFLICT_DIR = 4;
+    LINK_ACT_ERROR = 5;
+}
+
+# Test/CI override for the scope root. When set, takes
+# precedence over getenv("HOME"). Reset to 0 to restore the
+# default. Capability-bounded `--root` (M6) will route through
+# the same hook.
+var _hlnk_scope_root_override = 0;
+
+fn link_set_scope_root(root_cstr): i64 {
+    _hlnk_scope_root_override = root_cstr;
+    return 0;
+}
+
+# Plan item — 48 bytes.
+#   +0   link             (HapiLink ptr from the manifest)
+#   +8   abs_source       (cstring)
+#   +16  abs_target       (cstring)
+#   +24  relative_target  (cstring — what we'd write into the symlink)
+#   +32  action           (HapiLinkAction)
+#   +40  existing_target  (cstring — only set when action == CONFLICT_SYMLINK)
+fn _hlnk_plan_new(): i64 {
+    var p = alloc(48);
+    store64(p, 0);
+    store64(p + 8, 0);
+    store64(p + 16, 0);
+    store64(p + 24, 0);
+    store64(p + 32, 0);
+    store64(p + 40, 0);
+    return p;
+}
+
+fn _hlnk_cstr_eq(a, b): i64 {
+    if (a == 0 || b == 0) { return 0; }
+    var an = strlen(a);
+    var bn = strlen(b);
+    if (an != bn) { return 0; }
+    return memeq(a, b, an);
+}
+
+# Resolve the user's `<package>` argument to an absolute path
+# to the manifest file. Mirrors the inspect-command resolver:
+# if it ends in .cyml use as-is, else append /hapi.cyml.
+fn _hlnk_resolve_manifest(arg): i64 {
+    var n = strlen(arg);
+    if (n >= 5) {
+        if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
+            && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
+            && load8(arg + n - 1) == 108) {
+            return fsl_to_absolute(arg);
+        }
+    }
+    var abs_arg = fsl_to_absolute(arg);
+    return _fsl_path_join(abs_arg, "hapi.cyml");
+}
+
+# Build one plan item from one HapiLink + the resolved
+# absolute package dir + absolute scope root.
+fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
+    var plan = _hlnk_plan_new();
+    store64(plan, lnk);
+
+    var src_cstr = _fsl_str_to_cstr(hapi_link_source(lnk));
+    var tgt_cstr = _fsl_str_to_cstr(hapi_link_target(lnk));
+    var abs_src = _fsl_path_join(pkg_dir_abs, src_cstr);
+    var abs_tgt = _fsl_path_join(scope_root_abs, tgt_cstr);
+    var tgt_parent = _fsl_path_dirname(abs_tgt);
+    var rel = fsl_compute_relative(tgt_parent, abs_src);
+
+    store64(plan + 8, abs_src);
+    store64(plan + 16, abs_tgt);
+    store64(plan + 24, rel);
+
+    var probe = link_probe(abs_tgt);
+    var kind = link_probe_kind(probe);
+    if (kind == HAPI_LP_ABSENT) {
+        store64(plan + 32, LINK_ACT_CREATE);
+    } elif (kind == HAPI_LP_SYMLINK) {
+        var existing = link_probe_target(probe);
+        store64(plan + 40, existing);
+        if (_hlnk_cstr_eq(existing, rel) == 1) {
+            store64(plan + 32, LINK_ACT_NOOP);
+        } else {
+            store64(plan + 32, LINK_ACT_CONFLICT_SYMLINK);
+        }
+    } elif (kind == HAPI_LP_FILE) {
+        store64(plan + 32, LINK_ACT_CONFLICT_FILE);
+    } elif (kind == HAPI_LP_DIRECTORY) {
+        store64(plan + 32, LINK_ACT_CONFLICT_DIR);
+    } else {
+        store64(plan + 32, LINK_ACT_ERROR);
+    }
+    return plan;
+}
+
+# Render a one-line conflict description to stderr.
+fn _hlnk_print_conflict(plan): i64 {
+    var abs_tgt = load64(plan + 16);
+    var rel = load64(plan + 24);
+    var action = load64(plan + 32);
+    eprint("  ", 2);
+    eprint(abs_tgt, strlen(abs_tgt));
+    eprint("  ", 2);
+    if (action == LINK_ACT_CONFLICT_SYMLINK) {
+        var existing = load64(plan + 40);
+        eprint("(symlink -> ", 12);
+        if (existing != 0) { eprint(existing, strlen(existing)); }
+        eprint("; expected -> ", 14);
+        eprint(rel, strlen(rel));
+        eprint(")", 1);
+    } elif (action == LINK_ACT_CONFLICT_FILE) {
+        eprint("(existing regular file)", 23);
+    } elif (action == LINK_ACT_CONFLICT_DIR) {
+        eprint("(existing directory)", 20);
+    } else {
+        eprint("(probe error)", 13);
+    }
+    eprint("\n", 1);
+    return 0;
+}
+
+fn cmd_link(pkg_arg, force): i64 {
+    if (pkg_arg == 0) {
+        eprint("usage: hapi link <package-dir|hapi.cyml> [--force]\n", 52);
+        return 2;
+    }
+
+    var manifest_path = _hlnk_resolve_manifest(pkg_arg);
+    var pkg_dir_abs = _fsl_path_dirname(manifest_path);
+
+    var mr = hapi_mf_parse_file_r(manifest_path);
+    if (is_err_result(mr) == 1) {
+        var code = load64(mr + 8);
+        var msg = hapi_mf_err_msg(code);
+        eprint("hapi: ", 6);
+        eprint(msg, strlen(msg));
+        eprint(" (", 2);
+        eprint(manifest_path, strlen(manifest_path));
+        eprint(")\n", 2);
+        return 1;
+    }
+    var m = load64(mr + 8);
+
+    var manifest_hash = audit_manifest_hash(manifest_path);
+    if (manifest_hash == 0) {
+        eprint("hapi: could not hash manifest at ", 33);
+        eprint(manifest_path, strlen(manifest_path));
+        eprint("\n", 1);
+        return 1;
+    }
+
+    var scope_root = _hlnk_scope_root_override;
+    if (scope_root == 0) { scope_root = getenv("HOME"); }
+    if (scope_root == 0 || strlen(scope_root) == 0) {
+        eprint("hapi: $HOME is unset; cannot resolve link targets\n", 50);
+        return 1;
+    }
+    var scope_root_abs = fsl_to_absolute(scope_root);
+
+    var links = hapi_mf_links(m);
+    var nlinks = vec_len(links);
+    var plans = vec_new();
+    var conflict_count = 0;
+    var noop_count = 0;
+    var create_count = 0;
+
+    var i = 0;
+    while (i < nlinks) {
+        var p = _hlnk_plan_one(vec_get(links, i), pkg_dir_abs, scope_root_abs);
+        vec_push(plans, p);
+        var act = load64(p + 32);
+        if (act == LINK_ACT_CREATE) { create_count = create_count + 1; }
+        elif (act == LINK_ACT_NOOP) { noop_count = noop_count + 1; }
+        elif (act == LINK_ACT_ERROR) { conflict_count = conflict_count + 1; }
+        else { conflict_count = conflict_count + 1; }
+        i = i + 1;
+    }
+
+    # If any conflicts and --force isn't on, refuse and list them.
+    if (conflict_count > 0 && force == 0) {
+        eprint("hapi: refusing to link `", 24);
+        var pkg_name = hapi_mf_name(m);
+        eprint(str_data(pkg_name), str_len(pkg_name));
+        eprint("` — ", 6);
+        fmt_int_fd(2, conflict_count);
+        eprint(" conflict", 9);
+        if (conflict_count > 1) { eprint("s", 1); }
+        eprint(" (rerun with --force to override):\n", 35);
+        var k = 0;
+        while (k < nlinks) {
+            var pl = vec_get(plans, k);
+            var ak = load64(pl + 32);
+            if (ak != LINK_ACT_CREATE && ak != LINK_ACT_NOOP) {
+                _hlnk_print_conflict(pl);
+            }
+            k = k + 1;
+        }
+        return 1;
+    }
+
+    # Refuse to --force over a directory regardless of the flag.
+    # Directories hold user data; the right escape hatch for that
+    # is `rm -rf` with the user's eyes on the screen.
+    var dir_blocked = 0;
+    var k2 = 0;
+    while (k2 < nlinks) {
+        var pl = vec_get(plans, k2);
+        if (load64(pl + 32) == LINK_ACT_CONFLICT_DIR) {
+            if (dir_blocked == 0) {
+                eprint("hapi: --force does not override existing directories:\n", 55);
+            }
+            _hlnk_print_conflict(pl);
+            dir_blocked = 1;
+        }
+        k2 = k2 + 1;
+    }
+    if (dir_blocked == 1) { return 1; }
+
+    var pkg_name_cstr = _fsl_str_to_cstr(hapi_mf_name(m));
+    var pkg_ver_cstr = _fsl_str_to_cstr(hapi_mf_version(m));
+    var written = 0;
+
+    var j = 0;
+    while (j < nlinks) {
+        var pl = vec_get(plans, j);
+        var act = load64(pl + 32);
+        var abs_tgt = load64(pl + 16);
+        var abs_src = load64(pl + 8);
+        var rel = load64(pl + 24);
+
+        var should_create = 0;
+        if (act == LINK_ACT_CREATE) { should_create = 1; }
+        if (force == 1 && (act == LINK_ACT_CONFLICT_SYMLINK || act == LINK_ACT_CONFLICT_FILE)) {
+            var urc = sys_unlink(abs_tgt);
+            if (urc < 0) {
+                eprint("hapi: could not remove existing ", 32);
+                eprint(abs_tgt, strlen(abs_tgt));
+                eprint(" (--force)\n", 11);
+                return 1;
+            }
+            should_create = 1;
+        }
+
+        if (should_create == 1) {
+            var crc = link_create(rel, abs_tgt);
+            if (crc < 0) {
+                eprint("hapi: symlink failed at ", 24);
+                eprint(abs_tgt, strlen(abs_tgt));
+                eprint("\n", 1);
+                return 1;
+            }
+            var lnk = load64(pl);
+            var src_cstr = _fsl_str_to_cstr(hapi_link_source(lnk));
+            var tgt_cstr = _fsl_str_to_cstr(hapi_link_target(lnk));
+            var ar = audit_append_link_r(pkg_name_cstr, pkg_ver_cstr,
+                                         manifest_hash,
+                                         src_cstr, tgt_cstr,
+                                         abs_src, abs_tgt);
+            if (is_err_result(ar) == 1) {
+                eprint("hapi: audit-trail write failed for ", 35);
+                eprint(abs_tgt, strlen(abs_tgt));
+                eprint("\n", 1);
+                return 1;
+            }
+            written = written + 1;
+            print("  + ", 4);
+            print(abs_tgt, strlen(abs_tgt));
+            print(" -> ", 4);
+            print(rel, strlen(rel));
+            print("\n", 1);
+        }
+        j = j + 1;
+    }
+
+    # Summary line — matches the inspect command's terse output style.
+    print("linked ", 7);
+    fmt_int(written);
+    print(" / ", 3);
+    fmt_int(nlinks);
+    print(" (", 2);
+    fmt_int(noop_count);
+    print(" already up-to-date)\n", 21);
+    return 0;
+}

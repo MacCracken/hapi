@@ -2,6 +2,9 @@
 # Stdlib auto-included via cyrius.cyml
 
 include "src/manifest.cyr"
+include "src/audit.cyr"
+include "src/fs_link.cyr"
+include "src/cmd/link.cyr"
 
 # Convenience: parse a literal manifest string and assert it
 # returned Err(<expected>). `expected` is one of the HapiMf*
@@ -158,6 +161,266 @@ fn test_missing_file() {
     return 0;
 }
 
+# ============================================================
+# M2 — link, audit, fs_link tests
+# ============================================================
+
+# Build a unique scratch directory under /tmp seeded by PID +
+# a counter so successive tests don't trip over each other.
+var _test_scratch_counter = 0;
+fn _test_scratch_dir(): i64 {
+    _test_scratch_counter = _test_scratch_counter + 1;
+    var pid = syscall(SYS_GETPID);
+    var buf[128];
+    var prefix = "/tmp/hapi-test-";
+    var plen = 15;
+    memcpy(&buf, prefix, plen);
+    var p = plen;
+    p = p + fmt_int_buf(pid, &buf + p);
+    store8(&buf + p, 45); p = p + 1;
+    p = p + fmt_int_buf(_test_scratch_counter, &buf + p);
+    store8(&buf + p, 0);
+    var out = alloc(p + 1);
+    memcpy(out, &buf, p + 1);
+    sys_mkdir(out, 0x1C0);
+    return out;
+}
+
+fn _test_file_size(path): i64 {
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return 0; }
+    var size = syscall(8, fd, 0, 2);   # lseek(fd, 0, SEEK_END)
+    file_close(fd);
+    return size;
+}
+
+fn _test_write_file(path, content): i64 {
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) { return fd; }
+    var n = file_write(fd, content, strlen(content));
+    file_close(fd);
+    return n;
+}
+
+# ------------------------------------------------------------
+# fsl_compute_relative — pure-function table
+# ------------------------------------------------------------
+
+fn test_compute_relative() {
+    test_group("fs_link: relative path computation");
+
+    var r1 = fsl_compute_relative("/home/user", "/home/user/dotfiles/x");
+    assert_eq(memeq(r1, "dotfiles/x", 10), 1, "from peer dir, descend in");
+    assert_eq(strlen(r1), 10, "no trailing slash");
+
+    var r2 = fsl_compute_relative("/home/user/.config", "/home/user/dotfiles/x");
+    assert_eq(memeq(r2, "../dotfiles/x", 13), 1, "one up + descend");
+
+    var r3 = fsl_compute_relative("/home/user/a/b/c", "/home/user/x");
+    assert_eq(memeq(r3, "../../../x", 10), 1, "three ups + descend");
+
+    var r4 = fsl_compute_relative("/tmp/a", "/home/user/dotfiles/x");
+    assert_eq(memeq(r4, "../../home/user/dotfiles/x", 26), 1, "diverge at root");
+    assert_eq(strlen(r4), 26, "diverge at root: no trailing slash");
+    return 0;
+}
+
+# ------------------------------------------------------------
+# audit format — JSON line shape per ADR 0002
+# ------------------------------------------------------------
+
+fn test_audit_format_link() {
+    test_group("audit: link entry format");
+
+    var buf = alloc(4096);
+    var n = audit_format_link(buf, 4096,
+        "pkg", "1.0.0", "sha1:deadbeef",
+        "src", ".tgt",
+        "/abs/src", "/abs/tgt");
+    assert(n > 0, "format wrote bytes");
+    assert_eq(load8(buf), 123, "starts with {");
+    assert_eq(load8(buf + n - 1), 10, "ends with newline");
+    assert_eq(load8(buf + n - 2), 125, "closes with }");
+
+    # Spot-check that each expected key is present.
+    assert(_test_substr(buf, n, "\"op\":\"link\"") >= 0, "op:link present");
+    assert(_test_substr(buf, n, "\"pkg\":\"pkg\"") >= 0, "pkg present");
+    assert(_test_substr(buf, n, "\"manifest_hash\":\"sha1:deadbeef\"") >= 0, "manifest_hash present");
+    assert(_test_substr(buf, n, "\"abs_target\":\"/abs/tgt\"") >= 0, "abs_target present");
+    return 0;
+}
+
+# Find `needle` in `haystack[0..hlen]`. Returns starting index or -1.
+fn _test_substr(haystack, hlen, needle): i64 {
+    var nlen = strlen(needle);
+    if (nlen > hlen) { return 0 - 1; }
+    var i = 0;
+    while (i <= hlen - nlen) {
+        if (memeq(haystack + i, needle, nlen) == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn test_audit_escapes_quotes() {
+    test_group("audit: JSON escaping");
+    var buf = alloc(4096);
+    var n = audit_format_link(buf, 4096,
+        "pkg", "1.0", "h",
+        "src", "evil\"target",          # embedded quote
+        "/a/s", "/has\\back");          # embedded backslash
+    assert(_test_substr(buf, n, "\\\"target") >= 0, "quote escaped");
+    assert(_test_substr(buf, n, "\\\\back") >= 0, "backslash escaped");
+    return 0;
+}
+
+# ------------------------------------------------------------
+# link_probe classification
+# ------------------------------------------------------------
+
+fn test_link_probe() {
+    test_group("fs_link: link_probe classification");
+
+    var dir = _test_scratch_dir();
+    var dlen = strlen(dir);
+
+    # Absent
+    var ap = alloc(dlen + 16);
+    memcpy(ap, dir, dlen);
+    memcpy(ap + dlen, "/absent\x00", 8);
+    var absent = link_probe(ap);
+    assert_eq(link_probe_kind(absent), HAPI_LP_ABSENT, "absent");
+
+    # Regular file
+    var fp = alloc(dlen + 16);
+    memcpy(fp, dir, dlen);
+    memcpy(fp + dlen, "/file\x00", 6);
+    _test_write_file(fp, "hi");
+    var freg = link_probe(fp);
+    assert_eq(link_probe_kind(freg), HAPI_LP_FILE, "regular file");
+
+    # Directory
+    var dp = alloc(dlen + 16);
+    memcpy(dp, dir, dlen);
+    memcpy(dp + dlen, "/subdir\x00", 8);
+    sys_mkdir(dp, 0x1C0);
+    var fdir = link_probe(dp);
+    assert_eq(link_probe_kind(fdir), HAPI_LP_DIRECTORY, "directory");
+
+    # Symlink
+    var sp = alloc(dlen + 16);
+    memcpy(sp, dir, dlen);
+    memcpy(sp + dlen, "/symlink\x00", 9);
+    sys_symlink("target/x", sp);
+    var fsym = link_probe(sp);
+    assert_eq(link_probe_kind(fsym), HAPI_LP_SYMLINK, "symlink");
+    assert_eq(memeq(link_probe_target(fsym), "target/x", 8), 1, "symlink target captured");
+
+    return 0;
+}
+
+# ------------------------------------------------------------
+# cmd_link end-to-end against an overridden scope + audit trail
+# ------------------------------------------------------------
+
+fn test_cmd_link_happy_path() {
+    test_group("link: happy path + M2 acceptance (re-run is no-op)");
+
+    var scope = _test_scratch_dir();
+    var audit_path = alloc(strlen(scope) + 32);
+    memcpy(audit_path, scope, strlen(scope));
+    memcpy(audit_path + strlen(scope), "/audit.jsonl\x00", 13);
+
+    link_set_scope_root(scope);
+    audit_set_trail_path(audit_path);
+
+    var rc1 = cmd_link("docs/examples/dotfiles-zsh", 0);
+    assert_eq(rc1, 0, "first link succeeds");
+
+    var size1 = _test_file_size(audit_path);
+    assert(size1 > 0, "audit trail written");
+
+    # The three expected symlinks all exist
+    var z1 = alloc(strlen(scope) + 16);
+    memcpy(z1, scope, strlen(scope));
+    memcpy(z1 + strlen(scope), "/.zshrc\x00", 8);
+    assert_eq(link_probe_kind(link_probe(z1)), HAPI_LP_SYMLINK, ".zshrc is a symlink");
+
+    # Re-run: idempotent, no new audit lines (M2 acceptance)
+    var rc2 = cmd_link("docs/examples/dotfiles-zsh", 0);
+    assert_eq(rc2, 0, "re-run succeeds");
+    var size2 = _test_file_size(audit_path);
+    assert_eq(size2, size1, "audit trail did not grow on re-run");
+
+    link_set_scope_root(0);
+    audit_set_trail_path(0);
+    return 0;
+}
+
+fn test_cmd_link_conflict_refuses() {
+    test_group("link: refuses on conflict without --force");
+
+    var scope = _test_scratch_dir();
+    var audit_path = alloc(strlen(scope) + 32);
+    memcpy(audit_path, scope, strlen(scope));
+    memcpy(audit_path + strlen(scope), "/audit.jsonl\x00", 13);
+    link_set_scope_root(scope);
+    audit_set_trail_path(audit_path);
+
+    # Plant an existing regular file at the .zshrc target.
+    var conflict = alloc(strlen(scope) + 16);
+    memcpy(conflict, scope, strlen(scope));
+    memcpy(conflict + strlen(scope), "/.zshrc\x00", 8);
+    _test_write_file(conflict, "user content");
+
+    var rc = cmd_link("docs/examples/dotfiles-zsh", 0);
+    assert_eq(rc, 1, "conflict without --force exits 1");
+
+    # No audit writes occurred (file should not exist yet).
+    assert_eq(_test_file_size(audit_path), 0, "no audit growth on refusal");
+
+    # Original conflict file is intact (we refused, didn't touch).
+    assert_eq(link_probe_kind(link_probe(conflict)), HAPI_LP_FILE, "conflict file untouched");
+
+    # --force replaces it
+    var rc_f = cmd_link("docs/examples/dotfiles-zsh", 1);
+    assert_eq(rc_f, 0, "--force succeeds");
+    assert_eq(link_probe_kind(link_probe(conflict)), HAPI_LP_SYMLINK, "--force replaced file with symlink");
+
+    link_set_scope_root(0);
+    audit_set_trail_path(0);
+    return 0;
+}
+
+fn test_cmd_link_force_refuses_directory() {
+    test_group("link: --force refuses to overwrite a directory");
+
+    var scope = _test_scratch_dir();
+    var audit_path = alloc(strlen(scope) + 32);
+    memcpy(audit_path, scope, strlen(scope));
+    memcpy(audit_path + strlen(scope), "/audit.jsonl\x00", 13);
+    link_set_scope_root(scope);
+    audit_set_trail_path(audit_path);
+
+    # Plant a directory at the .config/zsh target.
+    var cfg = alloc(strlen(scope) + 16);
+    memcpy(cfg, scope, strlen(scope));
+    memcpy(cfg + strlen(scope), "/.config\x00", 9);
+    sys_mkdir(cfg, 0x1C0);
+    var zshdir = alloc(strlen(scope) + 24);
+    memcpy(zshdir, scope, strlen(scope));
+    memcpy(zshdir + strlen(scope), "/.config/zsh\x00", 13);
+    sys_mkdir(zshdir, 0x1C0);
+
+    var rc = cmd_link("docs/examples/dotfiles-zsh", 1);
+    assert_eq(rc, 1, "--force still refuses a directory");
+    assert_eq(link_probe_kind(link_probe(zshdir)), HAPI_LP_DIRECTORY, "directory untouched");
+
+    link_set_scope_root(0);
+    audit_set_trail_path(0);
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -167,6 +430,13 @@ fn main() {
     test_comments_and_blanks();
     test_parse_example_from_disk();
     test_missing_file();
+    test_compute_relative();
+    test_audit_format_link();
+    test_audit_escapes_quotes();
+    test_link_probe();
+    test_cmd_link_happy_path();
+    test_cmd_link_conflict_refuses();
+    test_cmd_link_force_refuses_directory();
     return assert_summary();
 }
 

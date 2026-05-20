@@ -4,6 +4,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0]
+
+### Added
+- ADR 0002: audit-trail format. JSONL at
+  `$XDG_STATE_HOME/hapi/audit.jsonl`, append-only, one JSON
+  object per line, fields ordered for canonical serialization.
+  Format is **Breaking** for hash semantics (canonicalization
+  switch reserved as `sha1:` → `sha1c:` for v1.0); everything
+  else is additive.
+- ADR 0003: symlink target shape. Relative-from-the-link's-
+  parent-directory — keeps dotfile repos portable across
+  machines and clone paths. Matches GNU stow convention.
+- `src/audit.cyr` — audit-trail writer. JSON escaping for
+  control bytes / `\` / `"`. `audit_append_link_r` does a
+  single flock'd append per entry; entries are well under
+  PIPE_BUF so POSIX atomicity holds.
+- `src/fs_link.cyr` — symlink primitives. `link_probe` (one
+  `readlink(2)` + a directory probe to split FILE / DIRECTORY),
+  `fsl_compute_relative` (longest-common-prefix + `..` prepend),
+  `link_create` (mkdir -p on parent + symlink).
+- `src/cmd/link.cyr` — `hapi link <pkg> [--force]`. Pre-flights
+  every target, refuses on any conflict without `--force`, then
+  creates the new links and audits each write. `--force`
+  replaces a symlink-to-elsewhere or a regular file; never a
+  directory.
+- `hapi link <package>` wired into the dispatcher.
+- `docs/guides/link.md` — semantics, flags, exit codes, audit
+  trail pointer.
+- Tests: M2 acceptance (3-link package, re-run is no-op),
+  conflict refusal, `--force` replace, `--force` refuses
+  directory, audit JSON shape, JSON escaping, link_probe
+  classification, relative-path computation. 69 assertions
+  total (was 36 in v0.2.0).
+
+### Changed
+- `[deps].stdlib` gained `sha1` (manifest hashing) and
+  `chrono` (ISO 8601 audit timestamps).
+- `hapi --version` now reports 0.3.0; help text lists `link`.
+
 ## [0.2.0]
 
 ### Added

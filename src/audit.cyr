@@ -1,0 +1,270 @@
+# audit.cyr — append-only audit trail writer.
+#
+# Implements ADR 0002 (`docs/adr/0002-audit-trail-format.md`).
+# Format: JSON Lines at `$XDG_STATE_HOME/hapi/audit.jsonl`
+# (or `$HOME/.local/state/hapi/audit.jsonl` when unset).
+#
+# Write path: single `write(2)` per entry, gated by flock so two
+# concurrent hapi processes don't interleave half-lines. Lines
+# are <1 KB in practice (well under PIPE_BUF=4096), so POSIX
+# atomicity holds and a torn write leaves either zero or one
+# complete line at EOF — never a partial.
+#
+# M3 (`unlink`, `rollback`) layers the *reader* on top of this
+# same file; nothing in this module needs to change for M3.
+
+include "lib/io.cyr"
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/syscalls.cyr"
+include "lib/sha1.cyr"
+include "lib/chrono.cyr"
+include "lib/result.cyr"
+
+enum HapiAuditError {
+    HapiAuditMkdirFailed;
+    HapiAuditOpenFailed;
+    HapiAuditWriteFailed;
+}
+
+# Default audit-trail path under XDG_STATE_HOME (or
+# $HOME/.local/state when unset). Returns a heap-allocated
+# null-terminated cstring. May be overridden by tests via
+# `audit_set_trail_path()` — that path takes precedence.
+fn _audit_default_path(): i64 {
+    var xdg = getenv("XDG_STATE_HOME");
+    var base = 0;
+    if (xdg != 0 && strlen(xdg) > 0) {
+        base = xdg;
+    } else {
+        var home = getenv("HOME");
+        if (home == 0 || strlen(home) == 0) {
+            # Last-ditch fallback. Better than crashing.
+            home = "/tmp";
+        }
+        var hlen = strlen(home);
+        var suffix = "/.local/state";
+        var slen = 13;
+        base = alloc(hlen + slen + 1);
+        memcpy(base, home, hlen);
+        memcpy(base + hlen, suffix, slen);
+        store8(base + hlen + slen, 0);
+    }
+    var blen = strlen(base);
+    var tail = "/hapi/audit.jsonl";
+    var tlen = 17;
+    var out = alloc(blen + tlen + 1);
+    memcpy(out, base, blen);
+    memcpy(out + blen, tail, tlen);
+    store8(out + blen + tlen, 0);
+    return out;
+}
+
+# Test/CI override: when set, `audit_trail_path()` returns this
+# instead of the XDG-default. The value MUST be a path to a
+# .jsonl file under a directory hapi is allowed to create.
+# Reset to 0 to restore default behavior.
+var _audit_override_path = 0;
+
+fn audit_set_trail_path(path): i64 {
+    _audit_override_path = path;
+    return 0;
+}
+
+fn audit_trail_path(): i64 {
+    if (_audit_override_path != 0) { return _audit_override_path; }
+    return _audit_default_path();
+}
+
+# Recursively mkdir the parent of `file_path`. Treats EEXIST
+# (errno 17) as success. Returns 0 on success, negative on
+# failure of any single mkdir.
+fn _audit_mkdir_parents(file_path): i64 {
+    var n = strlen(file_path);
+    # Walk forward, mkdir at each `/` we hit (except position 0).
+    # Stop before the final component (the file itself).
+    var last_slash = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(file_path + i) == 47) { last_slash = i; }
+        i = i + 1;
+    }
+    if (last_slash <= 0) { return 0; }
+
+    # Walk every intermediate '/' from left to right, mkdir each
+    # accumulated prefix. We pass a temporary buffer where the
+    # slash gets temporarily replaced by '\0' so the mkdir sees
+    # only the prefix.
+    var tmp = alloc(n + 1);
+    memcpy(tmp, file_path, n);
+    store8(tmp + n, 0);
+
+    var j = 1;
+    while (j <= last_slash) {
+        if (load8(tmp + j) == 47) {
+            store8(tmp + j, 0);
+            var rc = sys_mkdir(tmp, 0x1C0);   # 0700
+            if (rc < 0) {
+                # EEXIST = 17. Anything else is fatal.
+                var err = 0 - rc;
+                if (err != 17) { return rc; }
+            }
+            store8(tmp + j, 47);
+        }
+        j = j + 1;
+    }
+    # Final mkdir for the parent itself (everything up to last_slash).
+    store8(tmp + last_slash, 0);
+    var rc = sys_mkdir(tmp, 0x1C0);
+    if (rc < 0) {
+        var err = 0 - rc;
+        if (err != 17) { return rc; }
+    }
+    return 0;
+}
+
+# Ensure the trail's parent directory exists. Returns 0 on
+# success, Err(...) shape encoded as a negative value otherwise.
+fn audit_ensure_dir(): i64 {
+    var path = audit_trail_path();
+    return _audit_mkdir_parents(path);
+}
+
+# JSON-escape a single byte into `out`, returning bytes written.
+# Out buffer must have >= 6 bytes (worst case: `\uXXXX`).
+fn _audit_json_escape_byte(c, out): i64 {
+    if (c == 34) { store8(out, 92); store8(out + 1, 34); return 2; }
+    if (c == 92) { store8(out, 92); store8(out + 1, 92); return 2; }
+    if (c == 10) { store8(out, 92); store8(out + 1, 110); return 2; }
+    if (c == 13) { store8(out, 92); store8(out + 1, 114); return 2; }
+    if (c == 9)  { store8(out, 92); store8(out + 1, 116); return 2; }
+    if (c < 32) {
+        # \u00XX
+        store8(out, 92);
+        store8(out + 1, 117);
+        store8(out + 2, 48);
+        store8(out + 3, 48);
+        var hi = c / 16;
+        var lo = c - hi * 16;
+        if (hi < 10) { store8(out + 4, 48 + hi); } else { store8(out + 4, 87 + hi); }
+        if (lo < 10) { store8(out + 5, 48 + lo); } else { store8(out + 5, 87 + lo); }
+        return 6;
+    }
+    store8(out, c);
+    return 1;
+}
+
+# Emit a JSON string field — `"key":"value"` — into out at *pos.
+# `value` is a cstring; null is rendered as empty string.
+fn _audit_emit_field(out, pos_ptr, key, value): i64 {
+    var pos = load64(pos_ptr);
+    store8(out + pos, 34); pos = pos + 1;
+    var klen = strlen(key);
+    memcpy(out + pos, key, klen);
+    pos = pos + klen;
+    store8(out + pos, 34); pos = pos + 1;
+    store8(out + pos, 58); pos = pos + 1;
+    store8(out + pos, 34); pos = pos + 1;
+    if (value != 0) {
+        var vlen = strlen(value);
+        var i = 0;
+        while (i < vlen) {
+            var c = load8(value + i);
+            pos = pos + _audit_json_escape_byte(c, out + pos);
+            i = i + 1;
+        }
+    }
+    store8(out + pos, 34); pos = pos + 1;
+    store64(pos_ptr, pos);
+    return 0;
+}
+
+fn _audit_emit_comma(out, pos_ptr): i64 {
+    var pos = load64(pos_ptr);
+    store8(out + pos, 44);
+    store64(pos_ptr, pos + 1);
+    return 0;
+}
+
+# Compose a single audit-trail line into `out`, returning the
+# byte length written. Output is a single JSON object terminated
+# with `\n`. Field order is fixed per ADR 0002.
+fn audit_format_link(out, cap, pkg, pkg_version, manifest_hash,
+                     source, target, abs_source, abs_target): i64 {
+    var pos = 0;
+    var ts = iso8601_now();
+    store8(out + pos, 123); pos = pos + 1;     # {
+    _audit_emit_field(out, &pos, "ts", ts);
+    _audit_emit_comma(out, &pos);
+    _audit_emit_field(out, &pos, "op", "link");
+    _audit_emit_comma(out, &pos);
+    _audit_emit_field(out, &pos, "pkg", pkg);
+    _audit_emit_comma(out, &pos);
+    _audit_emit_field(out, &pos, "pkg_version", pkg_version);
+    _audit_emit_comma(out, &pos);
+    _audit_emit_field(out, &pos, "manifest_hash", manifest_hash);
+    _audit_emit_comma(out, &pos);
+    _audit_emit_field(out, &pos, "source", source);
+    _audit_emit_comma(out, &pos);
+    _audit_emit_field(out, &pos, "target", target);
+    _audit_emit_comma(out, &pos);
+    _audit_emit_field(out, &pos, "abs_source", abs_source);
+    _audit_emit_comma(out, &pos);
+    _audit_emit_field(out, &pos, "abs_target", abs_target);
+    store8(out + pos, 125); pos = pos + 1;    # }
+    store8(out + pos, 10); pos = pos + 1;     # \n
+    return pos;
+}
+
+# Append a single link entry to the audit trail. Returns 0 on
+# success, Err(HapiAudit*) otherwise. Creates the parent
+# directory on demand.
+fn audit_append_link_r(pkg, pkg_version, manifest_hash,
+                       source, target, abs_source, abs_target): Result {
+    var mkrc = audit_ensure_dir();
+    if (mkrc < 0) { return Err(HapiAuditMkdirFailed); }
+
+    var buf = alloc(4096);
+    var n = audit_format_link(buf, 4096, pkg, pkg_version, manifest_hash,
+                              source, target, abs_source, abs_target);
+
+    var path = audit_trail_path();
+    var wrc = file_append_locked(path, buf, n);
+    if (wrc < 0) { return Err(HapiAuditWriteFailed); }
+    if (wrc != n) { return Err(HapiAuditWriteFailed); }
+    return Ok(n);
+}
+
+# Compute the manifest hash. Reads the file from disk and
+# returns a heap-allocated null-terminated cstring of the form
+# "sha1:" + 40 hex chars. Returns 0 on read failure.
+#
+# Per ADR 0002, the hash input is raw file bytes (no
+# canonicalization in M2). The "sha1:" prefix is part of the
+# v1.0 forward-compat plan — a future canonicalization switch
+# will bump to "sha1c:".
+fn audit_manifest_hash(path): i64 {
+    var buf = alloc(262144);
+    var n = file_read_all(path, buf, 262144);
+    if (n <= 0) { return 0; }
+
+    var digest[20];
+    sha1(buf, n, &digest);
+
+    var out = alloc(46);
+    var prefix = "sha1:";
+    memcpy(out, prefix, 5);
+    var i = 0;
+    while (i < 20) {
+        var b = load8(&digest + i);
+        var hi = b / 16;
+        var lo = b - hi * 16;
+        if (hi < 10) { store8(out + 5 + i * 2, 48 + hi); }
+        else { store8(out + 5 + i * 2, 87 + hi); }
+        if (lo < 10) { store8(out + 5 + i * 2 + 1, 48 + lo); }
+        else { store8(out + 5 + i * 2 + 1, 87 + lo); }
+        i = i + 1;
+    }
+    store8(out + 45, 0);
+    return out;
+}
