@@ -1,8 +1,10 @@
 # hapi — Roadmap
 
-> Milestone plan through v1.0. State lives in [`state.md`](state.md);
-> this file is the sequencing — what ships, in what order, against
-> what dependency gates.
+> Forward-facing milestone plan through v1.0. State lives in
+> [`state.md`](state.md); shipped milestones live in
+> [`../../CHANGELOG.md`](../../CHANGELOG.md). This file is the
+> sequencing of what's still ahead — what ships, in what order,
+> against what dependency gates.
 
 ## v1.0 criteria
 
@@ -23,59 +25,7 @@ auditable rollback story, dogfooded on the maintainer's own dotfiles.
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — path
       validation, symlink loop, TOCTOU, capability boundary
 
-## Milestones
-
-### M0 — Scaffold (v0.1.0) — ✅ shipped 2026-05-19
-
-- `cyrius init` scaffold landed
-- `./build/hapi` prints scaffold version and exits
-- Doc-tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md)
-
-### M1 — Manifest format spec + parser (v0.2.0)
-
-- ADR: `hapi.cyml` manifest schema (`docs/adr/0001-hapi-cyml-manifest-schema.md`)
-- Parser for `hapi.cyml` — fields: `package.name`, `package.version`,
-  `link` table (source → target rows), `ignore` glob list
-- Validation: source paths exist, target paths within scoped root,
-  no duplicate targets
-- `hapi inspect <package>` — dump parsed manifest, exit 0
-- **Dep gate**: stdlib only (uses `lib/cyml.cyr`)
-- **Acceptance**: a minimal `hapi.cyml` for a 3-file package parses
-  and inspects cleanly.
-
-### M2 — `link` (v0.3.0)
-
-- `hapi link <package>` — read manifest, create symlinks
-- Pre-flight: every target absent or already the correct symlink (idempotent)
-- On conflict: refuse, list conflicts, exit non-zero
-- `--force` flag overrides; documented as escape hatch
-- Audit-trail entry per link (path / target / timestamp / hash of manifest)
-- **Dep gate**: M1.
-- **Acceptance**: linking a 3-file package twice in a row produces
-  no change on second invocation.
-
-### M3 — `unlink` + audit-trail rollback (v0.4.0)
-
-- `hapi unlink <package>` — remove symlinks created by a prior link
-- Reads audit trail to identify exactly which symlinks belong to the package
-- Refuses to unlink anything not present in the trail (never delete
-  user files; never delete user-created symlinks)
-- `hapi rollback` — replay audit trail in reverse to the last
-  marked checkpoint
-- **Dep gate**: M2.
-- **Acceptance**: `link` → `unlink` round-trip leaves no symlinks,
-  no manifest residue, audit trail records both operations.
-
-### M4 — `adopt` (v0.5.0)
-
-- `hapi adopt <path>` — move an existing file into a package, create
-  the symlink back
-- Refuses if the target is already a symlink (no automatic
-  re-adoption; user must `unlink` first explicitly)
-- Audit-trail entry captures the move + the new link
-- **Dep gate**: M2.
-- **Acceptance**: an existing `~/.zshrc` adopts cleanly into a
-  package and the link points back.
+## Upcoming milestones
 
 ### M5 — `list` + `sync` + trail management (v0.6.0)
 
@@ -87,7 +37,7 @@ auditable rollback story, dogfooded on the maintainer's own dotfiles.
   (which links are missing, which point elsewhere)
 - `hapi checkpoint` — append a `rollback-marker` entry to the
   audit trail (carried forward from M3 — the marker *machinery*
-  ships in M3 via `audit_append_rollback_marker_r` and
+  shipped in M3 via `audit_append_rollback_marker_r` and
   `rollback`'s walk-to-marker logic, but the user-facing verb
   to drop one lives here alongside the other trail-management
   surface)
@@ -95,7 +45,7 @@ auditable rollback story, dogfooded on the maintainer's own dotfiles.
   manifest sections / keys become hard errors (carried forward
   from M1 — the lenient parser tolerates additive growth; the
   strict mode is the CI / lint surface)
-- **Dep gate**: M3.
+- **Dep gate**: M3 (shipped).
 - **Acceptance**: `sync` on a clean working tree produces no audit
   entries (idempotent).
 
@@ -105,7 +55,7 @@ auditable rollback story, dogfooded on the maintainer's own dotfiles.
   explicit capability check (kavach integration when available;
   inline-check pattern until then)
 - `--dry-run` flag — show what would change without writing
-- ADR: capability model (`docs/adr/0002-capability-bounded-roots.md`)
+- ADR: capability model (`docs/adr/0005-capability-bounded-roots.md`)
 - **Dep gate**: when kavach exposes a stable capability API; until
   then, a CLI-level allowlist.
 - **Acceptance**: attempt to `link` outside `$HOME` without
@@ -143,8 +93,8 @@ auditable rollback story, dogfooded on the maintainer's own dotfiles.
 The list keeps future contributors from adding to v1.0 by accident.
 First half is original-design exclusions; second half is items
 explicitly deferred by an ADR or implementation decision during
-M1–M3 with the rationale that the v1.0 surface is better without
-them.
+prior milestones, with the rationale that the v1.0 surface is
+better without them.
 
 ### Original-design exclusions
 
@@ -162,7 +112,7 @@ them.
   user needs per-host variation, they write per-host packages.
   No template engine, no conditionals.
 
-### Deferred during M1–M3 (post-v1.0 candidates)
+### Deferred during prior milestones (post-v1.0 candidates)
 
 Each entry cites the ADR or doc that documented the deferral so
 the call can be revisited with full context post-v1.0.
@@ -181,6 +131,10 @@ the call can be revisited with full context post-v1.0.
   case where a real copy beats a symlink) — ADR 0001 leaves
   schema headroom for additive growth; v1.0 ships with `source`
   and `target` only.
+- **Per-row `--source <path>` for adopt** — ADR 0004 picks
+  `basename(target)` with leading-`.` stripped as the only v1.0
+  in-package source name. A future flag could opt into nested
+  layouts (e.g. adopting `~/.config/zsh/x` into `pkg/config/zsh/x`).
 - **`hapi fmt`** — a manifest canonicalizer / formatter. ADR 0001
   notes that any future formatter must produce byte-identical
   output for the same logical manifest, or audit-trail hashes
@@ -200,7 +154,23 @@ the call can be revisited with full context post-v1.0.
   choice into every manifest. Post-v1.0 if user demand
   appears.
 
+## Upstream dependencies (tracked)
+
+Items hapi needs from sibling repos but doesn't block on (we
+have working magic-number workarounds today; landed wrappers
+become a quality-of-life patch).
+
+- **`sys_rename` stdlib wrapper** — proposed in
+  [`cyrius/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md).
+  Hapi calls `syscall(82, ...)` directly in adopt + manifest_write.
+- **`sys_fsync` / `sys_fdatasync` stdlib wrappers** — proposed in
+  [`cyrius/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md).
+  Hapi calls `syscall(74, fd)` in `_hmw_write_atomic`.
+- **kavach capability API** — M6 gate. Until kavach exposes a
+  stable surface, M6 ships with a CLI-level allowlist.
+
 ## Cross-references
 
 - [`state.md`](state.md) — live status
-- [`../../CHANGELOG.md`](../../CHANGELOG.md) — release history
+- [`../../CHANGELOG.md`](../../CHANGELOG.md) — release history,
+  including the shipped M0 → M4 narrative
