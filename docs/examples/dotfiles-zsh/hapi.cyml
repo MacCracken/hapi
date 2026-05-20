@@ -1,0 +1,29 @@
+[package]
+name = "dotfiles-zsh"
+version = "1.0.0"
+description = "zsh configuration files"
+ignore = ["*.bak", ".DS_Store", "*.swp"]
+
+[[link]]
+source = "zshrc"
+target = ".zshrc"
+
+[[link]]
+source = "zshenv"
+target = ".zshenv"
+
+[[link]]
+source = "config/zsh"
+target = ".config/zsh"
+
+---
+
+# dotfiles-zsh
+
+Minimal example package shipped with hapi. Links three sources into
+`$HOME`. Used by the M1 acceptance test (`docs/development/roadmap.md`
+M1) and by [`docs/guides/inspect.md`](../../guides/inspect.md) as the
+canonical walkthrough.
+
+The body below the `---` delimiter is free-form markdown; hapi does
+not parse it. It travels with the package for human readers.

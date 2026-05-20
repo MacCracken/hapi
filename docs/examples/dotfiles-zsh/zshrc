@@ -1,0 +1,3 @@
+# dotfiles-zsh/zshrc — example .zshrc sourced from the dotfiles-zsh
+# example package. Real content omitted; this file exists so the M1
+# acceptance test has a real source path to point at.

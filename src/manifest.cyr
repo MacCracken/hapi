@@ -1,0 +1,374 @@
+# manifest.cyr — hapi.cyml parser.
+#
+# Parses the v1.0 manifest schema documented in
+# docs/adr/0001-hapi-cyml-manifest-schema.md. Single-entry CYML
+# (TOML header + optional markdown body); the body is preserved
+# but unparsed.
+#
+# We hand-roll the section dispatch instead of leaning on
+# lib/toml.cyr because that parser treats `[package]` as a no-op
+# (only `[[name]]` triggers a new section there). The ADR locks
+# `[package]` / `[[link]]` as the user-facing shape, so the
+# parser bends to the schema, not the other way around.
+#
+# Filesystem checks (source paths exist, target paths writable,
+# capability scope) are deferred to M2 `link` — this parser
+# produces a static description that runs on any well-formed
+# manifest without touching the scoped root.
+
+include "lib/result.cyr"
+include "lib/cyml.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/syscalls.cyr"
+
+# Error variants surfaced as Err(...) by hapi_mf_parse_*. Names
+# prefixed `HapiMf` to keep them out of the lib/* enum namespace.
+enum HapiMfError {
+    HapiMfIoErr;
+    HapiMfMissingName;
+    HapiMfMissingVersion;
+    HapiMfMissingSource;
+    HapiMfMissingTarget;
+    HapiMfDuplicateTarget;
+    HapiMfPathTraversal;
+}
+
+# Section dispatch tags used during parse.
+enum HapiMfSection {
+    HAPI_MF_SECT_NONE = 0;
+    HAPI_MF_SECT_PACKAGE = 1;
+    HAPI_MF_SECT_LINK = 2;
+    HAPI_MF_SECT_UNKNOWN = 99;
+}
+
+# HapiLink — 16 bytes.
+#   +0  source: Str
+#   +8  target: Str
+fn hapi_link_new(source, target): i64 {
+    var l = alloc(16);
+    store64(l, source);
+    store64(l + 8, target);
+    return l;
+}
+fn hapi_link_source(l): Str { return load64(l); }
+fn hapi_link_target(l): Str { return load64(l + 8); }
+
+# HapiManifest — 40 bytes.
+#   +0  name: Str        (required, validated non-empty)
+#   +8  version: Str     (required, validated non-empty)
+#   +16 description: Str (optional; 0 when absent)
+#   +24 links: vec of HapiLink
+#   +32 ignore: vec of Str  (glob patterns)
+fn hapi_mf_new(): i64 {
+    var m = alloc(40);
+    store64(m, 0);
+    store64(m + 8, 0);
+    store64(m + 16, 0);
+    store64(m + 24, vec_new());
+    store64(m + 32, vec_new());
+    return m;
+}
+fn hapi_mf_name(m): Str { return load64(m); }
+fn hapi_mf_version(m): Str { return load64(m + 8); }
+fn hapi_mf_description(m): i64 { return load64(m + 16); }
+fn hapi_mf_links(m): i64 { return load64(m + 24); }
+fn hapi_mf_ignore(m): i64 { return load64(m + 32); }
+
+# Skip horizontal whitespace (space, tab) only.
+fn _hapi_mf_skip_hws(buf, pos, end): i64 {
+    var go = 1;
+    while (pos < end && go == 1) {
+        var c = load8(buf + pos);
+        if (c == 32 || c == 9) { pos = pos + 1; }
+        else { go = 0; }
+    }
+    return pos;
+}
+
+# Skip whitespace, newlines, and full-line comments. Returns the
+# position of the first significant byte (or `end`).
+fn _hapi_mf_skip_ws_nl(buf, pos, end): i64 {
+    var go = 1;
+    while (pos < end && go == 1) {
+        var c = load8(buf + pos);
+        if (c == 32 || c == 9 || c == 10 || c == 13) {
+            pos = pos + 1;
+        } elif (c == 35) {
+            var lgo = 1;
+            while (pos < end && lgo == 1) {
+                if (load8(buf + pos) == 10) { lgo = 0; }
+                else { pos = pos + 1; }
+            }
+        } else {
+            go = 0;
+        }
+    }
+    return pos;
+}
+
+# Advance pos to the byte after the next newline (or to `end`).
+fn _hapi_mf_skip_to_eol(buf, pos, end): i64 {
+    var go = 1;
+    while (pos < end && go == 1) {
+        if (load8(buf + pos) == 10) { pos = pos + 1; go = 0; }
+        else { pos = pos + 1; }
+    }
+    return pos;
+}
+
+# Parse a "double-quoted" string starting at pos (which points at
+# the opening `"`). Returns the inner Str; writes the post-string
+# position into *out_pos. Escape handling matches TOML's coarse
+# rule: a `\` skips the following byte verbatim.
+fn _hapi_mf_parse_str(buf, pos, end, out_pos): Str {
+    pos = pos + 1;
+    var start = pos;
+    var go = 1;
+    while (pos < end && go == 1) {
+        var c = load8(buf + pos);
+        if (c == 34) { go = 0; }
+        elif (c == 92 && pos + 1 < end) {
+            pos = pos + 2;
+        } else {
+            pos = pos + 1;
+        }
+    }
+    var s = str_new(buf + start, pos - start);
+    if (pos < end) { pos = pos + 1; }
+    store64(out_pos, pos);
+    return s;
+}
+
+# Parse a `["s1", "s2", ...]` array of double-quoted strings.
+# Returns a vec of Str; writes the post-array position into
+# *out_pos. Non-string elements are silently skipped (the schema
+# only uses string arrays).
+fn _hapi_mf_parse_str_array(buf, pos, end, out_pos): i64 {
+    var v = vec_new();
+    pos = pos + 1;
+    var go = 1;
+    while (pos < end && go == 1) {
+        pos = _hapi_mf_skip_ws_nl(buf, pos, end);
+        if (pos >= end) { go = 0; }
+        else {
+            var c = load8(buf + pos);
+            if (c == 93) { pos = pos + 1; go = 0; }
+            elif (c == 34) {
+                var np = 0;
+                var s = _hapi_mf_parse_str(buf, pos, end, &np);
+                vec_push(v, s);
+                pos = np;
+                pos = _hapi_mf_skip_ws_nl(buf, pos, end);
+                if (pos < end && load8(buf + pos) == 44) { pos = pos + 1; }
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+    store64(out_pos, pos);
+    return v;
+}
+
+# Returns 1 if `s` contains a `..` path segment (i.e. `..` bounded
+# by string-start/end or `/`). Used to reject path traversal in
+# both `source` and `target` values.
+fn _hapi_mf_has_dotdot(s: Str): i64 {
+    var d = str_data(s);
+    var n = str_len(s);
+    if (n < 2) { return 0; }
+    var i = 0;
+    var hit = 0;
+    while (i <= n - 2 && hit == 0) {
+        if (load8(d + i) == 46 && load8(d + i + 1) == 46) {
+            var prev_ok = 0;
+            if (i == 0) { prev_ok = 1; }
+            elif (load8(d + i - 1) == 47) { prev_ok = 1; }
+            var next_ok = 0;
+            if (i + 2 == n) { next_ok = 1; }
+            elif (load8(d + i + 2) == 47) { next_ok = 1; }
+            if (prev_ok == 1 && next_ok == 1) { hit = 1; }
+        }
+        i = i + 1;
+    }
+    return hit;
+}
+
+# Read key bytes from pos until `=`, whitespace, or newline.
+# Returns the key Str; advances pos via *out_pos.
+fn _hapi_mf_parse_key(buf, pos, end, out_pos): Str {
+    var start = pos;
+    var go = 1;
+    while (pos < end && go == 1) {
+        var c = load8(buf + pos);
+        if (c == 61 || c == 32 || c == 9 || c == 10) { go = 0; }
+        else { pos = pos + 1; }
+    }
+    var k = str_new(buf + start, pos - start);
+    store64(out_pos, pos);
+    return k;
+}
+
+# Parse the TOML header of a hapi.cyml into a HapiManifest.
+# Returns Ok(manifest) on success, Err(HapiMf*) on validation
+# failure. Unknown sections and unknown keys are tolerated
+# silently — the schema is additive, and a stricter mode is
+# reserved for a future `hapi check --strict`.
+fn hapi_mf_parse_header_r(data, len): Result {
+    var m = hapi_mf_new();
+    var pos = 0;
+    var cur = HAPI_MF_SECT_NONE;
+    var cur_link = 0;
+
+    while (pos < len) {
+        pos = _hapi_mf_skip_ws_nl(data, pos, len);
+        if (pos >= len) { pos = len; }
+        else {
+            var c = load8(data + pos);
+
+            if (c == 91 && pos + 1 < len && load8(data + pos + 1) == 91) {
+                if (cur == HAPI_MF_SECT_LINK && cur_link != 0) {
+                    vec_push(hapi_mf_links(m), cur_link);
+                    cur_link = 0;
+                }
+                pos = pos + 2;
+                var nstart = pos;
+                var ng = 1;
+                while (pos < len && ng == 1) {
+                    if (load8(data + pos) == 93) { ng = 0; }
+                    else { pos = pos + 1; }
+                }
+                var section = str_new(data + nstart, pos - nstart);
+                if (pos < len && load8(data + pos) == 93) { pos = pos + 1; }
+                if (pos < len && load8(data + pos) == 93) { pos = pos + 1; }
+                pos = _hapi_mf_skip_to_eol(data, pos, len);
+
+                if (str_eq_cstr(section, "link") == 1) {
+                    cur = HAPI_MF_SECT_LINK;
+                    cur_link = hapi_link_new(0, 0);
+                } else {
+                    cur = HAPI_MF_SECT_UNKNOWN;
+                }
+            }
+            elif (c == 91) {
+                if (cur == HAPI_MF_SECT_LINK && cur_link != 0) {
+                    vec_push(hapi_mf_links(m), cur_link);
+                    cur_link = 0;
+                }
+                pos = pos + 1;
+                var nstart = pos;
+                var ng = 1;
+                while (pos < len && ng == 1) {
+                    if (load8(data + pos) == 93) { ng = 0; }
+                    else { pos = pos + 1; }
+                }
+                var section = str_new(data + nstart, pos - nstart);
+                if (pos < len && load8(data + pos) == 93) { pos = pos + 1; }
+                pos = _hapi_mf_skip_to_eol(data, pos, len);
+
+                if (str_eq_cstr(section, "package") == 1) {
+                    cur = HAPI_MF_SECT_PACKAGE;
+                } else {
+                    cur = HAPI_MF_SECT_UNKNOWN;
+                }
+            }
+            else {
+                var kp = 0;
+                var key = _hapi_mf_parse_key(data, pos, len, &kp);
+                pos = kp;
+                pos = _hapi_mf_skip_hws(data, pos, len);
+                if (pos < len && load8(data + pos) == 61) {
+                    pos = pos + 1;
+                    pos = _hapi_mf_skip_hws(data, pos, len);
+                    if (pos < len) {
+                        var vc = load8(data + pos);
+                        if (vc == 34) {
+                            var vp = 0;
+                            var val = _hapi_mf_parse_str(data, pos, len, &vp);
+                            pos = vp;
+                            if (cur == HAPI_MF_SECT_PACKAGE) {
+                                if (str_eq_cstr(key, "name") == 1) { store64(m, val); }
+                                elif (str_eq_cstr(key, "version") == 1) { store64(m + 8, val); }
+                                elif (str_eq_cstr(key, "description") == 1) { store64(m + 16, val); }
+                            } elif (cur == HAPI_MF_SECT_LINK && cur_link != 0) {
+                                if (str_eq_cstr(key, "source") == 1) { store64(cur_link, val); }
+                                elif (str_eq_cstr(key, "target") == 1) { store64(cur_link + 8, val); }
+                            }
+                        }
+                        elif (vc == 91) {
+                            var vp = 0;
+                            var arr = _hapi_mf_parse_str_array(data, pos, len, &vp);
+                            pos = vp;
+                            if (cur == HAPI_MF_SECT_PACKAGE && str_eq_cstr(key, "ignore") == 1) {
+                                store64(m + 32, arr);
+                            }
+                        }
+                    }
+                }
+                pos = _hapi_mf_skip_to_eol(data, pos, len);
+            }
+        }
+    }
+
+    if (cur == HAPI_MF_SECT_LINK && cur_link != 0) {
+        vec_push(hapi_mf_links(m), cur_link);
+    }
+
+    if (hapi_mf_name(m) == 0 || str_len(hapi_mf_name(m)) == 0) {
+        return Err(HapiMfMissingName);
+    }
+    if (hapi_mf_version(m) == 0 || str_len(hapi_mf_version(m)) == 0) {
+        return Err(HapiMfMissingVersion);
+    }
+
+    var links = hapi_mf_links(m);
+    var nlinks = vec_len(links);
+    var i = 0;
+    while (i < nlinks) {
+        var lnk = vec_get(links, i);
+        var src = hapi_link_source(lnk);
+        var tgt = hapi_link_target(lnk);
+        if (src == 0 || str_len(src) == 0) { return Err(HapiMfMissingSource); }
+        if (tgt == 0 || str_len(tgt) == 0) { return Err(HapiMfMissingTarget); }
+        if (_hapi_mf_has_dotdot(src) == 1) { return Err(HapiMfPathTraversal); }
+        if (_hapi_mf_has_dotdot(tgt) == 1) { return Err(HapiMfPathTraversal); }
+        var j = 0;
+        while (j < i) {
+            var lnk2 = vec_get(links, j);
+            if (str_eq(tgt, hapi_link_target(lnk2)) == 1) {
+                return Err(HapiMfDuplicateTarget);
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    return Ok(m);
+}
+
+# Parse hapi.cyml from disk. `path` must point at the manifest
+# file itself (not the package dir) — directory-form dispatch
+# lives in src/cmd/inspect.cyr so the parser stays I/O-thin.
+fn hapi_mf_parse_file_r(path): Result {
+    var doc_r = cyml_parse_file_r(path);
+    if (is_err_result(doc_r) == 1) { return Err(HapiMfIoErr); }
+    var doc = load64(doc_r + 8);
+    var hdr = cyml_doc_header(doc);
+    var hdr_len = cyml_doc_header_len(doc);
+    return hapi_mf_parse_header_r(hdr, hdr_len);
+}
+
+# Map a HapiMfError code to a human cstring. Used by inspect and
+# by future commands when they surface a parse failure.
+fn hapi_mf_err_msg(code): i64 {
+    if (code == HapiMfIoErr) { return "could not read manifest"; }
+    if (code == HapiMfMissingName) { return "[package].name is missing or empty"; }
+    if (code == HapiMfMissingVersion) { return "[package].version is missing or empty"; }
+    if (code == HapiMfMissingSource) { return "[[link]].source is missing or empty"; }
+    if (code == HapiMfMissingTarget) { return "[[link]].target is missing or empty"; }
+    if (code == HapiMfDuplicateTarget) { return "two [[link]] rows share the same target"; }
+    if (code == HapiMfPathTraversal) { return "a path contains a `..` segment"; }
+    return "unknown manifest error";
+}

@@ -1,15 +1,78 @@
 # hapi — main entry point.
 #
-# Scaffold stage: prints version and exits. Real CLI (link / unlink /
-# adopt / sync / list, CYML manifest reader, capability-bounded
-# execution scoped to $HOME) lands once development begins.
+# Argv dispatcher. At M1 the only verb is `inspect`; `--version`
+# and `--help` are wired up so the binary's surface matches a
+# real CLI from day one. M2+ verbs (link / unlink / adopt / sync /
+# list / status / rollback) plug into the same dispatch table.
 #
-# Stdlib auto-included via cyrius.cyml [deps].stdlib.
+# The exit-code contract:
+#   0  success
+#   1  command-specific failure (parse error, conflict, IO error)
+#   2  bad usage (unknown verb, missing argument)
+#
+# Capability-bounded execution lands in M6 — until then, every
+# verb is implicitly $HOME-scoped (no `--root` yet).
 
-fn main() {
-    alloc_init();
-    println("hapi v0.1.0 — scaffold");
+include "src/cmd/inspect.cyr"
+include "lib/args.cyr"
+
+# VERSION literal kept in sync with the VERSION file at the
+# project root. CLAUDE.md's work loop calls out "version sync"
+# explicitly — bump this string in the same commit as VERSION.
+fn hapi_print_version(): i64 {
+    println("hapi 0.2.0");
     return 0;
+}
+
+fn hapi_print_usage(): i64 {
+    println("usage: hapi <command> [args...]");
+    println("");
+    println("commands:");
+    println("  inspect <path>     parse and display a package manifest");
+    println("");
+    println("options:");
+    println("  --version, -v      print version and exit");
+    println("  --help, -h         print this message and exit");
+    return 0;
+}
+
+# Compare an argv cstring to a literal cstring (both null-terminated).
+fn _hapi_argeq(arg, lit): i64 {
+    if (arg == 0) { return 0; }
+    var la = strlen(arg);
+    var ll = strlen(lit);
+    if (la != ll) { return 0; }
+    return memeq(arg, lit, la);
+}
+
+fn main(): i64 {
+    alloc_init();
+    args_init();
+
+    var n = argc();
+    if (n < 2) {
+        hapi_print_usage();
+        return 2;
+    }
+
+    var verb = argv(1);
+
+    if (_hapi_argeq(verb, "--version") == 1) { return hapi_print_version(); }
+    if (_hapi_argeq(verb, "-v") == 1)        { return hapi_print_version(); }
+    if (_hapi_argeq(verb, "--help") == 1)    { return hapi_print_usage(); }
+    if (_hapi_argeq(verb, "-h") == 1)        { return hapi_print_usage(); }
+
+    if (_hapi_argeq(verb, "inspect") == 1) {
+        var path = 0;
+        if (n >= 3) { path = argv(2); }
+        return cmd_inspect(path);
+    }
+
+    eprint("hapi: unknown command: ", 23);
+    eprint(verb, strlen(verb));
+    eprint("\n", 1);
+    hapi_print_usage();
+    return 2;
 }
 
 var r = main();

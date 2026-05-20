@@ -1,11 +1,172 @@
 # hapi test suite
 # Stdlib auto-included via cyrius.cyml
 
+include "src/manifest.cyr"
+
+# Convenience: parse a literal manifest string and assert it
+# returned Err(<expected>). `expected` is one of the HapiMf*
+# enum values.
+fn _expect_err(label, src, expected): i64 {
+    var r = hapi_mf_parse_header_r(src, strlen(src));
+    if (is_err_result(r) == 1) {
+        assert_eq(load64(r + 8), expected, label);
+    } else {
+        assert(0, label);
+    }
+    return 0;
+}
+
+fn _expect_ok(label, src): i64 {
+    var r = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(r), 1, label);
+    return 0;
+}
+
+# Str-vs-cstring equality check. assert_streq in lib/assert.cyr is
+# cstring-vs-cstring; our Str values aren't null-terminated, so we
+# go through str_eq_cstr instead.
+fn _assert_str_eq_cstr(s: Str, cstr, name): i64 {
+    assert(str_eq_cstr(s, cstr), name);
+    return 0;
+}
+
+fn test_minimal_manifest() {
+    test_group("manifest: minimal happy path");
+
+    var src = "[package]\nname = \"pkg\"\nversion = \"0.1.0\"\n";
+    var r = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(r), 1, "minimal manifest parses");
+    var m = load64(r + 8);
+    _assert_str_eq_cstr(hapi_mf_name(m), "pkg", "name = pkg");
+    _assert_str_eq_cstr(hapi_mf_version(m), "0.1.0", "version = 0.1.0");
+    assert_eq(hapi_mf_description(m), 0, "description is absent");
+    assert_eq(vec_len(hapi_mf_links(m)), 0, "no link rows");
+    assert_eq(vec_len(hapi_mf_ignore(m)), 0, "no ignore patterns");
+    return 0;
+}
+
+fn test_three_links() {
+    test_group("manifest: 3-link package (M1 acceptance)");
+
+    var src = "[package]\nname = \"dotfiles-zsh\"\nversion = \"1.0.0\"\ndescription = \"zsh\"\nignore = [\"*.bak\", \".DS_Store\"]\n\n[[link]]\nsource = \"zshrc\"\ntarget = \".zshrc\"\n\n[[link]]\nsource = \"zshenv\"\ntarget = \".zshenv\"\n\n[[link]]\nsource = \"config/zsh\"\ntarget = \".config/zsh\"\n";
+    var r = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(r), 1, "parses cleanly");
+    var m = load64(r + 8);
+    _assert_str_eq_cstr(hapi_mf_name(m), "dotfiles-zsh", "package.name");
+    _assert_str_eq_cstr(hapi_mf_version(m), "1.0.0", "package.version");
+    _assert_str_eq_cstr(hapi_mf_description(m), "zsh", "package.description");
+
+    var links = hapi_mf_links(m);
+    assert_eq(vec_len(links), 3, "three link rows");
+    var l0 = vec_get(links, 0);
+    _assert_str_eq_cstr(hapi_link_source(l0), "zshrc", "link[0].source");
+    _assert_str_eq_cstr(hapi_link_target(l0), ".zshrc", "link[0].target");
+    var l2 = vec_get(links, 2);
+    _assert_str_eq_cstr(hapi_link_source(l2), "config/zsh", "link[2].source");
+    _assert_str_eq_cstr(hapi_link_target(l2), ".config/zsh", "link[2].target");
+
+    var ignore = hapi_mf_ignore(m);
+    assert_eq(vec_len(ignore), 2, "two ignore patterns");
+    _assert_str_eq_cstr(vec_get(ignore, 0), "*.bak", "ignore[0]");
+    _assert_str_eq_cstr(vec_get(ignore, 1), ".DS_Store", "ignore[1]");
+    return 0;
+}
+
+fn test_validation_errors() {
+    test_group("manifest: validation errors");
+
+    _expect_err("missing name",
+        "[package]\nversion = \"1.0\"\n",
+        HapiMfMissingName);
+
+    _expect_err("missing version",
+        "[package]\nname = \"x\"\n",
+        HapiMfMissingVersion);
+
+    _expect_err("empty name",
+        "[package]\nname = \"\"\nversion = \"1.0\"\n",
+        HapiMfMissingName);
+
+    _expect_err("missing link source",
+        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\ntarget = \"a\"\n",
+        HapiMfMissingSource);
+
+    _expect_err("missing link target",
+        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\n",
+        HapiMfMissingTarget);
+
+    _expect_err("duplicate target",
+        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \".same\"\n[[link]]\nsource = \"b\"\ntarget = \".same\"\n",
+        HapiMfDuplicateTarget);
+    return 0;
+}
+
+fn test_path_traversal() {
+    test_group("manifest: path traversal rejected");
+
+    _expect_err("source has ..",
+        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"../etc\"\ntarget = \".x\"\n",
+        HapiMfPathTraversal);
+
+    _expect_err("target has ..",
+        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \"../.bashrc\"\n",
+        HapiMfPathTraversal);
+
+    _expect_err(".. in middle of target",
+        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \"a/../b\"\n",
+        HapiMfPathTraversal);
+
+    # A leading dot file (not a `..` segment) is fine.
+    _expect_ok("leading-dot target is fine",
+        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \".bashrc\"\n");
+
+    # `..` inside a path component is fine — only segment-`..` is rejected.
+    _expect_ok("dotdot inside a component is fine",
+        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a..b\"\ntarget = \"c..d\"\n");
+    return 0;
+}
+
+fn test_comments_and_blanks() {
+    test_group("manifest: comments and blank lines");
+
+    var src = "# a comment\n\n[package]   # inline comment-ish, ignored\nname = \"x\"\n\n# another comment\nversion = \"1.0\"\n";
+    var r = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(r), 1, "comments do not break parsing");
+    return 0;
+}
+
+fn test_parse_example_from_disk() {
+    test_group("manifest: parse the shipped example");
+
+    var r = hapi_mf_parse_file_r("docs/examples/dotfiles-zsh/hapi.cyml");
+    assert_eq(is_ok(r), 1, "example parses cleanly");
+    if (is_ok(r) == 1) {
+        var m = load64(r + 8);
+        _assert_str_eq_cstr(hapi_mf_name(m), "dotfiles-zsh", "name matches");
+        assert_eq(vec_len(hapi_mf_links(m)), 3, "three links");
+        assert_eq(vec_len(hapi_mf_ignore(m)), 3, "three ignore patterns");
+    }
+    return 0;
+}
+
+fn test_missing_file() {
+    test_group("manifest: missing-file error");
+
+    var r = hapi_mf_parse_file_r("/nonexistent/path/hapi.cyml");
+    assert_eq(is_err_result(r), 1, "missing file returns Err");
+    assert_eq(load64(r + 8), HapiMfIoErr, "error code is HapiMfIoErr");
+    return 0;
+}
+
 fn main() {
     alloc_init();
-    test_group("smoke");
-    assert(1, "true is true");
-    assert_eq(1 + 1, 2, "math works");
+    test_minimal_manifest();
+    test_three_links();
+    test_validation_errors();
+    test_path_traversal();
+    test_comments_and_blanks();
+    test_parse_example_from_disk();
+    test_missing_file();
     return assert_summary();
 }
 

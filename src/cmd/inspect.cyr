@@ -1,0 +1,155 @@
+# cmd/inspect.cyr — `hapi inspect <path>`
+#
+# Reads a package's hapi.cyml, parses it into a HapiManifest, and
+# dumps the parsed form to stdout. Filesystem state (source paths
+# exist, target conflicts) is intentionally NOT checked here —
+# inspect is the "what does the manifest say?" command. Conflict
+# checking is `hapi status` (M5) and link-time enforcement (M2).
+#
+# Path argument is either:
+#   - a directory containing hapi.cyml  (e.g. `docs/examples/dotfiles-zsh`)
+#   - a path to a *.cyml file directly  (e.g. `dotfiles-zsh/hapi.cyml`)
+#
+# Exit codes:
+#   0  parsed and printed
+#   1  could not read or parse manifest (writes message to stderr)
+#   2  bad usage (no path argument)
+
+include "src/manifest.cyr"
+
+# Resolve `path` to a concrete manifest-file path. If `path` ends
+# in `.cyml` we use it verbatim; otherwise we join `/hapi.cyml`.
+# Returned cstring is heap-allocated (null-terminated).
+fn _hapi_inspect_resolve(path): i64 {
+    var n = strlen(path);
+    if (n >= 5) {
+        if (load8(path + n - 5) == 46 && load8(path + n - 4) == 99
+            && load8(path + n - 3) == 121 && load8(path + n - 2) == 109
+            && load8(path + n - 1) == 108) {
+            var out = alloc(n + 1);
+            memcpy(out, path, n);
+            store8(out + n, 0);
+            return out;
+        }
+    }
+    var trim = n;
+    if (trim > 0 && load8(path + trim - 1) == 47) { trim = trim - 1; }
+    var suffix = "/hapi.cyml";
+    var slen = 10;
+    var out = alloc(trim + slen + 1);
+    memcpy(out, path, trim);
+    memcpy(out + trim, suffix, slen);
+    store8(out + trim + slen, 0);
+    return out;
+}
+
+# Walk the links vec once to compute the widest source-side width
+# so the `source → target` columns line up.
+fn _hapi_inspect_max_src_len(links): i64 {
+    var max = 0;
+    var n = vec_len(links);
+    var i = 0;
+    while (i < n) {
+        var l = vec_get(links, i);
+        var w = str_len(hapi_link_source(l));
+        if (w > max) { max = w; }
+        i = i + 1;
+    }
+    return max;
+}
+
+# Emit `count` spaces to stdout (used for column padding).
+fn _hapi_inspect_pad(count): i64 {
+    var spaces = "                                                                ";
+    var remaining = count;
+    while (remaining > 0) {
+        var chunk = remaining;
+        if (chunk > 64) { chunk = 64; }
+        print(spaces, chunk);
+        remaining = remaining - chunk;
+    }
+    return 0;
+}
+
+fn _hapi_inspect_print_field(label, val): i64 {
+    print(label, strlen(label));
+    str_print(val);
+    print("\n", 1);
+    return 0;
+}
+
+fn _hapi_inspect_print_manifest(m): i64 {
+    _hapi_inspect_print_field("package:     ", hapi_mf_name(m));
+    _hapi_inspect_print_field("version:     ", hapi_mf_version(m));
+    var desc = hapi_mf_description(m);
+    if (desc != 0 && str_len(desc) > 0) {
+        _hapi_inspect_print_field("description: ", desc);
+    }
+
+    var links = hapi_mf_links(m);
+    var nlinks = vec_len(links);
+    print("\nlinks (", 8);
+    fmt_int(nlinks);
+    print("):\n", 3);
+    if (nlinks == 0) {
+        print("  (none)\n", 9);
+    } else {
+        var width = _hapi_inspect_max_src_len(links);
+        var i = 0;
+        while (i < nlinks) {
+            var l = vec_get(links, i);
+            var src = hapi_link_source(l);
+            var tgt = hapi_link_target(l);
+            print("  ", 2);
+            str_print(src);
+            _hapi_inspect_pad(width - str_len(src));
+            print("  -> ", 5);
+            str_print(tgt);
+            print("\n", 1);
+            i = i + 1;
+        }
+    }
+
+    var ignore = hapi_mf_ignore(m);
+    var nignore = vec_len(ignore);
+    print("\nignore (", 9);
+    fmt_int(nignore);
+    print("):\n", 3);
+    if (nignore == 0) {
+        print("  (none)\n", 9);
+    } else {
+        var i = 0;
+        while (i < nignore) {
+            var pat = vec_get(ignore, i);
+            print("  ", 2);
+            str_print(pat);
+            print("\n", 1);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# Main entry point for the inspect subcommand. `path` is a cstring
+# (argv pointer). Returns the process exit code.
+fn cmd_inspect(path): i64 {
+    if (path == 0) {
+        eprint("usage: hapi inspect <package-dir|hapi.cyml>\n", 45);
+        return 2;
+    }
+    var mpath = _hapi_inspect_resolve(path);
+    var res = hapi_mf_parse_file_r(mpath);
+    if (is_err_result(res) == 1) {
+        var code = load64(res + 8);
+        var msg = hapi_mf_err_msg(code);
+        eprint("hapi: ", 6);
+        eprint(msg, strlen(msg));
+        eprint(" (", 2);
+        eprint(mpath, strlen(mpath));
+        eprint(")\n", 2);
+        return 1;
+    }
+    var m = load64(res + 8);
+    _hapi_inspect_print_manifest(m);
+    return 0;
+}
