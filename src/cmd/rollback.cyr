@@ -21,6 +21,7 @@
 include "src/audit.cyr"
 include "src/audit_reader.cyr"
 include "src/fs_link.cyr"
+include "src/manifest_write.cyr"
 
 fn _hrb_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hrb_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
@@ -102,6 +103,78 @@ fn _hrb_reverse_unlink(entry): i64 {
     return 1;
 }
 
+# Reverse one adopt entry. Per ADR 0004 this is a three-step
+# conditional reversal: remove the symlink, move the file back,
+# remove the manifest row. ALL preconditions checked up front;
+# either all three apply or none do.
+#
+# Manifest path is derived from the package dir (dirname of
+# abs_source) — the audit entry doesn't carry it explicitly.
+# Returns 1 applied, 0 skipped (state diverged), -1 IO error.
+fn _hrb_reverse_adopt(entry): i64 {
+    var abs_tgt = hae_abs_target(entry);
+    var abs_src = hae_abs_source(entry);
+    var source = hae_source(entry);
+    var target = hae_target(entry);
+    if (abs_tgt == 0 || abs_src == 0 || source == 0 || target == 0) { return 0; }
+
+    # Symlink at target must still point where adopt would have written.
+    var probe_t = link_probe(abs_tgt);
+    if (link_probe_kind(probe_t) != HAPI_LP_SYMLINK) { return 0; }
+    var parent = _fsl_path_dirname(abs_tgt);
+    var expected = fsl_compute_relative(parent, abs_src);
+    if (expected == 0) { return 0; }
+    if (_hrb_cstr_eq(link_probe_target(probe_t), expected) == 0) { return 0; }
+
+    # Source must still be a regular file in the package.
+    var probe_s = link_probe(abs_src);
+    if (link_probe_kind(probe_s) != HAPI_LP_FILE) { return 0; }
+
+    # Manifest must still exist at <pkg_dir>/hapi.cyml. We don't
+    # re-validate the row's presence ahead of time — the remove
+    # call will report not-found and we treat that as state-diverged.
+    var pkg_dir = _fsl_path_dirname(abs_src);
+    var manifest_path = _fsl_path_join(pkg_dir, "hapi.cyml");
+
+    # All preconditions held. Execute the three steps. Any
+    # IO failure mid-sequence is a hard error — we don't try to
+    # back out partial work (the audit trail is the recovery path).
+
+    var urc = sys_unlink(abs_tgt);
+    if (urc < 0) { return 0 - 1; }
+
+    var rrc = syscall(82, abs_src, abs_tgt);   # sys_rename
+    if (rrc < 0) {
+        # Re-attach what we just broke so the world is at least
+        # consistent with the trail again.
+        link_create(expected, abs_tgt);
+        return 0 - 1;
+    }
+
+    var mrc = manifest_remove_link_row(manifest_path,
+        _fsl_str_to_cstr_helper(source), _fsl_str_to_cstr_helper(target));
+    if (mrc < 0) {
+        # Manifest row already gone or never present. Filesystem
+        # changes already committed; treat as warning-level.
+        _hrb_eputs("  ! ");
+        _hrb_eputs(abs_tgt);
+        _hrb_eputs("  (manifest row not found; filesystem reverted)\n");
+    }
+
+    var ar = audit_append_unadopt_r(
+        hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
+        source, target, abs_src, abs_tgt);
+    if (is_err_result(ar) == 1) { return 0 - 1; }
+    return 1;
+}
+
+# Bridge: source / target in the audit entry are cstrings
+# already (audit_reader unescapes into heap cstrings). The
+# manifest_remove_link_row signature takes cstrings. This
+# helper just acknowledges the convention so the call site
+# reads clearly.
+fn _fsl_str_to_cstr_helper(c): i64 { return c; }
+
 fn cmd_rollback(): i64 {
     var trail = audit_read_default();
     var n = vec_len(trail);
@@ -157,10 +230,29 @@ fn cmd_rollback(): i64 {
                 _hrb_eputs("  (IO error reversing unlink)\n");
                 errored = errored + 1;
             }
+        } elif (_hrb_cstr_eq(op, "adopt") == 1) {
+            rc = _hrb_reverse_adopt(entry);
+            if (rc == 1) {
+                _hrb_puts("  ~ ");
+                _hrb_puts(hae_abs_target(entry));
+                _hrb_puts("  (was adopt; file restored)\n");
+                applied = applied + 1;
+            } elif (rc == 0) {
+                skipped = skipped + 1;
+            } else {
+                _hrb_eputs("  ! ");
+                _hrb_eputs(hae_abs_target(entry));
+                _hrb_eputs("  (IO error reversing adopt)\n");
+                errored = errored + 1;
+            }
         }
         # rollback-marker entries are stopping points, not
         # reversible ops — they fall through silently. We
         # already excluded those before `start` via _hrb_find_marker.
+        # `unadopt` entries are the synthetic reverse-of-adopt
+        # records; rollback ignores them (they exist for forward
+        # replay, not for re-reversal — same pattern as
+        # unlink-entries-after-link rollback).
         i = i - 1;
     }
 

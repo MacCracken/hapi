@@ -1,0 +1,308 @@
+# manifest_write.cyr — edits to a hapi.cyml manifest.
+#
+# Two operations, both atomic-via-rename:
+#   manifest_append_link_row — adopt's "close the loop" edit
+#   manifest_remove_link_row — rollback-of-adopt
+#
+# Atomicity: write the new content to `<path>.tmp` in the same
+# directory, fsync, then rename(2) over the original. Crash
+# windows produce either the original or the new — never a
+# corrupt file.
+#
+# Preservation: the rest of the file is byte-identical. We
+# don't re-canonicalize, don't reorder fields, don't strip
+# comments. The user's authoring stays intact.
+
+include "lib/io.cyr"
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/syscalls.cyr"
+
+enum HapiMfWriteError {
+    HapiMfwReadFailed = 1;
+    HapiMfwWriteFailed = 2;
+    HapiMfwRenameFailed = 3;
+    HapiMfwRowNotFound = 4;
+}
+
+# Read the entire file into a freshly-allocated buffer. Returns
+# the buffer; writes the length through *out_len. Returns 0 on
+# any read failure.
+fn _hmw_slurp(path, out_len): i64 {
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return 0; }
+    var buf = alloc(262144);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = file_read(fd, buf + total, 262144 - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= 262144) { rgo = 0; }
+        }
+    }
+    file_close(fd);
+    store64(out_len, total);
+    return buf;
+}
+
+# Atomic write: write `buf[0..n]` to `path` via path.tmp + rename.
+fn _hmw_write_atomic(path, buf, n): i64 {
+    var plen = strlen(path);
+    var tmp = alloc(plen + 5);
+    memcpy(tmp, path, plen);
+    memcpy(tmp + plen, ".tmp\x00", 5);
+
+    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) { return 0 - HapiMfwWriteFailed; }
+    var wrc = file_write(fd, buf, n);
+    if (wrc != n) { file_close(fd); return 0 - HapiMfwWriteFailed; }
+    syscall(74, fd);                       # fsync(fd)
+    file_close(fd);
+
+    var rrc = syscall(82, tmp, path);      # rename(tmp, path)
+    if (rrc < 0) { return 0 - HapiMfwRenameFailed; }
+    return 0;
+}
+
+# Find the byte offset of the CYML body separator (`\n---\n` or
+# `---\n` at pos 0). Returns -1 if no separator (file is all
+# TOML header). Used by append to pick the insertion point.
+fn _hmw_find_separator(buf, n): i64 {
+    if (n >= 4) {
+        if (load8(buf) == 45 && load8(buf + 1) == 45 && load8(buf + 2) == 45 && load8(buf + 3) == 10) {
+            return 0;
+        }
+    }
+    var i = 0;
+    while (i + 4 < n) {
+        if (load8(buf + i) == 10 && load8(buf + i + 1) == 45 && load8(buf + i + 2) == 45 && load8(buf + i + 3) == 45 && load8(buf + i + 4) == 10) {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Append a [[link]] row to `manifest_path`. Inserted just before
+# the body separator if one exists, else at EOF (with leading
+# blank-line padding either way for readability).
+fn manifest_append_link_row(manifest_path, source, target): i64 {
+    var len = 0;
+    var buf = _hmw_slurp(manifest_path, &len);
+    if (buf == 0) { return 0 - HapiMfwReadFailed; }
+
+    var sep = _hmw_find_separator(buf, len);
+
+    var slen = strlen(source);
+    var tlen = strlen(target);
+    # Block: "\n[[link]]\nsource = \"S\"\ntarget = \"T\"\n"
+    var block_len = 1 + 10 + 11 + slen + 2 + 11 + tlen + 2;
+    var block = alloc(block_len + 1);
+    var bp = 0;
+    store8(block + bp, 10); bp = bp + 1;
+    memcpy(block + bp, "[[link]]\n", 9); bp = bp + 9;
+    memcpy(block + bp, "source = \"", 10); bp = bp + 10;
+    memcpy(block + bp, source, slen); bp = bp + slen;
+    memcpy(block + bp, "\"\n", 2); bp = bp + 2;
+    memcpy(block + bp, "target = \"", 10); bp = bp + 10;
+    memcpy(block + bp, target, tlen); bp = bp + tlen;
+    memcpy(block + bp, "\"\n", 2); bp = bp + 2;
+
+    var out_cap = len + bp + 16;
+    var out = alloc(out_cap);
+    var pos = 0;
+
+    var split = len;
+    if (sep >= 0) { split = sep; }
+
+    memcpy(out + pos, buf, split);
+    pos = pos + split;
+
+    # Ensure there's a blank line before the new block. If the
+    # last char in the prefix is already a newline, we still
+    # want a separator newline — block starts with `\n` already.
+    memcpy(out + pos, block, bp);
+    pos = pos + bp;
+
+    if (sep >= 0) {
+        # Re-attach the body separator + body.
+        memcpy(out + pos, buf + split, len - split);
+        pos = pos + (len - split);
+    }
+
+    return _hmw_write_atomic(manifest_path, out, pos);
+}
+
+# Match an exact double-quoted string at buf[start..]. Returns
+# the length of the literal (including quotes) if it matches
+# `needle` byte-for-byte, else -1.
+fn _hmw_match_quoted(buf, end, start, needle): i64 {
+    if (start >= end || load8(buf + start) != 34) { return 0 - 1; }
+    var nlen = strlen(needle);
+    if (start + 1 + nlen >= end) { return 0 - 1; }
+    var i = 0;
+    while (i < nlen) {
+        if (load8(buf + start + 1 + i) != load8(needle + i)) { return 0 - 1; }
+        i = i + 1;
+    }
+    if (load8(buf + start + 1 + nlen) != 34) { return 0 - 1; }
+    return nlen + 2;
+}
+
+# Check whether buf[pos..end] starts with the literal cstring `lit`.
+fn _hmw_starts(buf, end, pos, lit): i64 {
+    var llen = strlen(lit);
+    if (pos + llen > end) { return 0; }
+    var i = 0;
+    while (i < llen) {
+        if (load8(buf + pos + i) != load8(lit + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Skip horizontal whitespace (space/tab) at *pos in buf.
+fn _hmw_skip_hws(buf, end, pos_ptr): i64 {
+    var p = load64(pos_ptr);
+    var go = 1;
+    while (p < end && go == 1) {
+        var c = load8(buf + p);
+        if (c == 32 || c == 9) { p = p + 1; }
+        else { go = 0; }
+    }
+    store64(pos_ptr, p);
+    return 0;
+}
+
+# Scan a [[link]] block starting at `block_start` (which points
+# at the `[`). Returns the byte offset *after* the block (i.e.
+# at the next `[` or `---` or EOF), and writes 1 through
+# *match_ptr if the block's source AND target both match the
+# requested values.
+fn _hmw_scan_link_block(buf, end, block_start, want_src, want_tgt, match_ptr): i64 {
+    # Walk to end-of-line after [[link]]
+    var p = block_start + 8;     # skip "[[link]]"
+    while (p < end && load8(buf + p) != 10) { p = p + 1; }
+    if (p < end) { p = p + 1; }
+
+    var src_match = 0;
+    var tgt_match = 0;
+
+    var go = 1;
+    while (p < end && go == 1) {
+        # Skip leading horizontal ws on this line
+        _hmw_skip_hws(buf, end, &p);
+        if (p >= end) { go = 0; }
+        else {
+            var c = load8(buf + p);
+            if (c == 91 || c == 45) {
+                # Next [[ section or --- — block ends here.
+                go = 0;
+            } elif (c == 10) {
+                # Blank line — keep going (block continues).
+                p = p + 1;
+            } elif (c == 35) {
+                # Comment — skip to EOL.
+                while (p < end && load8(buf + p) != 10) { p = p + 1; }
+                if (p < end) { p = p + 1; }
+            } elif (_hmw_starts(buf, end, p, "source") == 1) {
+                p = p + 6;
+                _hmw_skip_hws(buf, end, &p);
+                if (p < end && load8(buf + p) == 61) {
+                    p = p + 1;
+                    _hmw_skip_hws(buf, end, &p);
+                    var ml = _hmw_match_quoted(buf, end, p, want_src);
+                    if (ml > 0) { src_match = 1; p = p + ml; }
+                }
+                while (p < end && load8(buf + p) != 10) { p = p + 1; }
+                if (p < end) { p = p + 1; }
+            } elif (_hmw_starts(buf, end, p, "target") == 1) {
+                p = p + 6;
+                _hmw_skip_hws(buf, end, &p);
+                if (p < end && load8(buf + p) == 61) {
+                    p = p + 1;
+                    _hmw_skip_hws(buf, end, &p);
+                    var ml = _hmw_match_quoted(buf, end, p, want_tgt);
+                    if (ml > 0) { tgt_match = 1; p = p + ml; }
+                }
+                while (p < end && load8(buf + p) != 10) { p = p + 1; }
+                if (p < end) { p = p + 1; }
+            } else {
+                while (p < end && load8(buf + p) != 10) { p = p + 1; }
+                if (p < end) { p = p + 1; }
+            }
+        }
+    }
+
+    if (src_match == 1 && tgt_match == 1) { store64(match_ptr, 1); }
+    else { store64(match_ptr, 0); }
+    return p;
+}
+
+# Find the start of a [[link]] block at or after `from`. Returns
+# the offset of the `[`, or -1 if none.
+fn _hmw_find_link_block(buf, end, from): i64 {
+    var p = from;
+    while (p + 9 <= end) {
+        var at_bol = 1;
+        if (p > 0) {
+            if (load8(buf + p - 1) != 10) { at_bol = 0; }
+        }
+        if (at_bol == 1 && _hmw_starts(buf, end, p, "[[link]]") == 1) {
+            return p;
+        }
+        p = p + 1;
+    }
+    return 0 - 1;
+}
+
+# Remove a [[link]] block matching `source` and `target` exactly.
+# Trims the preceding blank line(s) along with the block so the
+# manifest doesn't grow blank-line clutter from churn.
+fn manifest_remove_link_row(manifest_path, source, target): i64 {
+    var len = 0;
+    var buf = _hmw_slurp(manifest_path, &len);
+    if (buf == 0) { return 0 - HapiMfwReadFailed; }
+
+    var scan = 0;
+    var found_start = 0 - 1;
+    var found_end = 0;
+    var go = 1;
+    while (go == 1) {
+        var blk = _hmw_find_link_block(buf, len, scan);
+        if (blk < 0) { go = 0; }
+        else {
+            var matched = 0;
+            var block_end = _hmw_scan_link_block(buf, len, blk, source, target, &matched);
+            if (matched == 1) {
+                found_start = blk;
+                found_end = block_end;
+                go = 0;
+            } else {
+                scan = block_end;
+            }
+        }
+    }
+
+    if (found_start < 0) { return 0 - HapiMfwRowNotFound; }
+
+    # Trim preceding blank lines (one or more `\n` immediately
+    # before `found_start`) so the manifest stays tidy.
+    var cut_start = found_start;
+    var pgo = 1;
+    while (cut_start > 0 && pgo == 1) {
+        if (load8(buf + cut_start - 1) == 10) { cut_start = cut_start - 1; }
+        else { pgo = 0; }
+    }
+    if (cut_start < found_start) { cut_start = cut_start + 1; }
+
+    var out_cap = len + 1;
+    var out = alloc(out_cap);
+    memcpy(out, buf, cut_start);
+    memcpy(out + cut_start, buf + found_end, len - found_end);
+    var new_len = cut_start + (len - found_end);
+
+    return _hmw_write_atomic(manifest_path, out, new_len);
+}

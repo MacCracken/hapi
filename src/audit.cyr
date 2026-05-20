@@ -234,6 +234,26 @@ fn audit_format_unlink(out, cap, pkg, pkg_version, manifest_hash,
         source, target, abs_source, abs_target);
 }
 
+# Compose an adopt entry. Same shape as link with op="adopt".
+# Per ADR 0004 adopt records as a single atomic entry.
+fn audit_format_adopt(out, cap, pkg, pkg_version, manifest_hash,
+                      source, target, abs_source, abs_target): i64 {
+    return _audit_format_link_op(out, cap, "adopt",
+        pkg, pkg_version, manifest_hash,
+        source, target, abs_source, abs_target);
+}
+
+# Compose an unadopt entry — the rollback-reverse of adopt.
+# Same shape; op="unadopt". Separate from "unlink" so the
+# package-scoped `hapi unlink` consumer doesn't confuse it
+# with a normal link removal.
+fn audit_format_unadopt(out, cap, pkg, pkg_version, manifest_hash,
+                        source, target, abs_source, abs_target): i64 {
+    return _audit_format_link_op(out, cap, "unadopt",
+        pkg, pkg_version, manifest_hash,
+        source, target, abs_source, abs_target);
+}
+
 # Compose a rollback-marker entry. Minimal fields — just `ts`
 # and `op`. Used to delimit rollback windows (ADR 0002).
 fn audit_format_rollback_marker(out, cap): i64 {
@@ -273,6 +293,22 @@ fn audit_append_unlink_r(pkg, pkg_version, manifest_hash,
     var buf = alloc(4096);
     var n = audit_format_unlink(buf, 4096, pkg, pkg_version, manifest_hash,
                                 source, target, abs_source, abs_target);
+    return _audit_append_bytes(buf, n);
+}
+
+fn audit_append_adopt_r(pkg, pkg_version, manifest_hash,
+                        source, target, abs_source, abs_target): Result {
+    var buf = alloc(4096);
+    var n = audit_format_adopt(buf, 4096, pkg, pkg_version, manifest_hash,
+                               source, target, abs_source, abs_target);
+    return _audit_append_bytes(buf, n);
+}
+
+fn audit_append_unadopt_r(pkg, pkg_version, manifest_hash,
+                          source, target, abs_source, abs_target): Result {
+    var buf = alloc(4096);
+    var n = audit_format_unadopt(buf, 4096, pkg, pkg_version, manifest_hash,
+                                 source, target, abs_source, abs_target);
     return _audit_append_bytes(buf, n);
 }
 

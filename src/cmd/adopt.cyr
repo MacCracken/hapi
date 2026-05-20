@@ -1,0 +1,257 @@
+# cmd/adopt.cyr — `hapi adopt <file> <package-dir>`
+#
+# Move an existing file into a package, create the symlink
+# back, append the [[link]] row to the package manifest,
+# write a single atomic op:adopt audit entry.
+#
+# Per ADR 0004 the source path inside the package is the
+# target's basename with one leading `.` stripped. Refuses on
+# any of: target is a symlink / target is a directory / target
+# absent / source name already exists in the package /
+# manifest already has a row for this target.
+#
+# Exit codes:
+#   0  adopted cleanly
+#   1  parse / probe / move / audit / manifest-edit failure
+#   2  bad usage
+
+include "src/manifest.cyr"
+include "src/manifest_write.cyr"
+include "src/audit.cyr"
+include "src/fs_link.cyr"
+include "src/cmd/link.cyr"   # link_set_scope_root + _hlnk_scope_root_override
+
+fn _hap_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn _hap_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
+# Resolve the package-dir argument to an absolute manifest path.
+# Mirrors the inspect / link resolvers.
+fn _hap_resolve_manifest(arg): i64 {
+    var n = strlen(arg);
+    if (n >= 5) {
+        if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
+            && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
+            && load8(arg + n - 1) == 108) {
+            return fsl_to_absolute(arg);
+        }
+    }
+    var abs_arg = fsl_to_absolute(arg);
+    return _fsl_path_join(abs_arg, "hapi.cyml");
+}
+
+# Resolve a scope-root-relative path to an absolute one.
+# Mirrors the link command's scope-root resolution.
+fn _hap_resolve_target(arg, scope_root_abs): i64 {
+    if (strlen(arg) > 0 && load8(arg) == 47) { return _fsl_cstr_dup(arg); }
+    return _fsl_path_join(scope_root_abs, arg);
+}
+
+# Derive the in-package source name from a target path's
+# basename, stripping one leading `.`. Returns a heap cstring.
+fn _hap_derive_source(target_abs): i64 {
+    var n = strlen(target_abs);
+    var last_slash = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(target_abs + i) == 47) { last_slash = i; }
+        i = i + 1;
+    }
+    var name_start = last_slash + 1;
+    var name_len = n - name_start;
+    var skip = 0;
+    if (name_len > 1 && load8(target_abs + name_start) == 46) { skip = 1; }
+    var out = alloc(name_len - skip + 1);
+    memcpy(out, target_abs + name_start + skip, name_len - skip);
+    store8(out + name_len - skip, 0);
+    return out;
+}
+
+# Check whether the parsed manifest already has a row whose
+# target matches `target_cstr`. Used to refuse on duplicate.
+fn _hap_manifest_has_target(m, target_cstr): i64 {
+    var links = hapi_mf_links(m);
+    var n = vec_len(links);
+    var tlen = strlen(target_cstr);
+    var i = 0;
+    while (i < n) {
+        var l = vec_get(links, i);
+        var t = hapi_link_target(l);
+        if (str_len(t) == tlen) {
+            if (memeq(str_data(t), target_cstr, tlen) == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Same as above but for source — refuse if the in-package
+# source name already appears in the manifest.
+fn _hap_manifest_has_source(m, source_cstr): i64 {
+    var links = hapi_mf_links(m);
+    var n = vec_len(links);
+    var slen = strlen(source_cstr);
+    var i = 0;
+    while (i < n) {
+        var l = vec_get(links, i);
+        var s = hapi_link_source(l);
+        if (str_len(s) == slen) {
+            if (memeq(str_data(s), source_cstr, slen) == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn cmd_adopt(file_arg, pkg_arg): i64 {
+    if (file_arg == 0 || pkg_arg == 0) {
+        _hap_eputs("usage: hapi adopt <file> <package-dir>\n");
+        return 2;
+    }
+
+    var scope_root = _hlnk_scope_root_override;
+    if (scope_root == 0) { scope_root = getenv("HOME"); }
+    if (scope_root == 0 || strlen(scope_root) == 0) {
+        _hap_eputs("hapi: $HOME is unset; cannot resolve scope root\n");
+        return 1;
+    }
+    var scope_root_abs = fsl_to_absolute(scope_root);
+
+    var abs_target = _hap_resolve_target(file_arg, scope_root_abs);
+    var manifest_path = _hap_resolve_manifest(pkg_arg);
+    var pkg_dir_abs = _fsl_path_dirname(manifest_path);
+
+    # Probe target: must be a regular file.
+    var probe = link_probe(abs_target);
+    var kind = link_probe_kind(probe);
+    if (kind == HAPI_LP_SYMLINK) {
+        _hap_eputs("hapi: target is already a symlink: ");
+        _hap_eputs(abs_target);
+        _hap_eputs("\n  (use `hapi unlink <pkg>` first if hapi created it)\n");
+        return 1;
+    }
+    if (kind == HAPI_LP_DIRECTORY) {
+        _hap_eputs("hapi: target is a directory (adopt is file-scoped at v0.5.0): ");
+        _hap_eputs(abs_target);
+        _hap_eputs("\n");
+        return 1;
+    }
+    if (kind == HAPI_LP_ABSENT) {
+        _hap_eputs("hapi: target does not exist: ");
+        _hap_eputs(abs_target);
+        _hap_eputs("\n");
+        return 1;
+    }
+    if (kind != HAPI_LP_FILE) {
+        _hap_eputs("hapi: target is not a regular file: ");
+        _hap_eputs(abs_target);
+        _hap_eputs("\n");
+        return 1;
+    }
+
+    # Parse the manifest (must exist).
+    var mr = hapi_mf_parse_file_r(manifest_path);
+    if (is_err_result(mr) == 1) {
+        var code = load64(mr + 8);
+        var msg = hapi_mf_err_msg(code);
+        _hap_eputs("hapi: ");
+        _hap_eputs(msg);
+        _hap_eputs(" (");
+        _hap_eputs(manifest_path);
+        _hap_eputs(")\n");
+        return 1;
+    }
+    var m = load64(mr + 8);
+
+    # Derive the in-package source name + the manifest's
+    # relative target (everything after the scope root, no
+    # leading slash).
+    var source_cstr = _hap_derive_source(abs_target);
+    var srl = strlen(scope_root_abs);
+    var atl = strlen(abs_target);
+    var rel_target_start = srl;
+    if (atl > srl && load8(abs_target + srl) == 47) { rel_target_start = srl + 1; }
+    var rel_target_len = atl - rel_target_start;
+    var target_cstr = alloc(rel_target_len + 1);
+    memcpy(target_cstr, abs_target + rel_target_start, rel_target_len);
+    store8(target_cstr + rel_target_len, 0);
+
+    # Refuse on duplicate source / target in the manifest.
+    if (_hap_manifest_has_target(m, target_cstr) == 1) {
+        _hap_eputs("hapi: manifest already has a [[link]] row with target = \"");
+        _hap_eputs(target_cstr);
+        _hap_eputs("\"\n");
+        return 1;
+    }
+    if (_hap_manifest_has_source(m, source_cstr) == 1) {
+        _hap_eputs("hapi: manifest already has a [[link]] row with source = \"");
+        _hap_eputs(source_cstr);
+        _hap_eputs("\"\n");
+        return 1;
+    }
+
+    # Refuse if the source path already exists in the package
+    # (a non-manifest file would get clobbered by the move).
+    var abs_source = _fsl_path_join(pkg_dir_abs, source_cstr);
+    var src_probe = link_probe(abs_source);
+    if (link_probe_kind(src_probe) != HAPI_LP_ABSENT) {
+        _hap_eputs("hapi: source path already exists in package: ");
+        _hap_eputs(abs_source);
+        _hap_eputs("\n");
+        return 1;
+    }
+
+    # 1. Move the file into the package (sys_rename, syscall 82).
+    var rrc = syscall(82, abs_target, abs_source);
+    if (rrc < 0) {
+        _hap_eputs("hapi: rename failed (");
+        _hap_eputs(abs_target);
+        _hap_eputs(" -> ");
+        _hap_eputs(abs_source);
+        _hap_eputs(")\n");
+        return 1;
+    }
+
+    # 2. Create the symlink back. Same relative-target math as link.
+    var tgt_parent = _fsl_path_dirname(abs_target);
+    var rel = fsl_compute_relative(tgt_parent, abs_source);
+    var crc = link_create(rel, abs_target);
+    if (crc < 0) {
+        # Rollback the move on failure.
+        syscall(82, abs_source, abs_target);
+        _hap_eputs("hapi: symlink failed at ");
+        _hap_eputs(abs_target);
+        _hap_eputs(" (file restored)\n");
+        return 1;
+    }
+
+    # 3. Append the [[link]] row to the manifest.
+    var mwrc = manifest_append_link_row(manifest_path, source_cstr, target_cstr);
+    if (mwrc < 0) {
+        # Undo symlink + move on failure to keep the world consistent.
+        sys_unlink(abs_target);
+        syscall(82, abs_source, abs_target);
+        _hap_eputs("hapi: manifest edit failed; filesystem restored\n");
+        return 1;
+    }
+
+    # 4. Audit the adopt (with the new manifest's hash).
+    var manifest_hash = audit_manifest_hash(manifest_path);
+    var pkg_name = _fsl_str_to_cstr(hapi_mf_name(m));
+    var pkg_ver = _fsl_str_to_cstr(hapi_mf_version(m));
+    var ar = audit_append_adopt_r(pkg_name, pkg_ver, manifest_hash,
+                                  source_cstr, target_cstr,
+                                  abs_source, abs_target);
+    if (is_err_result(ar) == 1) {
+        _hap_eputs("hapi: adopt succeeded but audit-trail write failed\n");
+        return 1;
+    }
+
+    _hap_puts("  ~ ");
+    _hap_puts(abs_target);
+    _hap_puts(" -> ");
+    _hap_puts(rel);
+    _hap_puts("\nadopted into ");
+    _hap_puts(manifest_path);
+    _hap_puts("\n");
+    return 0;
+}

@@ -4,6 +4,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0]
+
+### Added
+- ADR 0004: `hapi adopt` op semantics. Two positional CLI
+  args, atomic single-entry audit record (`op:adopt`), append
+  `[[link]]` row before `---` body separator, three-step
+  conditional rollback (remove symlink → move file back →
+  remove manifest row).
+- `src/manifest_write.cyr` — append + remove `[[link]]` rows
+  in `hapi.cyml`. Atomic via `tmp+rename` (no corruption on
+  crash). Append preserves comments, user formatting, and
+  the markdown body. Remove strips matching block + leading
+  blank lines.
+- `src/cmd/adopt.cyr` — `hapi adopt <file> <pkg>`. Probes,
+  parses, refuses on duplicate / wrong-type targets, renames
+  file into package, creates relative symlink, appends
+  manifest row, writes audit entry. Source name is target's
+  basename with leading `.` stripped.
+- `src/audit.cyr` — `audit_append_adopt_r` and
+  `audit_append_unadopt_r` (the rollback-reverse op).
+- `src/cmd/rollback.cyr` — handles `op:adopt` entries with
+  the three-step conditional reversal. Ignores `op:unadopt`
+  (forward-replay records, not re-reversible).
+- `hapi adopt <file> <pkg>` wired into the dispatcher.
+- `docs/guides/adopt.md`.
+- Tests: M4 acceptance (adopt happy path), every refusal
+  case (symlink target / directory target / absent target /
+  duplicate manifest row), manifest_write append + remove,
+  rollback-of-adopt three-step reversal. 127 assertions
+  total (was 100 in v0.4.0).
+
+### Changed
+- `hapi --version` reports 0.5.0; help text lists `adopt`.
+- Roadmap updated — deferred items from M1–M3 are now
+  anchored to specific milestones (M5 picks up
+  `hapi checkpoint` and `hapi check --strict`; M7 picks up
+  the manifest-hash canonicalization migration) or
+  explicitly listed under a new "Deferred during M1–M3"
+  section in Out-of-scope with ADR citations.
+
+### Filed upstream
+- Proposal at
+  `cyrius/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md`
+  for `sys_fsync` / `sys_fdatasync` stdlib wrappers. Hapi
+  currently calls `syscall(74, fd)` directly in
+  `_hmw_write_atomic`; the magic number is the
+  cross-arch-mismatch hazard the bare-name wrappers exist
+  to prevent. Companion to the 2026-05-17 *at()-family
+  proposal (`sys_rename` lives there). Targets the v6.x
+  stdlib-syscall expansion arc.
+
 ## [0.4.0]
 
 ### Added

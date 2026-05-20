@@ -16,6 +16,7 @@
 include "src/cmd/inspect.cyr"
 include "src/cmd/link.cyr"
 include "src/cmd/unlink.cyr"
+include "src/cmd/adopt.cyr"
 include "src/cmd/rollback.cyr"
 include "lib/args.cyr"
 
@@ -23,7 +24,7 @@ include "lib/args.cyr"
 # project root. CLAUDE.md's work loop calls out "version sync"
 # explicitly — bump this string in the same commit as VERSION.
 fn hapi_print_version(): i64 {
-    println("hapi 0.4.0");
+    println("hapi 0.5.0");
     return 0;
 }
 
@@ -34,6 +35,7 @@ fn hapi_print_usage(): i64 {
     println("  inspect <path>            parse and display a package manifest");
     println("  link <path> [--force]     create symlinks for the package");
     println("  unlink <pkg>              remove this package's symlinks from the trail");
+    println("  adopt <file> <pkg>        move a file into a package, link back");
     println("  rollback                  reverse the audit trail to the last marker");
     println("");
     println("options:");
@@ -91,6 +93,14 @@ fn main(): i64 {
         var pkg = 0;
         if (n >= 3) { pkg = argv(2); }
         return cmd_unlink(pkg);
+    }
+
+    if (_hapi_argeq(verb, "adopt") == 1) {
+        var file = 0;
+        var pkg = 0;
+        if (n >= 3) { file = argv(2); }
+        if (n >= 4) { pkg = argv(3); }
+        return cmd_adopt(file, pkg);
     }
 
     if (_hapi_argeq(verb, "rollback") == 1) {

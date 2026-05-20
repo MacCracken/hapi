@@ -5,8 +5,10 @@ include "src/manifest.cyr"
 include "src/audit.cyr"
 include "src/audit_reader.cyr"
 include "src/fs_link.cyr"
+include "src/manifest_write.cyr"
 include "src/cmd/link.cyr"
 include "src/cmd/unlink.cyr"
+include "src/cmd/adopt.cyr"
 include "src/cmd/rollback.cyr"
 
 # Convenience: parse a literal manifest string and assert it
@@ -687,6 +689,256 @@ fn test_cmd_rollback_stops_at_marker() {
     return 0;
 }
 
+# ============================================================
+# M4 — adopt + rollback-of-adopt tests
+# ============================================================
+
+# Build a fresh test package in /tmp with a minimal manifest +
+# one optional pre-existing link entry. Returns the package
+# directory cstring.
+fn _test_make_package(initial_link_source, initial_link_target): i64 {
+    var pkg = _test_scratch_dir();
+    var manifest_path = alloc(strlen(pkg) + 16);
+    memcpy(manifest_path, pkg, strlen(pkg));
+    memcpy(manifest_path + strlen(pkg), "/hapi.cyml\x00", 11);
+
+    var manifest = alloc(512);
+    var mp = 0;
+    var header = "[package]\nname = \"test-pkg\"\nversion = \"0.1.0\"\n";
+    memcpy(manifest + mp, header, strlen(header));
+    mp = mp + strlen(header);
+    if (initial_link_source != 0 && initial_link_target != 0) {
+        var prefix = "\n[[link]]\nsource = \"";
+        memcpy(manifest + mp, prefix, strlen(prefix)); mp = mp + strlen(prefix);
+        memcpy(manifest + mp, initial_link_source, strlen(initial_link_source));
+        mp = mp + strlen(initial_link_source);
+        memcpy(manifest + mp, "\"\ntarget = \"", 12); mp = mp + 12;
+        memcpy(manifest + mp, initial_link_target, strlen(initial_link_target));
+        mp = mp + strlen(initial_link_target);
+        memcpy(manifest + mp, "\"\n", 2); mp = mp + 2;
+        # Also create the source file so the manifest is internally consistent.
+        var sfile = alloc(strlen(pkg) + strlen(initial_link_source) + 2);
+        memcpy(sfile, pkg, strlen(pkg));
+        store8(sfile + strlen(pkg), 47);
+        memcpy(sfile + strlen(pkg) + 1, initial_link_source, strlen(initial_link_source));
+        store8(sfile + strlen(pkg) + 1 + strlen(initial_link_source), 0);
+        _test_write_file(sfile, "x");
+    }
+
+    var fd = file_open(manifest_path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    file_write(fd, manifest, mp);
+    file_close(fd);
+    return pkg;
+}
+
+# ------------------------------------------------------------
+# manifest_write — append + remove a row
+# ------------------------------------------------------------
+
+fn test_manifest_append_row() {
+    test_group("manifest_write: append [[link]] row");
+
+    var pkg = _test_make_package("a", ".a");
+    var manifest_path = alloc(strlen(pkg) + 16);
+    memcpy(manifest_path, pkg, strlen(pkg));
+    memcpy(manifest_path + strlen(pkg), "/hapi.cyml\x00", 11);
+
+    var rc = manifest_append_link_row(manifest_path, "zshrc", ".zshrc");
+    assert_eq(rc, 0, "append succeeded");
+
+    var len = 0;
+    var buf = _hmw_slurp(manifest_path, &len);
+    assert(_test_substr(buf, len, "source = \"zshrc\"") >= 0, "new source present");
+    assert(_test_substr(buf, len, "target = \".zshrc\"") >= 0, "new target present");
+    # Original row preserved
+    assert(_test_substr(buf, len, "source = \"a\"") >= 0, "original row intact");
+    return 0;
+}
+
+fn test_manifest_remove_row() {
+    test_group("manifest_write: remove [[link]] row");
+
+    var pkg = _test_make_package("a", ".a");
+    var manifest_path = alloc(strlen(pkg) + 16);
+    memcpy(manifest_path, pkg, strlen(pkg));
+    memcpy(manifest_path + strlen(pkg), "/hapi.cyml\x00", 11);
+
+    manifest_append_link_row(manifest_path, "zshrc", ".zshrc");
+    var rc = manifest_remove_link_row(manifest_path, "zshrc", ".zshrc");
+    assert_eq(rc, 0, "remove succeeded");
+
+    var len = 0;
+    var buf = _hmw_slurp(manifest_path, &len);
+    assert(_test_substr(buf, len, "source = \"zshrc\"") < 0, "removed source absent");
+    assert(_test_substr(buf, len, "source = \"a\"") >= 0, "untouched row preserved");
+
+    var rc2 = manifest_remove_link_row(manifest_path, "missing", ".missing");
+    assert(rc2 < 0, "remove returns < 0 when row absent");
+    return 0;
+}
+
+# ------------------------------------------------------------
+# adopt — happy path + refusal matrix
+# ------------------------------------------------------------
+
+fn test_cmd_adopt_happy_path() {
+    test_group("adopt: happy path (M4 acceptance)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    var pkg = _test_make_package(0, 0);
+    var manifest_path = alloc(strlen(pkg) + 16);
+    memcpy(manifest_path, pkg, strlen(pkg));
+    memcpy(manifest_path + strlen(pkg), "/hapi.cyml\x00", 11);
+
+    # Plant the file under the scope root.
+    var src_file = alloc(strlen(scope) + 16);
+    memcpy(src_file, scope, strlen(scope));
+    memcpy(src_file + strlen(scope), "/.zshrc\x00", 8);
+    _test_write_file(src_file, "user content");
+
+    assert_eq(cmd_adopt(".zshrc", pkg), 0, "adopt returns 0");
+
+    # Target is now a symlink
+    var probe = link_probe(src_file);
+    assert_eq(link_probe_kind(probe), HAPI_LP_SYMLINK, ".zshrc is now a symlink");
+
+    # Source file landed in the package as "zshrc" (no leading dot)
+    var pkg_src = alloc(strlen(pkg) + 16);
+    memcpy(pkg_src, pkg, strlen(pkg));
+    memcpy(pkg_src + strlen(pkg), "/zshrc\x00", 7);
+    assert_eq(link_probe_kind(link_probe(pkg_src)), HAPI_LP_FILE, "zshrc landed in package");
+
+    # Manifest has the new row
+    var mlen = 0;
+    var mbuf = _hmw_slurp(manifest_path, &mlen);
+    assert(_test_substr(mbuf, mlen, "source = \"zshrc\"") >= 0, "manifest has source");
+    assert(_test_substr(mbuf, mlen, "target = \".zshrc\"") >= 0, "manifest has target");
+
+    # Audit trail has one op:adopt entry
+    var audit = audit_read_default();
+    assert_eq(vec_len(audit), 1, "one audit entry");
+    var e0 = vec_get(audit, 0);
+    assert_eq(_har_cstr_eq(hae_op(e0), "adopt"), 1, "op = adopt");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_adopt_refuses_symlink() {
+    test_group("adopt: refuses when target is already a symlink");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _test_make_package(0, 0);
+
+    var src_file = alloc(strlen(scope) + 16);
+    memcpy(src_file, scope, strlen(scope));
+    memcpy(src_file + strlen(scope), "/.zshrc\x00", 8);
+    sys_symlink("/tmp/something", src_file);
+
+    assert_eq(cmd_adopt(".zshrc", pkg), 1, "adopt of a symlink exits 1");
+    # Symlink untouched
+    assert_eq(link_probe_kind(link_probe(src_file)), HAPI_LP_SYMLINK, "symlink intact");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_adopt_refuses_directory() {
+    test_group("adopt: refuses when target is a directory");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _test_make_package(0, 0);
+
+    var dir = alloc(strlen(scope) + 16);
+    memcpy(dir, scope, strlen(scope));
+    memcpy(dir + strlen(scope), "/somedir\x00", 9);
+    sys_mkdir(dir, 0x1C0);
+
+    assert_eq(cmd_adopt("somedir", pkg), 1, "adopt of a directory exits 1");
+    assert_eq(link_probe_kind(link_probe(dir)), HAPI_LP_DIRECTORY, "directory intact");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_adopt_refuses_absent() {
+    test_group("adopt: refuses when target is absent");
+
+    var env = _test_fresh_env();
+    var pkg = _test_make_package(0, 0);
+    assert_eq(cmd_adopt(".nonexistent", pkg), 1, "adopt of absent file exits 1");
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_adopt_refuses_duplicate_target() {
+    test_group("adopt: refuses when manifest already has the target");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    # Existing row claims .zshrc
+    var pkg = _test_make_package("zshrc", ".zshrc");
+
+    var src_file = alloc(strlen(scope) + 16);
+    memcpy(src_file, scope, strlen(scope));
+    memcpy(src_file + strlen(scope), "/.zshrc\x00", 8);
+    _test_write_file(src_file, "content");
+
+    assert_eq(cmd_adopt(".zshrc", pkg), 1, "duplicate target refused");
+    # File untouched (the manifest already had the row before we even tried)
+    assert_eq(link_probe_kind(link_probe(src_file)), HAPI_LP_FILE, "file intact");
+
+    _test_clear_env();
+    return 0;
+}
+
+# ------------------------------------------------------------
+# rollback over adopt — three-step reversal
+# ------------------------------------------------------------
+
+fn test_rollback_reverses_adopt() {
+    test_group("rollback: reverse-adopt restores file + symlink + manifest");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _test_make_package(0, 0);
+
+    var manifest_path = alloc(strlen(pkg) + 16);
+    memcpy(manifest_path, pkg, strlen(pkg));
+    memcpy(manifest_path + strlen(pkg), "/hapi.cyml\x00", 11);
+
+    var src_file = alloc(strlen(scope) + 16);
+    memcpy(src_file, scope, strlen(scope));
+    memcpy(src_file + strlen(scope), "/.zshrc\x00", 8);
+    _test_write_file(src_file, "original user content");
+
+    cmd_adopt(".zshrc", pkg);
+    assert_eq(link_probe_kind(link_probe(src_file)), HAPI_LP_SYMLINK, "after adopt: symlink");
+
+    assert_eq(cmd_rollback(), 0, "rollback succeeds");
+
+    # Symlink gone, file restored as a regular file
+    assert_eq(link_probe_kind(link_probe(src_file)), HAPI_LP_FILE, "file restored");
+
+    # Source no longer in package
+    var pkg_src = alloc(strlen(pkg) + 16);
+    memcpy(pkg_src, pkg, strlen(pkg));
+    memcpy(pkg_src + strlen(pkg), "/zshrc\x00", 7);
+    assert_eq(link_probe_kind(link_probe(pkg_src)), HAPI_LP_ABSENT, "source absent from package");
+
+    # Manifest row gone
+    var mlen = 0;
+    var mbuf = _hmw_slurp(manifest_path, &mlen);
+    assert(_test_substr(mbuf, mlen, "source = \"zshrc\"") < 0, "manifest row removed");
+
+    _test_clear_env();
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -712,6 +964,14 @@ fn main() {
     test_cmd_rollback_through_link_unlink_link();
     test_cmd_rollback_idempotent();
     test_cmd_rollback_stops_at_marker();
+    test_manifest_append_row();
+    test_manifest_remove_row();
+    test_cmd_adopt_happy_path();
+    test_cmd_adopt_refuses_symlink();
+    test_cmd_adopt_refuses_directory();
+    test_cmd_adopt_refuses_absent();
+    test_cmd_adopt_refuses_duplicate_target();
+    test_rollback_reverses_adopt();
     return assert_summary();
 }
 
