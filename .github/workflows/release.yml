@@ -1,33 +1,95 @@
 name: Release
 
+# Triggers on bare semver tags only (0.2.0, 1.0.0). hapi tags are
+# bare — no leading `v`. Non-numeric tags don't trigger; pushing
+# arbitrary tags can't accidentally cut a release.
 on:
   push:
-    tags: ['[0-9]*']
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: write
 
+# Serialize runs per tag so a double tag-push (or a workflow re-run)
+# can't spawn two parallel softprops invocations that each create a
+# draft release for the same tag and race each other's asset cleanup.
+# Per-tag scope — different tags don't block each other. Queue (not
+# cancel) so an in-flight upload finishes cleanly before the second
+# run hits the existing-release path.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # ────────────────────────────────────────────────────────────────
+  # Gate — full CI must pass before anything builds for release.
+  # Reuses ci.yml via workflow_call so a release can never ship a
+  # binary that hasn't passed build / tests.
+  # ────────────────────────────────────────────────────────────────
   ci:
-    name: CI Gate
+    name: CI gate
     uses: ./.github/workflows/ci.yml
 
-  release:
-    name: Build & Release
-    needs: [ci]
+  # ────────────────────────────────────────────────────────────────
+  # Verify — VERSION file, cyrius.cyml indirection, CHANGELOG
+  # section header, and the git tag must all agree before anything
+  # is packaged.
+  # ────────────────────────────────────────────────────────────────
+  version-verify:
+    name: Version verify
+    needs: ci
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify version
+      - name: Extract VERSION / tag / cyml version / changelog section
+        id: extract
         run: |
-          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          TAG_VERSION="${GITHUB_REF_NAME}"
-          test "$FILE_VERSION" = "$TAG_VERSION" || { echo "VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"; exit 1; }
+          TAG="${GITHUB_REF_NAME}"
+          echo "$TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::tag ($TAG) is not bare semver"; exit 1; }
+
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "VERSION file: $VERSION"
+          echo "git tag:      $TAG"
+
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::VERSION ($VERSION) != git tag ($TAG)" >&2
+            exit 1
+          fi
+
+          if ! grep -qE '^version *= *"\$\{file:VERSION\}"' cyrius.cyml; then
+            echo "::error::cyrius.cyml version no longer resolves via \${file:VERSION}" >&2
+            exit 1
+          fi
+
+          if ! grep -qE "^## \[${VERSION}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section header [${VERSION}]" >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # ────────────────────────────────────────────────────────────────
+  # Package — build the release binary (with DCE) and bundle it
+  # with project metadata. hapi is end-user-facing; the artifact
+  # is a statically-linked binary, not a library bundle.
+  # ────────────────────────────────────────────────────────────────
+  package:
+    name: Package
+    needs: version-verify
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version-verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install Cyrius toolchain
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          CYRIUS_VERSION=$(grep 'cyrius *= *"' cyrius.cyml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
@@ -37,16 +99,148 @@ jobs:
           cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
-      - name: Build
+      - name: Resolve dependencies
+        run: cyrius deps
+
+      - name: Build release binary (DCE)
+        # CYRIUS_DCE=1 drops the ~300 unreachable stdlib fns hapi
+        # pulls through `cyml` / `toml` / `result` / `fs` but never
+        # calls (~54 KB at v0.2.0). Smoke run below confirms DCE
+        # didn't mis-classify a live fn.
         run: |
-          cyrius deps
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/hapi
+          echo "hapi: $(wc -c < build/hapi) bytes"
+
+      - name: Smoke run
+        # Two end-to-end checks against the shipped example:
+        #   1. --version returns the tagged version verbatim
+        #   2. inspect parses the example manifest and exits 0
+        # Either failure proves the DCE'd binary lost something live.
+        run: |
+          out=$(./build/hapi --version)
+          echo "$out"
+          if [ "$out" != "hapi ${VERSION}" ]; then
+            echo "FAIL: --version output ($out) != 'hapi ${VERSION}'"
+            exit 1
+          fi
+          ./build/hapi inspect docs/examples/dotfiles-zsh
+
+      - name: Package binary artifact
+        # Two artifacts:
+        #   - hapi-${VERSION}-x86_64-linux.tar.gz — binary + metadata
+        #   - hapi-${VERSION}-x86_64-linux       — bare binary for
+        #     direct download (single-file install ergonomics).
+        run: |
+          PKG="hapi-${VERSION}-x86_64-linux"
+          mkdir -p "pkg/$PKG"
+          cp build/hapi "pkg/$PKG/"
+          cp README.md LICENSE CHANGELOG.md VERSION "pkg/$PKG/"
+          mkdir -p out
+          tar czf "out/${PKG}.tar.gz" -C pkg "$PKG"
+          cp build/hapi "out/${PKG}"
+
+      - name: Generate SHA256
+        run: |
+          cd out
+          sha256sum * > SHA256SUMS.bin
+
+      - name: Upload binary artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bin
+          path: |
+            out/*.tar.gz
+            out/hapi-*
+            out/SHA256SUMS.bin
+
+  # ────────────────────────────────────────────────────────────────
+  # Source tarball — language-agnostic, always linux runner.
+  # Shipped alongside the binary so offline mirrors / vendoring
+  # have a canonical archive even when GitHub's source-zip URLs
+  # aren't an option.
+  # ────────────────────────────────────────────────────────────────
+  source:
+    name: Source tarball
+    needs: version-verify
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version-verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create source tarball
+        run: |
+          mkdir -p out
+          git archive --format=tar.gz \
+            --prefix="hapi-${VERSION}/" \
+            -o "out/hapi-${VERSION}-src.tar.gz" HEAD
+          cd out
+          sha256sum "hapi-${VERSION}-src.tar.gz" > SHA256SUMS.src
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-source
+          path: |
+            out/*.tar.gz
+            out/SHA256SUMS.src
+
+  # ────────────────────────────────────────────────────────────────
+  # Release — collect artifacts + checksums, publish GitHub
+  # release. Body pulled from the matching CHANGELOG.md section.
+  # Pre-1.0 releases publish as prerelease so package managers
+  # don't auto-promote them — hapi's manifest schema is
+  # Breaking-until-v1.0 per ADR 0001.
+  # ────────────────────────────────────────────────────────────────
+  release:
+    name: GitHub release
+    needs: [package, source, version-verify]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version-verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-raw
+
+      - name: Consolidate artifacts
+        run: |
+          mkdir -p out
+          find dist-raw -type f \( -name '*.tar.gz' -o -name 'hapi-*' -o -name 'SHA256SUMS.*' \) \
+            -exec cp {} out/ \;
+          cd out
+          cat SHA256SUMS.* | sort -u > SHA256SUMS
+          rm -f SHA256SUMS.*
+          ls -la
+
+      - name: Extract release body from CHANGELOG
+        # Pull the section under `## [${VERSION}]` and stop at the
+        # next `## [` heading. Falls back to GitHub's
+        # generate_release_notes when the section is empty.
+        run: |
+          awk -v ver="${VERSION}" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/         { exit }
+            found                    { print }
+          ' CHANGELOG.md > /tmp/body.md
+          if [ ! -s /tmp/body.md ]; then
+            echo "::warning::CHANGELOG.md has no body for ${VERSION}; falling back to generated notes"
+          fi
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          name: "hapi ${{ env.VERSION }}"
+          body_path: /tmp/body.md
+          prerelease: ${{ startsWith(env.VERSION, '0.') }}
+          files: |
+            out/*.tar.gz
+            out/hapi-*
+            out/SHA256SUMS
           generate_release_notes: true
-          files: build/*
+          fail_on_unmatched_files: true
