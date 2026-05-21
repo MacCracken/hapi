@@ -5,9 +5,11 @@
 
 ## Version
 
-**0.5.0** — M4 (`adopt`) shipped 2026-05-20. M3 (`unlink` +
-`rollback`), M2 (`link` + audit trail), M1 (manifest +
-`inspect`) shipped same day. M0 scaffold landed 2026-05-19.
+**0.6.0** — M5 (`list` + `sync` + `status` + `checkpoint` +
+`check --strict`) shipped 2026-05-20, same day as M0–M4. M4
+(`adopt`), M3 (`unlink` + `rollback`), M2 (`link` + audit
+trail), M1 (manifest + `inspect`) all landed earlier the same
+day. M0 scaffold landed 2026-05-19.
 
 ## Toolchain
 
@@ -15,27 +17,27 @@
 
 ## Shape
 
-Binary (`hapi`). Argv dispatcher. Five real verbs at 0.5.0;
+Binary (`hapi`). Argv dispatcher. Ten real verbs at 0.6.0;
 `--version` / `--help` / `-v` / `-h` round out the surface.
-M5 → M6 verbs (`list`, `sync`, `status`, `checkpoint`,
-`check --strict`) plug into the same dispatch table.
+M6+ verbs (`--root`, `--dry-run`) plug into the same dispatch
+table.
 
 ### Current command surface
 
-| verb              | exit codes              | status     |
-|-------------------|-------------------------|------------|
-| `hapi inspect`    | 0 ok / 1 parse / 2 args | M1         |
-| `hapi link`       | 0 ok / 1 fail / 2 args  | M2         |
-| `hapi unlink`     | 0 ok / 1 refused / 2 args| M3        |
-| `hapi rollback`   | 0 ok / 1 IO error       | M3         |
-| `hapi adopt`      | 0 ok / 1 refused / 2 args| M4        |
-| `hapi --version`  | 0                       | M1         |
-| `hapi --help`     | 0                       | M1         |
-| `hapi list`       | —                       | M5 pending |
-| `hapi sync`       | —                       | M5 pending |
-| `hapi status`     | —                       | M5 pending |
-| `hapi checkpoint` | —                       | M5 pending (carried forward from M3) |
-| `hapi check --strict` | —                   | M5 pending (carried forward from M1) |
+| verb                  | exit codes               | status |
+|-----------------------|--------------------------|--------|
+| `hapi inspect`        | 0 ok / 1 parse / 2 args  | M1     |
+| `hapi link`           | 0 ok / 1 fail / 2 args   | M2     |
+| `hapi unlink`         | 0 ok / 1 refused / 2 args| M3     |
+| `hapi rollback`       | 0 ok / 1 IO error        | M3     |
+| `hapi adopt`          | 0 ok / 1 refused / 2 args| M4     |
+| `hapi list`           | 0 ok / 1 env error       | M5     |
+| `hapi sync`           | 0 ok / 1 fail / 2 args   | M5     |
+| `hapi status`         | 0 ok / 1 drift / 2 args  | M5     |
+| `hapi checkpoint`     | 0 ok / 1 IO error        | M5     |
+| `hapi check --strict` | 0 ok / 1 parse / 2 args  | M5     |
+| `hapi --version`      | 0                        | M1     |
+| `hapi --help`         | 0                        | M1     |
 
 ## Source
 
@@ -57,12 +59,27 @@ M5 → M6 verbs (`list`, `sync`, `status`, `checkpoint`,
   manifest edit + audit
 - `src/cmd/rollback.cyr` — reverse-replay; handles
   link / unlink / adopt entries
+- `src/cmd/checkpoint.cyr` — appends `op:rollback-marker`
+  via the M3 audit helper
+- `src/cmd/status.cyr` — read-only drift classifier over
+  manifest [[link]] rows
+- `src/cmd/list.cyr` — trail walker; per-package live-link
+  counter (link/adopt = create, unlink/unadopt = clear)
+- `src/cmd/check.cyr` — inspect with `--strict` (rejects
+  unknown sections / keys via the `_hapi_mf_strict` flag
+  added to `manifest.cyr`)
+- `src/cmd/sync.cyr` — thin wrapper over `cmd_link` (link
+  without `--force`); the verb communicates intent while
+  the engine is shared
 
-M5 onward fills:
+M6 onward fills:
 
-- `src/cmd/list.cyr` / `sync.cyr` / `status.cyr` (M5)
-- `src/cmd/checkpoint.cyr` (M5, carried forward from M3)
-- `src/cmd/check.cyr` with `--strict` mode (M5, carried forward from M1)
+- `--root <path>` capability gate (M6)
+- `--dry-run` flag (M6)
+- per-package manifest discovery for a no-arg `hapi sync`
+  (post-M5; needs a way to recover pkg_dir from a live
+  audit entry — deferred until kavach lands, or a
+  trail-format additive field carries it)
 
 ## Audit trail
 
@@ -80,8 +97,8 @@ M5 onward fills:
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 127 assertions across
-  29 test groups:
+- `tests/hapi.tcyr` — primary suite. 163 assertions across
+  41 test groups:
   - Manifest (7 groups): minimal, M1 acceptance, validation,
     path traversal, comments, on-disk parse, missing file
   - Audit writer (2 groups): link entry format, JSON escaping
@@ -98,6 +115,17 @@ M5 onward fills:
   - adopt (5 groups): M4 acceptance happy path, refuse
     symlink / directory / absent / duplicate target
   - rollback-of-adopt (1 group): three-step reversal
+  - checkpoint (1 group): marker bounds subsequent rollback
+  - status (4 groups): clean post-link, missing target,
+    wrong target, no-audit-writes invariant
+  - list (3 groups): live-link count after link/unlink cycle,
+    empty trail, unique-pkgs first-seen order
+  - strict-mode (4 groups): rejects unknown section, unknown
+    key in [package], unknown key in [[link]], accepts clean
+  - check (1 group): --strict flag does not leak across
+    parser invocations
+  - sync (2 groups): M5 acceptance (clean tree -> no audit
+    growth), re-creates a missing link
 
 ## Dependencies
 
@@ -127,7 +155,7 @@ means downstream packagers (zugot recipes) and user manifests.
 
 ## Next
 
-See [`roadmap.md`](roadmap.md) for the M5 → v1.0 plan. Next
-ship is M5 (`list` + `sync` + `status`, plus the
-carried-forward `checkpoint` and `check --strict` verbs),
-targeting v0.6.0.
+See [`roadmap.md`](roadmap.md) for the M6 → v1.0 plan. Next
+ship is M6 (`--root` capability gate + `--dry-run`), targeting
+v0.7.0. Depends on the kavach capability API; ships with a
+CLI-level allowlist until that surface stabilizes.

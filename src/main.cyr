@@ -18,13 +18,18 @@ include "src/cmd/link.cyr"
 include "src/cmd/unlink.cyr"
 include "src/cmd/adopt.cyr"
 include "src/cmd/rollback.cyr"
+include "src/cmd/checkpoint.cyr"
+include "src/cmd/status.cyr"
+include "src/cmd/list.cyr"
+include "src/cmd/check.cyr"
+include "src/cmd/sync.cyr"
 include "lib/args.cyr"
 
 # VERSION literal kept in sync with the VERSION file at the
 # project root. CLAUDE.md's work loop calls out "version sync"
 # explicitly — bump this string in the same commit as VERSION.
 fn hapi_print_version(): i64 {
-    println("hapi 0.5.0");
+    println("hapi 0.6.0");
     return 0;
 }
 
@@ -37,6 +42,11 @@ fn hapi_print_usage(): i64 {
     println("  unlink <pkg>              remove this package's symlinks from the trail");
     println("  adopt <file> <pkg>        move a file into a package, link back");
     println("  rollback                  reverse the audit trail to the last marker");
+    println("  checkpoint                append a rollback-marker to the audit trail");
+    println("  status <path>             show drift between manifest and on-disk symlinks");
+    println("  list                      list packages tracked in the audit trail");
+    println("  check <path> [--strict]   parse + display a manifest, optionally strict");
+    println("  sync <path>               re-apply a manifest (idempotent)");
     println("");
     println("options:");
     println("  --version, -v             print version and exit");
@@ -105,6 +115,39 @@ fn main(): i64 {
 
     if (_hapi_argeq(verb, "rollback") == 1) {
         return cmd_rollback();
+    }
+
+    if (_hapi_argeq(verb, "checkpoint") == 1) {
+        return cmd_checkpoint();
+    }
+
+    if (_hapi_argeq(verb, "status") == 1) {
+        var path = 0;
+        if (n >= 3) { path = argv(2); }
+        return cmd_status(path);
+    }
+
+    if (_hapi_argeq(verb, "list") == 1) {
+        return cmd_list();
+    }
+
+    if (_hapi_argeq(verb, "sync") == 1) {
+        var path = 0;
+        if (n >= 3) { path = argv(2); }
+        return cmd_sync(path);
+    }
+
+    if (_hapi_argeq(verb, "check") == 1) {
+        var path = 0;
+        var strict = 0;
+        var ai = 2;
+        while (ai < n) {
+            var a = argv(ai);
+            if (_hapi_argeq(a, "--strict") == 1) { strict = 1; }
+            elif (path == 0) { path = a; }
+            ai = ai + 1;
+        }
+        return cmd_check(path, strict);
     }
 
     eprint("hapi: unknown command: ", 23);

@@ -34,7 +34,18 @@ enum HapiMfError {
     HapiMfMissingTarget;
     HapiMfDuplicateTarget;
     HapiMfPathTraversal;
+    HapiMfUnknownSection;
+    HapiMfUnknownKey;
 }
+
+# Strict-mode flag. When 1, the parser rejects unknown
+# sections and unknown keys (used by `hapi check --strict`).
+# Default 0 keeps the lenient behavior callers (inspect, link,
+# unlink, adopt, status) rely on for additive schema growth.
+var _hapi_mf_strict = 0;
+
+fn hapi_mf_set_strict(v): i64 { _hapi_mf_strict = v; return 0; }
+fn hapi_mf_strict(): i64 { return _hapi_mf_strict; }
 
 # Section dispatch tags used during parse.
 enum HapiMfSection {
@@ -249,6 +260,7 @@ fn hapi_mf_parse_header_r(data, len): Result {
                     cur = HAPI_MF_SECT_LINK;
                     cur_link = hapi_link_new(0, 0);
                 } else {
+                    if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownSection); }
                     cur = HAPI_MF_SECT_UNKNOWN;
                 }
             }
@@ -271,6 +283,7 @@ fn hapi_mf_parse_header_r(data, len): Result {
                 if (str_eq_cstr(section, "package") == 1) {
                     cur = HAPI_MF_SECT_PACKAGE;
                 } else {
+                    if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownSection); }
                     cur = HAPI_MF_SECT_UNKNOWN;
                 }
             }
@@ -292,17 +305,28 @@ fn hapi_mf_parse_header_r(data, len): Result {
                                 if (str_eq_cstr(key, "name") == 1) { store64(m, val); }
                                 elif (str_eq_cstr(key, "version") == 1) { store64(m + 8, val); }
                                 elif (str_eq_cstr(key, "description") == 1) { store64(m + 16, val); }
+                                else {
+                                    if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
+                                }
                             } elif (cur == HAPI_MF_SECT_LINK && cur_link != 0) {
                                 if (str_eq_cstr(key, "source") == 1) { store64(cur_link, val); }
                                 elif (str_eq_cstr(key, "target") == 1) { store64(cur_link + 8, val); }
+                                else {
+                                    if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
+                                }
                             }
                         }
                         elif (vc == 91) {
                             var vp = 0;
                             var arr = _hapi_mf_parse_str_array(data, pos, len, &vp);
                             pos = vp;
-                            if (cur == HAPI_MF_SECT_PACKAGE && str_eq_cstr(key, "ignore") == 1) {
-                                store64(m + 32, arr);
+                            if (cur == HAPI_MF_SECT_PACKAGE) {
+                                if (str_eq_cstr(key, "ignore") == 1) { store64(m + 32, arr); }
+                                else {
+                                    if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
+                                }
+                            } elif (cur == HAPI_MF_SECT_LINK) {
+                                if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
                             }
                         }
                     }
@@ -370,5 +394,7 @@ fn hapi_mf_err_msg(code): i64 {
     if (code == HapiMfMissingTarget) { return "[[link]].target is missing or empty"; }
     if (code == HapiMfDuplicateTarget) { return "two [[link]] rows share the same target"; }
     if (code == HapiMfPathTraversal) { return "a path contains a `..` segment"; }
+    if (code == HapiMfUnknownSection) { return "manifest has an unknown [section] (strict mode)"; }
+    if (code == HapiMfUnknownKey) { return "manifest has an unknown key in a known section (strict mode)"; }
     return "unknown manifest error";
 }

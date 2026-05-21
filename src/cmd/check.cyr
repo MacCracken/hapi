@@ -1,0 +1,72 @@
+# cmd/check.cyr — `hapi check <package> [--strict]`
+#
+# Like `hapi inspect`, but with an opt-in `--strict` mode that
+# rejects unknown [section] headers and unknown keys inside
+# the known sections. Targets CI / lint use — the default
+# parser is lenient by design (ADR 0001 leaves schema headroom
+# for additive growth), and the strict surface is the one that
+# guards against typos and stale schema drift.
+#
+# Exit codes:
+#   0  manifest parsed cleanly (lenient or strict, per flag)
+#   1  parse error (including strict-mode rejection)
+#   2  bad usage
+
+include "src/manifest.cyr"
+include "src/cmd/inspect.cyr"   # reuse _hapi_inspect_print_manifest / _hi_eputs
+
+# Same resolver as inspect; keeping it inline so check stays
+# decoupled from the inspect module's private helpers.
+fn _hck_resolve_manifest(arg): i64 {
+    var n = strlen(arg);
+    if (n >= 5) {
+        if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
+            && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
+            && load8(arg + n - 1) == 108) {
+            var out = alloc(n + 1);
+            memcpy(out, arg, n);
+            store8(out + n, 0);
+            return out;
+        }
+    }
+    var trim = n;
+    if (trim > 0 && load8(arg + trim - 1) == 47) { trim = trim - 1; }
+    var suffix = "/hapi.cyml";
+    var slen = 10;
+    var out = alloc(trim + slen + 1);
+    memcpy(out, arg, trim);
+    memcpy(out + trim, suffix, slen);
+    store8(out + trim + slen, 0);
+    return out;
+}
+
+fn cmd_check(path, strict): i64 {
+    if (path == 0) {
+        _hi_eputs("usage: hapi check <package-dir|hapi.cyml> [--strict]\n");
+        return 2;
+    }
+    var mpath = _hck_resolve_manifest(path);
+
+    if (strict == 1) { hapi_mf_set_strict(1); }
+    var res = hapi_mf_parse_file_r(mpath);
+    if (strict == 1) { hapi_mf_set_strict(0); }
+
+    if (is_err_result(res) == 1) {
+        var code = load64(res + 8);
+        var msg = hapi_mf_err_msg(code);
+        _hi_eputs("hapi: ");
+        eprint(msg, strlen(msg));
+        _hi_eputs(" (");
+        eprint(mpath, strlen(mpath));
+        _hi_eputs(")\n");
+        return 1;
+    }
+    var m = load64(res + 8);
+    _hapi_inspect_print_manifest(m);
+    if (strict == 1) {
+        print("ok (strict)\n", 12);
+    } else {
+        print("ok\n", 3);
+    }
+    return 0;
+}

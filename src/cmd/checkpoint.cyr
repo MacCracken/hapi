@@ -1,0 +1,29 @@
+# cmd/checkpoint.cyr — `hapi checkpoint`
+#
+# Appends a single `op:rollback-marker` entry to the audit
+# trail. The marker is the boundary that `hapi rollback` stops
+# at — every subsequent link / unlink / adopt is in scope for
+# the next rollback; everything before is sealed.
+#
+# Per-entry machinery (audit_append_rollback_marker_r) shipped
+# in M3 alongside rollback's walk-to-marker logic. This is the
+# user-facing surface the M5 roadmap calls out.
+#
+# Exit codes:
+#   0  marker appended
+#   1  audit-trail write failed
+
+include "src/audit.cyr"
+
+fn _hck_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn _hck_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
+fn cmd_checkpoint(): i64 {
+    var r = audit_append_rollback_marker_r();
+    if (is_err_result(r) == 1) {
+        _hck_eputs("hapi: audit-trail write failed (could not append checkpoint)\n");
+        return 1;
+    }
+    _hck_puts("checkpoint written\n");
+    return 0;
+}

@@ -1,0 +1,148 @@
+# cmd/status.cyr — `hapi status <package>`
+#
+# Read-only drift check: parse the manifest, classify each
+# [[link]] row against the on-disk state, print a per-row
+# summary. No audit writes, no filesystem mutation.
+#
+# Classifications:
+#   OK          — symlink points where hapi link would write
+#   MISSING     — target absent
+#   WRONG       — symlink points elsewhere (user / other tool wrote)
+#   FILE        — regular file at target (link would refuse)
+#   DIRECTORY   — directory at target (link would refuse)
+#   ERROR       — probe failed (permission, etc.)
+#
+# Exit codes:
+#   0  all rows OK
+#   1  any row drifted, or manifest parse failed
+#   2  bad usage
+
+include "src/manifest.cyr"
+include "src/fs_link.cyr"
+include "src/cmd/link.cyr"   # scope-root override hook
+
+fn _hst_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn _hst_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
+# Same resolver as inspect/link — accept a *.cyml path or a
+# package directory.
+fn _hst_resolve_manifest(arg): i64 {
+    var n = strlen(arg);
+    if (n >= 5) {
+        if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
+            && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
+            && load8(arg + n - 1) == 108) {
+            return fsl_to_absolute(arg);
+        }
+    }
+    var abs_arg = fsl_to_absolute(arg);
+    return _fsl_path_join(abs_arg, "hapi.cyml");
+}
+
+fn _hst_cstr_eq(a, b): i64 {
+    if (a == 0 || b == 0) { return 0; }
+    var an = strlen(a);
+    var bn = strlen(b);
+    if (an != bn) { return 0; }
+    return memeq(a, b, an);
+}
+
+fn cmd_status(pkg_arg): i64 {
+    if (pkg_arg == 0) {
+        _hst_eputs("usage: hapi status <package-dir|hapi.cyml>\n");
+        return 2;
+    }
+
+    var manifest_path = _hst_resolve_manifest(pkg_arg);
+    var pkg_dir_abs = _fsl_path_dirname(manifest_path);
+
+    var mr = hapi_mf_parse_file_r(manifest_path);
+    if (is_err_result(mr) == 1) {
+        var code = load64(mr + 8);
+        var msg = hapi_mf_err_msg(code);
+        _hst_eputs("hapi: ");
+        eprint(msg, strlen(msg));
+        _hst_eputs(" (");
+        eprint(manifest_path, strlen(manifest_path));
+        _hst_eputs(")\n");
+        return 1;
+    }
+    var m = load64(mr + 8);
+
+    var scope_root = _hlnk_scope_root_override;
+    if (scope_root == 0) { scope_root = getenv("HOME"); }
+    if (scope_root == 0 || strlen(scope_root) == 0) {
+        _hst_eputs("hapi: $HOME is unset; cannot resolve link targets\n");
+        return 1;
+    }
+    var scope_root_abs = fsl_to_absolute(scope_root);
+
+    var links = hapi_mf_links(m);
+    var nlinks = vec_len(links);
+    var ok = 0;
+    var drift = 0;
+
+    var i = 0;
+    while (i < nlinks) {
+        var lnk = vec_get(links, i);
+        var src_cstr = _fsl_str_to_cstr(hapi_link_source(lnk));
+        var tgt_cstr = _fsl_str_to_cstr(hapi_link_target(lnk));
+        var abs_src = _fsl_path_join(pkg_dir_abs, src_cstr);
+        var abs_tgt = _fsl_path_join(scope_root_abs, tgt_cstr);
+        var tgt_parent = _fsl_path_dirname(abs_tgt);
+        var expected = fsl_compute_relative(tgt_parent, abs_src);
+
+        var probe = link_probe(abs_tgt);
+        var kind = link_probe_kind(probe);
+        var status_lit = "ERROR  ";
+        var detail = 0;
+        var row_ok = 0;
+        if (kind == HAPI_LP_ABSENT) {
+            status_lit = "MISSING";
+        } elif (kind == HAPI_LP_SYMLINK) {
+            var existing = link_probe_target(probe);
+            if (_hst_cstr_eq(existing, expected) == 1) {
+                status_lit = "OK     ";
+                row_ok = 1;
+            } else {
+                status_lit = "WRONG  ";
+                detail = existing;
+            }
+        } elif (kind == HAPI_LP_FILE) {
+            status_lit = "FILE   ";
+        } elif (kind == HAPI_LP_DIRECTORY) {
+            status_lit = "DIR    ";
+        }
+
+        _hst_puts("  ");
+        _hst_puts(status_lit);
+        _hst_puts("  ");
+        _hst_puts(abs_tgt);
+        if (kind == HAPI_LP_SYMLINK && row_ok == 0) {
+            _hst_puts("  (-> ");
+            _hst_puts(detail);
+            _hst_puts("; expected -> ");
+            _hst_puts(expected);
+            _hst_puts(")");
+        }
+        _hst_puts("\n");
+
+        if (row_ok == 1) { ok = ok + 1; }
+        else { drift = drift + 1; }
+        i = i + 1;
+    }
+
+    _hst_puts("status ");
+    fmt_int(ok);
+    _hst_puts(" / ");
+    fmt_int(nlinks);
+    _hst_puts(" OK");
+    if (drift > 0) {
+        _hst_puts(" (");
+        fmt_int(drift);
+        _hst_puts(" drift)");
+    }
+    _hst_puts("\n");
+    if (drift > 0) { return 1; }
+    return 0;
+}

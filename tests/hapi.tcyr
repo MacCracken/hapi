@@ -10,6 +10,11 @@ include "src/cmd/link.cyr"
 include "src/cmd/unlink.cyr"
 include "src/cmd/adopt.cyr"
 include "src/cmd/rollback.cyr"
+include "src/cmd/checkpoint.cyr"
+include "src/cmd/status.cyr"
+include "src/cmd/list.cyr"
+include "src/cmd/check.cyr"
+include "src/cmd/sync.cyr"
 
 # Convenience: parse a literal manifest string and assert it
 # returned Err(<expected>). `expected` is one of the HapiMf*
@@ -900,6 +905,276 @@ fn test_cmd_adopt_refuses_duplicate_target() {
 # rollback over adopt — three-step reversal
 # ------------------------------------------------------------
 
+# ============================================================
+# M5 — checkpoint, status, list, check --strict, sync tests
+# ============================================================
+
+fn test_cmd_sync_idempotent_clean_tree() {
+    test_group("sync: clean tree -> no audit growth (M5 acceptance)");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+
+    assert_eq(cmd_sync("docs/examples/dotfiles-zsh"), 0, "first sync succeeds");
+    var size_after_first = _test_file_size(audit_path);
+    assert(size_after_first > 0, "first sync wrote audit entries (links were created)");
+
+    assert_eq(cmd_sync("docs/examples/dotfiles-zsh"), 0, "second sync succeeds");
+    var size_after_second = _test_file_size(audit_path);
+    assert_eq(size_after_second, size_after_first,
+              "second sync on a clean tree produced zero audit entries");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_sync_creates_missing_links() {
+    test_group("sync: re-creates a missing link, preserves the rest");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    var size_after_link = _test_file_size(audit_path);
+
+    # User deletes one symlink.
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    sys_unlink(zrc);
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT, "zshrc gone");
+
+    assert_eq(cmd_sync("docs/examples/dotfiles-zsh"), 0, "sync exits 0");
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "zshrc re-linked");
+
+    var size_after_sync = _test_file_size(audit_path);
+    assert(size_after_sync > size_after_link, "audit grew by exactly the one re-link");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_strict_mode_rejects_unknown_section() {
+    test_group("check --strict: unknown section is rejected");
+
+    var src = "[package]\nname = \"x\"\nversion = \"1.0\"\n[weird]\nfoo = \"bar\"\n";
+
+    # Lenient (default): parses cleanly.
+    var r1 = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(r1), 1, "lenient parser accepts unknown section");
+
+    # Strict: rejected with HapiMfUnknownSection.
+    hapi_mf_set_strict(1);
+    var r2 = hapi_mf_parse_header_r(src, strlen(src));
+    hapi_mf_set_strict(0);
+    assert_eq(is_err_result(r2), 1, "strict parser returns Err");
+    assert_eq(load64(r2 + 8), HapiMfUnknownSection, "code is HapiMfUnknownSection");
+    return 0;
+}
+
+fn test_strict_mode_rejects_unknown_key() {
+    test_group("check --strict: unknown key in [package] is rejected");
+
+    var src = "[package]\nname = \"x\"\nversion = \"1.0\"\nauthor = \"me\"\n";
+
+    var r1 = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(r1), 1, "lenient parser tolerates `author`");
+
+    hapi_mf_set_strict(1);
+    var r2 = hapi_mf_parse_header_r(src, strlen(src));
+    hapi_mf_set_strict(0);
+    assert_eq(is_err_result(r2), 1, "strict parser returns Err");
+    assert_eq(load64(r2 + 8), HapiMfUnknownKey, "code is HapiMfUnknownKey");
+    return 0;
+}
+
+fn test_strict_mode_rejects_unknown_link_key() {
+    test_group("check --strict: unknown key in [[link]] is rejected");
+
+    var src = "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \".a\"\nmode = \"copy\"\n";
+
+    var r1 = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(r1), 1, "lenient parser tolerates `mode`");
+
+    hapi_mf_set_strict(1);
+    var r2 = hapi_mf_parse_header_r(src, strlen(src));
+    hapi_mf_set_strict(0);
+    assert_eq(is_err_result(r2), 1, "strict parser returns Err");
+    assert_eq(load64(r2 + 8), HapiMfUnknownKey, "code is HapiMfUnknownKey");
+    return 0;
+}
+
+fn test_strict_mode_accepts_clean_manifest() {
+    test_group("check --strict: well-formed manifest still parses");
+
+    var src = "[package]\nname = \"x\"\nversion = \"1.0\"\ndescription = \"d\"\nignore = [\"*.bak\"]\n[[link]]\nsource = \"a\"\ntarget = \".a\"\n";
+
+    hapi_mf_set_strict(1);
+    var r = hapi_mf_parse_header_r(src, strlen(src));
+    hapi_mf_set_strict(0);
+    assert_eq(is_ok(r), 1, "strict accepts fully-known schema");
+    return 0;
+}
+
+fn test_cmd_check_strict_resets_flag() {
+    test_group("check: --strict flag does not leak to other parsers");
+
+    # cmd_check should restore the strict flag to 0 even on Err
+    # so later commands (link, status, etc.) keep lenient parsing.
+    cmd_check("docs/examples/dotfiles-zsh", 1);
+    assert_eq(hapi_mf_strict(), 0, "strict flag restored after cmd_check");
+    return 0;
+}
+
+fn test_cmd_list_counts_live_links() {
+    test_group("list: counts live links after link/unlink ops");
+
+    var env = _test_fresh_env();
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+
+    var trail = audit_read_default();
+    var live = _hls_live_count(trail, "dotfiles-zsh");
+    assert_eq(live, 3, "3 live links after link");
+
+    cmd_unlink("dotfiles-zsh");
+    var trail2 = audit_read_default();
+    var live2 = _hls_live_count(trail2, "dotfiles-zsh");
+    assert_eq(live2, 0, "0 live links after unlink");
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    var trail3 = audit_read_default();
+    var live3 = _hls_live_count(trail3, "dotfiles-zsh");
+    assert_eq(live3, 3, "3 live links after re-link");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_list_empty_trail() {
+    test_group("list: empty trail is not an error");
+
+    var env = _test_fresh_env();
+    assert_eq(cmd_list(), 0, "list returns 0 on empty trail");
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_list_uniques_packages() {
+    test_group("list: uniques packages, preserves first-seen order");
+
+    var env = _test_fresh_env();
+    audit_append_link_r("pkgA", "1.0", "h", "a", ".a", "/abs/a", "/abs/ta");
+    audit_append_link_r("pkgB", "1.0", "h", "b", ".b", "/abs/b", "/abs/tb");
+    audit_append_link_r("pkgA", "1.0", "h", "c", ".c", "/abs/c", "/abs/tc");
+
+    var trail = audit_read_default();
+    var pkgs = _hls_unique_pkgs(trail);
+    assert_eq(vec_len(pkgs), 2, "two unique packages");
+    assert_eq(_hls_cstr_eq(vec_get(pkgs, 0), "pkgA"), 1, "pkgA first-seen");
+    assert_eq(_hls_cstr_eq(vec_get(pkgs, 1), "pkgB"), 1, "pkgB next");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_status_clean_after_link() {
+    test_group("status: all OK after a clean link");
+
+    var env = _test_fresh_env();
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    assert_eq(cmd_status("docs/examples/dotfiles-zsh"), 0, "status returns 0 (no drift)");
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_status_detects_missing() {
+    test_group("status: detects missing target");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    # User removes one of the symlinks manually.
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    sys_unlink(zrc);
+
+    assert_eq(cmd_status("docs/examples/dotfiles-zsh"), 1, "drift -> exit 1");
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_status_detects_wrong_target() {
+    test_group("status: detects symlink pointing elsewhere");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    sys_unlink(zrc);
+    sys_symlink("/tmp/elsewhere", zrc);
+
+    assert_eq(cmd_status("docs/examples/dotfiles-zsh"), 1, "wrong target -> exit 1");
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_status_no_audit_writes() {
+    test_group("status: never writes to the audit trail");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    var size_before = _test_file_size(audit_path);
+
+    cmd_status("docs/examples/dotfiles-zsh");
+    var size_after = _test_file_size(audit_path);
+
+    assert_eq(size_after, size_before, "audit trail unchanged across status");
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cmd_checkpoint_marker_stops_rollback() {
+    test_group("checkpoint: marker bounds subsequent rollback");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "linked");
+
+    assert_eq(cmd_checkpoint(), 0, "checkpoint returns 0");
+
+    # Trail now has 3 link entries + 1 marker.
+    var trail = audit_read_default();
+    assert_eq(vec_len(trail), 4, "4 entries (3 link + 1 marker)");
+    var marker = vec_get(trail, 3);
+    assert_eq(_har_cstr_eq(hae_op(marker), "rollback-marker"), 1, "last entry is marker");
+
+    # Unlink after the checkpoint; rollback should reverse only
+    # the unlinks (back to linked state), leaving the original
+    # links beyond the marker untouched.
+    cmd_unlink("dotfiles-zsh");
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT, "unlinked");
+
+    cmd_rollback();
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK,
+              "marker bounded rollback: link restored, not chased past marker");
+
+    _test_clear_env();
+    return 0;
+}
+
 fn test_rollback_reverses_adopt() {
     test_group("rollback: reverse-adopt restores file + symlink + manifest");
 
@@ -972,6 +1247,21 @@ fn main() {
     test_cmd_adopt_refuses_absent();
     test_cmd_adopt_refuses_duplicate_target();
     test_rollback_reverses_adopt();
+    test_cmd_checkpoint_marker_stops_rollback();
+    test_cmd_status_clean_after_link();
+    test_cmd_status_detects_missing();
+    test_cmd_status_detects_wrong_target();
+    test_cmd_status_no_audit_writes();
+    test_cmd_list_counts_live_links();
+    test_cmd_list_empty_trail();
+    test_cmd_list_uniques_packages();
+    test_strict_mode_rejects_unknown_section();
+    test_strict_mode_rejects_unknown_key();
+    test_strict_mode_rejects_unknown_link_key();
+    test_strict_mode_accepts_clean_manifest();
+    test_cmd_check_strict_resets_flag();
+    test_cmd_sync_idempotent_clean_tree();
+    test_cmd_sync_creates_missing_links();
     return assert_summary();
 }
 

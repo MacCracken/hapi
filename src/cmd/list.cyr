@@ -1,0 +1,179 @@
+# cmd/list.cyr — `hapi list`
+#
+# Walks the audit trail, groups by package name, prints one
+# row per package with the count of live (still-on-disk) links.
+# Read-only — no audit writes, no filesystem mutation.
+#
+# A link is "live" when the last entry for its target (per
+# package) is a creator (`op:link` or `op:adopt`) rather than
+# a remover (`op:unlink` or `op:unadopt`). This is the same
+# last-write-wins reduction `unlink` uses, generalized to
+# include adopt/unadopt.
+#
+# Scope is `$HOME` at v0.5.x — capability-bounded `--root`
+# support lands in M6. The line is informational either way.
+#
+# Exit codes:
+#   0  trail walked (empty trail is not an error)
+#   1  audit-read or env failure
+
+include "src/audit.cyr"
+include "src/audit_reader.cyr"
+include "src/cmd/link.cyr"   # _hlnk_scope_root_override
+
+fn _hls_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn _hls_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
+fn _hls_cstr_eq(a, b): i64 {
+    if (a == 0 || b == 0) { return 0; }
+    var an = strlen(a);
+    var bn = strlen(b);
+    if (an != bn) { return 0; }
+    return memeq(a, b, an);
+}
+
+# Count the live links for `pkg_cstr` by walking the trail in
+# order, maintaining a per-target last-op map. link/adopt set
+# the target live; unlink/unadopt clear it.
+fn _hls_live_count(trail, pkg_cstr): i64 {
+    var targets = vec_new();   # parallel cstrings
+    var live    = vec_new();   # parallel i64 (1=live, 0=cleared)
+
+    var n = vec_len(trail);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(trail, i);
+        var ep = hae_pkg(e);
+        if (_hls_cstr_eq(ep, pkg_cstr) == 1) {
+            var op = hae_op(e);
+            var tgt = hae_abs_target(e);
+            if (tgt != 0) {
+                var found = 0 - 1;
+                var j = 0;
+                while (j < vec_len(targets) && found < 0) {
+                    if (_hls_cstr_eq(vec_get(targets, j), tgt) == 1) { found = j; }
+                    j = j + 1;
+                }
+                var is_create = 0;
+                if (_hls_cstr_eq(op, "link") == 1)  { is_create = 1; }
+                elif (_hls_cstr_eq(op, "adopt") == 1) { is_create = 1; }
+                var is_remove = 0;
+                if (_hls_cstr_eq(op, "unlink") == 1)   { is_remove = 1; }
+                elif (_hls_cstr_eq(op, "unadopt") == 1) { is_remove = 1; }
+
+                if (is_create == 1) {
+                    if (found < 0) {
+                        vec_push(targets, tgt);
+                        vec_push(live, 1);
+                    } else {
+                        # Re-affirm the slot live; vec doesn't expose set
+                        # but we can rebuild this slot only.
+                        var nt = vec_new();
+                        var nl = vec_new();
+                        var k = 0;
+                        while (k < vec_len(targets)) {
+                            if (k == found) {
+                                vec_push(nt, vec_get(targets, k));
+                                vec_push(nl, 1);
+                            } else {
+                                vec_push(nt, vec_get(targets, k));
+                                vec_push(nl, vec_get(live, k));
+                            }
+                            k = k + 1;
+                        }
+                        targets = nt;
+                        live = nl;
+                    }
+                } elif (is_remove == 1) {
+                    if (found >= 0) {
+                        var nt = vec_new();
+                        var nl = vec_new();
+                        var k = 0;
+                        while (k < vec_len(targets)) {
+                            if (k == found) {
+                                vec_push(nt, vec_get(targets, k));
+                                vec_push(nl, 0);
+                            } else {
+                                vec_push(nt, vec_get(targets, k));
+                                vec_push(nl, vec_get(live, k));
+                            }
+                            k = k + 1;
+                        }
+                        targets = nt;
+                        live = nl;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    var count = 0;
+    var i2 = 0;
+    while (i2 < vec_len(live)) {
+        if (vec_get(live, i2) == 1) { count = count + 1; }
+        i2 = i2 + 1;
+    }
+    return count;
+}
+
+# Build the vec of unique non-null pkg names that appear in the
+# trail, in first-seen order. Skip entries without a pkg field
+# (rollback-marker).
+fn _hls_unique_pkgs(trail): i64 {
+    var seen = vec_new();
+    var n = vec_len(trail);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(trail, i);
+        var p = hae_pkg(e);
+        if (p != 0 && strlen(p) > 0) {
+            var dup = 0;
+            var j = 0;
+            while (j < vec_len(seen) && dup == 0) {
+                if (_hls_cstr_eq(vec_get(seen, j), p) == 1) { dup = 1; }
+                j = j + 1;
+            }
+            if (dup == 0) { vec_push(seen, p); }
+        }
+        i = i + 1;
+    }
+    return seen;
+}
+
+fn cmd_list(): i64 {
+    var scope_root = _hlnk_scope_root_override;
+    if (scope_root == 0) { scope_root = getenv("HOME"); }
+    if (scope_root == 0 || strlen(scope_root) == 0) {
+        _hls_eputs("hapi: $HOME is unset; cannot resolve scope\n");
+        return 1;
+    }
+
+    var trail = audit_read_default();
+    var pkgs = _hls_unique_pkgs(trail);
+    var npkg = vec_len(pkgs);
+
+    _hls_puts("scope: ");
+    _hls_puts(scope_root);
+    _hls_puts("\n");
+
+    if (npkg == 0) {
+        _hls_puts("(no packages in audit trail)\n");
+        return 0;
+    }
+
+    var i = 0;
+    while (i < npkg) {
+        var p = vec_get(pkgs, i);
+        var live = _hls_live_count(trail, p);
+        _hls_puts("  ");
+        _hls_puts(p);
+        _hls_puts("  ");
+        fmt_int(live);
+        _hls_puts(" live link");
+        if (live != 1) { _hls_puts("s"); }
+        _hls_puts("\n");
+        i = i + 1;
+    }
+    return 0;
+}

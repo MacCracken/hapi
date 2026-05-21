@@ -4,6 +4,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0]
+
+### Added
+- `hapi checkpoint` — appends an `op:rollback-marker` entry
+  to the audit trail. User-facing surface for the marker
+  machinery that shipped in M3 (audit-writer + rollback's
+  walk-to-marker logic). `src/cmd/checkpoint.cyr`.
+- `hapi status <pkg>` — read-only drift classifier. Walks
+  the manifest's [[link]] rows, probes each target, prints
+  one of `OK` / `MISSING` / `WRONG` / `FILE` / `DIR` /
+  `ERROR`. No audit writes; no filesystem mutation. Exit 0
+  when clean, 1 on any drift. `src/cmd/status.cyr`.
+- `hapi list` — walks the audit trail, prints unique
+  packages in first-seen order with their live-link count.
+  Reduction treats `link`/`adopt` as creators and
+  `unlink`/`unadopt` as removers (generalizes the unlink
+  command's per-target last-write-wins logic). Empty trail
+  is not an error. `src/cmd/list.cyr`.
+- `hapi check <pkg> [--strict]` — sibling of `inspect` with
+  an opt-in `--strict` mode. Strict rejects any `[section]`
+  other than `[package]` / `[[link]]`, and any unknown key
+  inside the known sections. The default parser stays
+  lenient per ADR 0001's additive-growth headroom; the
+  strict mode is the CI / lint surface. New
+  `HapiMfUnknownSection` and `HapiMfUnknownKey` error
+  variants in `src/manifest.cyr`, plus a module-level
+  `_hapi_mf_strict` flag that `cmd_check` sets/clears
+  around the parse call. `src/cmd/check.cyr`.
+- `hapi sync <pkg>` — re-apply a package's manifest
+  idempotently. At v0.6.0 this is `cmd_link` without
+  `--force`; the verb is the user-facing intent. Acceptance
+  test passes: `sync` on a clean tree produces zero new
+  audit entries. `src/cmd/sync.cyr`.
+- Per-command guides: `docs/guides/checkpoint.md`,
+  `status.md`, `list.md`, `check.md`, `sync.md`.
+
+### Changed
+- `hapi --version` reports 0.6.0; help text lists every
+  new verb.
+- Test suite grew from 127 → 163 assertions (29 → 41
+  groups) — checkpoint × 1, status × 4, list × 3,
+  strict-mode parser × 4, check × 1, sync × 2.
+- Roadmap M5 line in [`state.md`](docs/development/state.md)
+  retired; "Next" now points at M6 (`--root` capability
+  gate, `--dry-run`).
+- A no-arg `hapi sync` (sync every package in the trail) is
+  deferred from M5 — the audit format doesn't carry a
+  manifest path, so package-dir recovery would need either
+  a tree-walk heuristic or an additive trail field. Filed
+  as a post-M5 candidate in state.md's source section.
+
 ## [0.5.0]
 
 ### Added

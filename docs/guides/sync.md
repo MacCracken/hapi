@@ -1,0 +1,73 @@
+# `hapi sync`
+
+Re-apply a package's manifest idempotently. State that already
+matches the manifest is a no-op (no audit writes); missing
+links are created (one audit entry each); user-mutated state
+is refused (same conflict semantics as `hapi link`).
+
+## Synopsis
+
+```sh
+hapi sync <package-dir|hapi.cyml>
+```
+
+## What it does
+
+At v0.6.0 sync is operationally identical to `hapi link <pkg>`
+*without* `--force`. The verbs differ in *intent*:
+
+- `hapi link` — "create these now" (first apply, or new
+  links added to a manifest)
+- `hapi sync` — "make state match manifest" (idempotent
+  reconciliation)
+
+Both produce the same audit-trail and filesystem effects.
+A later patch may extend sync to also prune trail entries
+that are no longer present in the manifest — that
+reconciliation is deferred from this milestone.
+
+## Example: idempotent re-run
+
+```sh
+$ hapi sync docs/examples/dotfiles-zsh
+syncing docs/examples/dotfiles-zsh...
+  + ~/.zshrc -> ../...
+  + ~/.zshenv -> ../...
+  + ~/.config/zsh -> ../...
+linked 3 / 3 (0 already up-to-date)
+
+$ hapi sync docs/examples/dotfiles-zsh
+syncing docs/examples/dotfiles-zsh...
+linked 0 / 3 (3 already up-to-date)
+```
+
+Second invocation produced zero audit entries. That's the
+acceptance contract: `sync` over a clean tree is a no-op.
+
+## Example: re-create a missing link
+
+```sh
+$ rm ~/.zshrc
+
+$ hapi sync docs/examples/dotfiles-zsh
+syncing docs/examples/dotfiles-zsh...
+  + ~/.zshrc -> ../...
+linked 1 / 3 (2 already up-to-date)
+```
+
+Exactly the one missing link is re-created. The other two
+(matching the manifest already) stay quiet.
+
+## Exit codes
+
+| code | meaning                                                       |
+|------|---------------------------------------------------------------|
+| 0    | state matches manifest                                        |
+| 1    | conflict (use `hapi link --force` to override), parse error, or IO failure |
+| 2    | bad usage (no path argument)                                  |
+
+## See also
+
+- [`link.md`](link.md) — sync's engine; the `--force` flag for
+  override semantics.
+- [`status.md`](status.md) — detect drift before syncing.

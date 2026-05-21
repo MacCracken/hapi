@@ -1,0 +1,35 @@
+# cmd/sync.cyr — `hapi sync <package>`
+#
+# Re-apply a package's manifest idempotently. State that already
+# matches the manifest is a no-op (no audit writes); missing
+# links get created (one audit entry each); user-mutated state
+# is refused.
+#
+# At v0.6.0 sync is operationally identical to `hapi link <pkg>`
+# without `--force` — link is already idempotent by design (M2
+# acceptance test), and that's exactly the contract sync wants.
+# The verb is the user-facing intent: "make this match" vs
+# link's "create these now". A later patch may add reconciliation
+# beyond what link does (e.g. prune trail entries no longer in
+# the manifest); that's deferred from this milestone.
+#
+# Exit codes — passed through from cmd_link:
+#   0  state matches manifest after the run
+#   1  conflict, parse error, or IO failure
+#   2  bad usage
+
+include "src/cmd/link.cyr"
+
+fn _hsy_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn _hsy_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
+fn cmd_sync(pkg_arg): i64 {
+    if (pkg_arg == 0) {
+        _hsy_eputs("usage: hapi sync <package-dir|hapi.cyml>\n");
+        return 2;
+    }
+    _hsy_puts("syncing ");
+    _hsy_puts(pkg_arg);
+    _hsy_puts("...\n");
+    return cmd_link(pkg_arg, 0);
+}

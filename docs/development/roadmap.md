@@ -27,28 +27,6 @@ auditable rollback story, dogfooded on the maintainer's own dotfiles.
 
 ## Upcoming milestones
 
-### M5 — `list` + `sync` + trail management (v0.6.0)
-
-- `hapi list` — show all packages with their link counts and
-  capability scope
-- `hapi sync` — re-apply every package's manifest (idempotent; no-op
-  when state matches)
-- `hapi status` — drift between manifest and actual symlink state
-  (which links are missing, which point elsewhere)
-- `hapi checkpoint` — append a `rollback-marker` entry to the
-  audit trail (carried forward from M3 — the marker *machinery*
-  shipped in M3 via `audit_append_rollback_marker_r` and
-  `rollback`'s walk-to-marker logic, but the user-facing verb
-  to drop one lives here alongside the other trail-management
-  surface)
-- `hapi check <pkg> --strict` — like `inspect`, but unknown
-  manifest sections / keys become hard errors (carried forward
-  from M1 — the lenient parser tolerates additive growth; the
-  strict mode is the CI / lint surface)
-- **Dep gate**: M3 (shipped).
-- **Acceptance**: `sync` on a clean working tree produces no audit
-  entries (idempotent).
-
 ### M6 — Capability gate + non-`$HOME` roots (v0.7.0)
 
 - `--root <path>` flag opens a non-default root, gated by an
@@ -144,6 +122,19 @@ the call can be revisited with full context post-v1.0.
   [`docs/guides/rollback.md`](../guides/rollback.md) as the
   post-v1.0 surface refinement. v1.0 ships the no-arg form
   that walks to the most recent marker.
+- **No-arg `hapi sync` (sync every tracked package)** —
+  deferred from M5. The audit format doesn't carry a manifest
+  path, so package-dir recovery would need either a tree-walk
+  heuristic up from a live entry's `abs_source` until a
+  `hapi.cyml` is found, or an additive `manifest_path` field
+  in the trail. v0.6.0 ships per-package sync only; a future
+  patch can layer the no-arg form once one of those discovery
+  paths is chosen.
+- **`hapi sync` reconciliation (prune trail rows no longer in
+  manifest)** — deferred from M5. v0.6.0 sync is link-without-
+  --force; it creates missing rows but doesn't remove links
+  whose manifest row vanished. The full reconciliation surface
+  is post-v1.0 if user demand appears.
 - **`hapi trail compact`** — ADR 0002 notes the trail grows
   monotonically; a compact verb is owed someday. Out of scope
   for v1.0 — the trail's append-only contract is load-bearing
