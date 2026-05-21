@@ -5,8 +5,9 @@
 
 ## Version
 
-**0.6.0** — M5 (`list` + `sync` + `status` + `checkpoint` +
-`check --strict`) shipped 2026-05-20, same day as M0–M4. M4
+**0.7.0** — M6 (`--root` capability gate + `--dry-run`)
+shipped 2026-05-20. M5 (`list` + `sync` + `status` +
+`checkpoint` + `check --strict`) shipped same day. M4
 (`adopt`), M3 (`unlink` + `rollback`), M2 (`link` + audit
 trail), M1 (manifest + `inspect`) all landed earlier the same
 day. M0 scaffold landed 2026-05-19.
@@ -17,10 +18,12 @@ day. M0 scaffold landed 2026-05-19.
 
 ## Shape
 
-Binary (`hapi`). Argv dispatcher. Ten real verbs at 0.6.0;
+Binary (`hapi`). Argv dispatcher. Ten real verbs at 0.7.0;
 `--version` / `--help` / `-v` / `-h` round out the surface.
-M6+ verbs (`--root`, `--dry-run`) plug into the same dispatch
-table.
+Two global flags from M6 plug into per-verb arg parsers:
+`--root <path>` (link / adopt / sync / status / list) and
+`--dry-run` (link / unlink / adopt / sync / rollback /
+checkpoint).
 
 ### Current command surface
 
@@ -71,15 +74,30 @@ table.
 - `src/cmd/sync.cyr` — thin wrapper over `cmd_link` (link
   without `--force`); the verb communicates intent while
   the engine is shared
+- `src/cap.cyr` — `--root` capability check. Owns
+  `cap_check_root_r(path)`; resolves the arg to absolute,
+  implicitly allows `$HOME`, otherwise prefix-matches
+  against `HAPI_ALLOWED_ROOTS` (path-component boundary,
+  not byte boundary). Test hooks `cap_set_home` and
+  `cap_set_allowlist` for unit tests.
+- `src/cli.cyr` — owns the process-wide `_hapi_dry_run`
+  flag. Setter `hapi_set_dry_run(0|1)` and getter
+  `hapi_dry_run()`. Every mutating cmd checks the flag
+  before its first syscall / audit write.
 
-M6 onward fills:
+M7 onward fills:
 
-- `--root <path>` capability gate (M6)
-- `--dry-run` flag (M6)
+- maintainer's actual dotfiles migrate to hapi packages (M7)
+- P(-1) hardening pass + security audit (M7)
+- manifest-hash canonicalization migration `sha1:` →
+  `sha1c:` (M7, carried forward from M2)
 - per-package manifest discovery for a no-arg `hapi sync`
   (post-M5; needs a way to recover pkg_dir from a live
   audit entry — deferred until kavach lands, or a
   trail-format additive field carries it)
+- kavach swap inside `src/cap.cyr` once kavach exposes a
+  stable capability API (post-M6 — internal-only refactor,
+  no caller changes)
 
 ## Audit trail
 
@@ -97,8 +115,8 @@ M6 onward fills:
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 163 assertions across
-  41 test groups:
+- `tests/hapi.tcyr` — primary suite. 194 assertions across
+  52 test groups:
   - Manifest (7 groups): minimal, M1 acceptance, validation,
     path traversal, comments, on-disk parse, missing file
   - Audit writer (2 groups): link entry format, JSON escaping
@@ -126,6 +144,13 @@ M6 onward fills:
     parser invocations
   - sync (2 groups): M5 acceptance (clean tree -> no audit
     growth), re-creates a missing link
+  - cap (4 groups): path-within matcher (exact / subdir /
+    boundary / empty), deny outside $HOME + allowlist,
+    allow inside $HOME, allow listed root (+ byte-prefix
+    collision rejection)
+  - dry-run (6 groups): link / unlink / adopt / sync /
+    rollback / checkpoint each write zero audit + zero
+    filesystem state under `hapi_set_dry_run(1)`
 
 ## Dependencies
 
@@ -140,8 +165,9 @@ Pending upstream stdlib work tracked in proposals:
 - `cyrius/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md`
   (`sys_fsync` + `sys_fdatasync`)
 
-Future M6 may add a kavach capability-check dep once kavach
-exposes the surface.
+M6 ships the env-var allowlist stopgap (`HAPI_ALLOWED_ROOTS`);
+the kavach capability-check dep lands inside `src/cap.cyr`
+once kavach exposes a stable surface.
 
 ## Consumers
 
@@ -155,7 +181,8 @@ means downstream packagers (zugot recipes) and user manifests.
 
 ## Next
 
-See [`roadmap.md`](roadmap.md) for the M6 → v1.0 plan. Next
-ship is M6 (`--root` capability gate + `--dry-run`), targeting
-v0.7.0. Depends on the kavach capability API; ships with a
-CLI-level allowlist until that surface stabilizes.
+See [`roadmap.md`](roadmap.md) for the M7 → v1.0 plan. Next
+ship is M7 (dogfood + harden): maintainer's actual dotfiles
+migrate to hapi, P(-1) hardening pass with security audit
+doc, manifest-hash canonicalization migration. Targets
+v0.9.0.

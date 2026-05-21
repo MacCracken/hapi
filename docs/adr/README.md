@@ -19,4 +19,8 @@ Decisions about hapi — what we chose, the context, and the consequences we acc
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+- [0001 — hapi.cyml manifest schema](0001-hapi-cyml-manifest-schema.md)
+- [0002 — Audit-trail format](0002-audit-trail-format.md)
+- [0003 — Symlink target shape](0003-symlink-target-shape.md)
+- [0004 — `hapi adopt` semantics](0004-adopt-op-semantics.md)
+- [0005 — Capability-bounded roots](0005-capability-bounded-roots.md)

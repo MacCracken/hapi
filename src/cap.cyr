@@ -1,0 +1,121 @@
+# cap.cyr — capability check for the --root flag.
+#
+# Implements ADR 0005. The check is a stopgap until the kavach
+# capability service exposes a stable surface; the API
+# (`cap_check_root_r(path)` returning Result) is the contract
+# that survives the kavach migration unchanged.
+#
+# Rules:
+#   - `$HOME` (canonicalized) is always implicitly allowed.
+#   - Anything else must match an entry in `HAPI_ALLOWED_ROOTS`
+#     (colon-separated, absolute paths only).
+#   - Match passes when the resolved root equals an allowed
+#     prefix OR is a strict subdirectory of one (the split is
+#     on path component, not byte — `/etc/myproject` does NOT
+#     match `/etc/myprojectextra`).
+
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/syscalls.cyr"
+include "src/fs_link.cyr"
+
+enum HapiCapError {
+    HapiCapDenied;
+    HapiCapInvalidPath;
+}
+
+# Test hooks. When set (non-zero), the values below take
+# precedence over the corresponding env vars. Reset to 0 to
+# restore default behavior. The kavach migration won't touch
+# these — they're a test-only layer.
+var _cap_allowlist_override = 0;
+var _cap_home_override = 0;
+
+fn cap_set_allowlist(s): i64 { _cap_allowlist_override = s; return 0; }
+fn cap_set_home(s): i64 { _cap_home_override = s; return 0; }
+
+# 1 iff `path` and `prefix` share a path-component boundary at
+# `prefix`'s end. Concretely: path == prefix, OR
+# path[len(prefix)] == '/'. Strips a trailing '/' on the prefix
+# so the comparison stays symmetric.
+fn _cap_path_within(path, prefix): i64 {
+    var pn = strlen(path);
+    var fn_ = strlen(prefix);
+    if (fn_ == 0) { return 0; }
+    # Drop a trailing slash on the prefix (treat
+    # "/etc/myproject/" as "/etc/myproject").
+    if (fn_ > 1 && load8(prefix + fn_ - 1) == 47) { fn_ = fn_ - 1; }
+    if (pn < fn_) { return 0; }
+    if (memeq(path, prefix, fn_) == 0) { return 0; }
+    if (pn == fn_) { return 1; }
+    # path is longer — must split on '/' immediately after the prefix.
+    if (load8(path + fn_) == 47) { return 1; }
+    return 0;
+}
+
+# Walk HAPI_ALLOWED_ROOTS (colon-separated). Returns 1 if
+# `path` falls within any entry, 0 otherwise.
+fn _cap_in_allowlist(path): i64 {
+    var raw = _cap_allowlist_override;
+    if (raw == 0) { raw = getenv("HAPI_ALLOWED_ROOTS"); }
+    if (raw == 0 || strlen(raw) == 0) { return 0; }
+    var n = strlen(raw);
+    var start = 0;
+    var i = 0;
+    var hit = 0;
+    while (i <= n && hit == 0) {
+        var c = 58;   # ':' acts as terminator at i == n
+        if (i < n) { c = load8(raw + i); }
+        if (c == 58) {
+            var seg_len = i - start;
+            if (seg_len > 0) {
+                var seg = alloc(seg_len + 1);
+                memcpy(seg, raw + start, seg_len);
+                store8(seg + seg_len, 0);
+                # Only absolute paths can be allowlist entries.
+                if (load8(seg) == 47) {
+                    if (_cap_path_within(path, seg) == 1) { hit = 1; }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return hit;
+}
+
+# Resolve `--root` to an absolute cstring and verify capability.
+# Returns Ok(absolute_root_cstr) on success, Err(HapiCap*) on
+# denial. Caller passes the user-supplied flag value verbatim
+# (may be relative; we canonicalize via fsl_to_absolute).
+fn cap_check_root_r(root_arg): Result {
+    if (root_arg == 0 || strlen(root_arg) == 0) {
+        return Err(HapiCapInvalidPath);
+    }
+    var abs_root = fsl_to_absolute(root_arg);
+
+    # $HOME is always implicitly allowed. Compare against the
+    # canonicalized $HOME — fsl_to_absolute is a no-op on an
+    # already-absolute $HOME, which is the typical shape.
+    var home = _cap_home_override;
+    if (home == 0) { home = getenv("HOME"); }
+    if (home != 0 && strlen(home) > 0) {
+        var abs_home = fsl_to_absolute(home);
+        if (_cap_path_within(abs_root, abs_home) == 1) {
+            return Ok(abs_root);
+        }
+    }
+
+    if (_cap_in_allowlist(abs_root) == 1) {
+        return Ok(abs_root);
+    }
+    return Err(HapiCapDenied);
+}
+
+fn hapi_cap_err_msg(code): i64 {
+    if (code == HapiCapDenied) {
+        return "--root path is not in HAPI_ALLOWED_ROOTS (and is not within $HOME)";
+    }
+    if (code == HapiCapInvalidPath) { return "--root requires a non-empty path argument"; }
+    return "unknown capability error";
+}

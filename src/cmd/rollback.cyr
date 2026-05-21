@@ -22,6 +22,7 @@ include "src/audit.cyr"
 include "src/audit_reader.cyr"
 include "src/fs_link.cyr"
 include "src/manifest_write.cyr"
+include "src/cli.cyr"
 
 fn _hrb_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hrb_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
@@ -69,6 +70,7 @@ fn _hrb_reverse_link(entry): i64 {
     if (expected == 0) { return 0; }
     if (_hrb_cstr_eq(link_probe_target(probe), expected) == 0) { return 0; }
 
+    if (hapi_dry_run() == 1) { return 1; }
     var urc = sys_unlink(abs_tgt);
     if (urc < 0) { return 0 - 1; }
     var ar = audit_append_unlink_r(
@@ -93,6 +95,7 @@ fn _hrb_reverse_unlink(entry): i64 {
     var rel = fsl_compute_relative(parent, abs_src);
     if (rel == 0) { return 0; }
 
+    if (hapi_dry_run() == 1) { return 1; }
     var crc = link_create(rel, abs_tgt);
     if (crc < 0) { return 0 - 1; }
     var ar = audit_append_link_r(
@@ -140,6 +143,7 @@ fn _hrb_reverse_adopt(entry): i64 {
     # IO failure mid-sequence is a hard error — we don't try to
     # back out partial work (the audit trail is the recovery path).
 
+    if (hapi_dry_run() == 1) { return 1; }
     var urc = sys_unlink(abs_tgt);
     if (urc < 0) { return 0 - 1; }
 
@@ -200,12 +204,17 @@ fn cmd_rollback(): i64 {
         var entry = vec_get(trail, i);
         var op = hae_op(entry);
         var rc = 0;
+        var dr_suffix = "";
+        if (hapi_dry_run() == 1) { dr_suffix = "; dry-run"; }
+
         if (_hrb_cstr_eq(op, "link") == 1) {
             rc = _hrb_reverse_link(entry);
             if (rc == 1) {
                 _hrb_puts("  - ");
                 _hrb_puts(hae_abs_target(entry));
-                _hrb_puts("  (was link)\n");
+                _hrb_puts("  (was link");
+                _hrb_puts(dr_suffix);
+                _hrb_puts(")\n");
                 applied = applied + 1;
             } elif (rc == 0) {
                 skipped = skipped + 1;
@@ -220,7 +229,9 @@ fn cmd_rollback(): i64 {
             if (rc == 1) {
                 _hrb_puts("  + ");
                 _hrb_puts(hae_abs_target(entry));
-                _hrb_puts("  (was unlink)\n");
+                _hrb_puts("  (was unlink");
+                _hrb_puts(dr_suffix);
+                _hrb_puts(")\n");
                 applied = applied + 1;
             } elif (rc == 0) {
                 skipped = skipped + 1;
@@ -235,7 +246,9 @@ fn cmd_rollback(): i64 {
             if (rc == 1) {
                 _hrb_puts("  ~ ");
                 _hrb_puts(hae_abs_target(entry));
-                _hrb_puts("  (was adopt; file restored)\n");
+                _hrb_puts("  (was adopt; file restored");
+                _hrb_puts(dr_suffix);
+                _hrb_puts(")\n");
                 applied = applied + 1;
             } elif (rc == 0) {
                 skipped = skipped + 1;

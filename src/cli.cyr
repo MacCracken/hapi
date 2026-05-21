@@ -1,0 +1,15 @@
+# cli.cyr — shared CLI-mode flags.
+#
+# Owns the process-wide `--dry-run` flag. Set by the
+# dispatcher when `--dry-run` is on the command line; read by
+# every mutating command (link, unlink, adopt, sync, rollback,
+# checkpoint) before its first syscall / audit write.
+#
+# Setter / getter pattern matches the `_hlnk_scope_root_override`
+# and `_audit_override_path` hooks — tests flip it via the
+# setter, the binary flips it from main(), nobody else.
+
+var _hapi_dry_run = 0;
+
+fn hapi_set_dry_run(v): i64 { _hapi_dry_run = v; return 0; }
+fn hapi_dry_run(): i64 { return _hapi_dry_run; }

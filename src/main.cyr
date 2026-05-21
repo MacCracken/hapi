@@ -1,17 +1,20 @@
 # hapi — main entry point.
 #
-# Argv dispatcher. At M1 the only verb is `inspect`; `--version`
-# and `--help` are wired up so the binary's surface matches a
-# real CLI from day one. M2+ verbs (link / unlink / adopt / sync /
-# list / status / rollback) plug into the same dispatch table.
+# Argv dispatcher. Ten verbs at 0.7.0; --version / --help round
+# out the surface. New global flags landed in M6:
+#   --root <path>  — open a non-$HOME scope, gated by ADR 0005
+#                    (HAPI_ALLOWED_ROOTS stopgap, kavach later).
+#                    Accepted on: link, adopt, status, list, sync.
+#   --dry-run      — show what would happen; no syscalls or
+#                    audit writes. Accepted on: link, unlink,
+#                    adopt, sync, rollback, checkpoint.
 #
 # The exit-code contract:
 #   0  success
-#   1  command-specific failure (parse error, conflict, IO error)
-#   2  bad usage (unknown verb, missing argument)
-#
-# Capability-bounded execution lands in M6 — until then, every
-# verb is implicitly $HOME-scoped (no `--root` yet).
+#   1  command-specific failure (parse error, conflict, IO,
+#      capability denial)
+#   2  bad usage (unknown verb, unknown / misplaced flag,
+#      missing argument)
 
 include "src/cmd/inspect.cyr"
 include "src/cmd/link.cyr"
@@ -23,13 +26,15 @@ include "src/cmd/status.cyr"
 include "src/cmd/list.cyr"
 include "src/cmd/check.cyr"
 include "src/cmd/sync.cyr"
+include "src/cli.cyr"
+include "src/cap.cyr"
 include "lib/args.cyr"
 
 # VERSION literal kept in sync with the VERSION file at the
 # project root. CLAUDE.md's work loop calls out "version sync"
 # explicitly — bump this string in the same commit as VERSION.
 fn hapi_print_version(): i64 {
-    println("hapi 0.6.0");
+    println("hapi 0.7.0");
     return 0;
 }
 
@@ -48,6 +53,13 @@ fn hapi_print_usage(): i64 {
     println("  check <path> [--strict]   parse + display a manifest, optionally strict");
     println("  sync <path>               re-apply a manifest (idempotent)");
     println("");
+    println("global flags:");
+    println("  --root <path>             open a non-$HOME scope (link/adopt/status/list/sync)");
+    println("                            requires the path to be inside $HOME or listed");
+    println("                            in HAPI_ALLOWED_ROOTS (colon-separated)");
+    println("  --dry-run                 print actions; no syscalls or audit writes");
+    println("                            (link/unlink/adopt/sync/rollback/checkpoint)");
+    println("");
     println("options:");
     println("  --version, -v             print version and exit");
     println("  --help, -h                print this message and exit");
@@ -61,6 +73,48 @@ fn _hapi_argeq(arg, lit): i64 {
     var ll = strlen(lit);
     if (la != ll) { return 0; }
     return memeq(arg, lit, la);
+}
+
+# True if `arg` looks like a flag (starts with '-'). Used to
+# guard against an unrecognized flag being swallowed as a
+# positional argument.
+fn _hapi_is_flag(arg): i64 {
+    if (arg == 0) { return 0; }
+    if (strlen(arg) < 1) { return 0; }
+    if (load8(arg) == 45) { return 1; }
+    return 0;
+}
+
+# Apply a `--root <value>` pair: cap-check the value, set the
+# scope override on success. Returns 0 success / 1 cap denial
+# / 2 missing value.
+fn _hapi_apply_root(value): i64 {
+    if (value == 0 || strlen(value) == 0) {
+        eprint("hapi: --root requires a path argument\n", 39);
+        return 2;
+    }
+    var cr = cap_check_root_r(value);
+    if (is_err_result(cr) == 1) {
+        var code = load64(cr + 8);
+        var msg = hapi_cap_err_msg(code);
+        eprint("hapi: ", 6);
+        eprint(msg, strlen(msg));
+        eprint("\n", 1);
+        return 1;
+    }
+    var abs_root = load64(cr + 8);
+    link_set_scope_root(abs_root);
+    return 0;
+}
+
+# Print a stock "unexpected flag for this verb" error.
+fn _hapi_unexpected_flag(verb, flag): i64 {
+    eprint("hapi: unexpected flag for `", 27);
+    eprint(verb, strlen(verb));
+    eprint("`: ", 3);
+    eprint(flag, strlen(flag));
+    eprint("\n", 1);
+    return 0;
 }
 
 fn main(): i64 {
@@ -93,6 +147,15 @@ fn main(): i64 {
         while (ai < n) {
             var a = argv(ai);
             if (_hapi_argeq(a, "--force") == 1) { force = 1; }
+            elif (_hapi_argeq(a, "--dry-run") == 1) { hapi_set_dry_run(1); }
+            elif (_hapi_argeq(a, "--root") == 1) {
+                var v = 0;
+                if (ai + 1 < n) { v = argv(ai + 1); }
+                var rc = _hapi_apply_root(v);
+                if (rc != 0) { return rc; }
+                ai = ai + 1;
+            }
+            elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
             elif (path == 0) { path = a; }
             ai = ai + 1;
         }
@@ -101,39 +164,114 @@ fn main(): i64 {
 
     if (_hapi_argeq(verb, "unlink") == 1) {
         var pkg = 0;
-        if (n >= 3) { pkg = argv(2); }
+        var ai = 2;
+        while (ai < n) {
+            var a = argv(ai);
+            if (_hapi_argeq(a, "--dry-run") == 1) { hapi_set_dry_run(1); }
+            elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
+            elif (pkg == 0) { pkg = a; }
+            ai = ai + 1;
+        }
         return cmd_unlink(pkg);
     }
 
     if (_hapi_argeq(verb, "adopt") == 1) {
         var file = 0;
         var pkg = 0;
-        if (n >= 3) { file = argv(2); }
-        if (n >= 4) { pkg = argv(3); }
+        var ai = 2;
+        while (ai < n) {
+            var a = argv(ai);
+            if (_hapi_argeq(a, "--dry-run") == 1) { hapi_set_dry_run(1); }
+            elif (_hapi_argeq(a, "--root") == 1) {
+                var v = 0;
+                if (ai + 1 < n) { v = argv(ai + 1); }
+                var rc = _hapi_apply_root(v);
+                if (rc != 0) { return rc; }
+                ai = ai + 1;
+            }
+            elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
+            elif (file == 0) { file = a; }
+            elif (pkg == 0) { pkg = a; }
+            ai = ai + 1;
+        }
         return cmd_adopt(file, pkg);
     }
 
     if (_hapi_argeq(verb, "rollback") == 1) {
+        var ai = 2;
+        while (ai < n) {
+            var a = argv(ai);
+            if (_hapi_argeq(a, "--dry-run") == 1) { hapi_set_dry_run(1); }
+            elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
+            ai = ai + 1;
+        }
         return cmd_rollback();
     }
 
     if (_hapi_argeq(verb, "checkpoint") == 1) {
+        var ai = 2;
+        while (ai < n) {
+            var a = argv(ai);
+            if (_hapi_argeq(a, "--dry-run") == 1) { hapi_set_dry_run(1); }
+            elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
+            ai = ai + 1;
+        }
         return cmd_checkpoint();
     }
 
     if (_hapi_argeq(verb, "status") == 1) {
         var path = 0;
-        if (n >= 3) { path = argv(2); }
+        var ai = 2;
+        while (ai < n) {
+            var a = argv(ai);
+            if (_hapi_argeq(a, "--root") == 1) {
+                var v = 0;
+                if (ai + 1 < n) { v = argv(ai + 1); }
+                var rc = _hapi_apply_root(v);
+                if (rc != 0) { return rc; }
+                ai = ai + 1;
+            }
+            elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
+            elif (path == 0) { path = a; }
+            ai = ai + 1;
+        }
         return cmd_status(path);
     }
 
     if (_hapi_argeq(verb, "list") == 1) {
+        var ai = 2;
+        while (ai < n) {
+            var a = argv(ai);
+            if (_hapi_argeq(a, "--root") == 1) {
+                var v = 0;
+                if (ai + 1 < n) { v = argv(ai + 1); }
+                var rc = _hapi_apply_root(v);
+                if (rc != 0) { return rc; }
+                ai = ai + 1;
+            }
+            elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
+            ai = ai + 1;
+        }
         return cmd_list();
     }
 
     if (_hapi_argeq(verb, "sync") == 1) {
         var path = 0;
-        if (n >= 3) { path = argv(2); }
+        var ai = 2;
+        while (ai < n) {
+            var a = argv(ai);
+            if (_hapi_argeq(a, "--dry-run") == 1) { hapi_set_dry_run(1); }
+            elif (_hapi_argeq(a, "--root") == 1) {
+                var v = 0;
+                if (ai + 1 < n) { v = argv(ai + 1); }
+                var rc = _hapi_apply_root(v);
+                if (rc != 0) { return rc; }
+                ai = ai + 1;
+            }
+            elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
+            elif (path == 0) { path = a; }
+            ai = ai + 1;
+        }
         return cmd_sync(path);
     }
 
@@ -144,6 +282,7 @@ fn main(): i64 {
         while (ai < n) {
             var a = argv(ai);
             if (_hapi_argeq(a, "--strict") == 1) { strict = 1; }
+            elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
             elif (path == 0) { path = a; }
             ai = ai + 1;
         }

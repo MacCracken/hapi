@@ -24,6 +24,7 @@
 include "src/manifest.cyr"
 include "src/audit.cyr"
 include "src/fs_link.cyr"
+include "src/cli.cyr"
 
 enum HapiLinkAction {
     LINK_ACT_CREATE = 0;
@@ -271,43 +272,54 @@ fn cmd_link(pkg_arg, force): i64 {
         var should_create = 0;
         if (act == LINK_ACT_CREATE) { should_create = 1; }
         if (force == 1 && (act == LINK_ACT_CONFLICT_SYMLINK || act == LINK_ACT_CONFLICT_FILE)) {
-            var urc = sys_unlink(abs_tgt);
-            if (urc < 0) {
-                _hlnk_eputs("hapi: could not remove existing ");
-                eprint(abs_tgt, strlen(abs_tgt));
-                _hlnk_eputs(" (--force)\n");
-                return 1;
+            if (hapi_dry_run() == 0) {
+                var urc = sys_unlink(abs_tgt);
+                if (urc < 0) {
+                    _hlnk_eputs("hapi: could not remove existing ");
+                    eprint(abs_tgt, strlen(abs_tgt));
+                    _hlnk_eputs(" (--force)\n");
+                    return 1;
+                }
             }
             should_create = 1;
         }
 
         if (should_create == 1) {
-            var crc = link_create(rel, abs_tgt);
-            if (crc < 0) {
-                _hlnk_eputs("hapi: symlink failed at ");
-                eprint(abs_tgt, strlen(abs_tgt));
-                _hlnk_eputs("\n");
-                return 1;
+            if (hapi_dry_run() == 1) {
+                _hlnk_puts("  + ");
+                print(abs_tgt, strlen(abs_tgt));
+                _hlnk_puts(" -> ");
+                print(rel, strlen(rel));
+                _hlnk_puts("  (dry-run)\n");
+                written = written + 1;
+            } else {
+                var crc = link_create(rel, abs_tgt);
+                if (crc < 0) {
+                    _hlnk_eputs("hapi: symlink failed at ");
+                    eprint(abs_tgt, strlen(abs_tgt));
+                    _hlnk_eputs("\n");
+                    return 1;
+                }
+                var lnk = load64(pl);
+                var src_cstr = _fsl_str_to_cstr(hapi_link_source(lnk));
+                var tgt_cstr = _fsl_str_to_cstr(hapi_link_target(lnk));
+                var ar = audit_append_link_r(pkg_name_cstr, pkg_ver_cstr,
+                                             manifest_hash,
+                                             src_cstr, tgt_cstr,
+                                             abs_src, abs_tgt);
+                if (is_err_result(ar) == 1) {
+                    _hlnk_eputs("hapi: audit-trail write failed for ");
+                    eprint(abs_tgt, strlen(abs_tgt));
+                    _hlnk_eputs("\n");
+                    return 1;
+                }
+                written = written + 1;
+                _hlnk_puts("  + ");
+                print(abs_tgt, strlen(abs_tgt));
+                _hlnk_puts(" -> ");
+                print(rel, strlen(rel));
+                _hlnk_puts("\n");
             }
-            var lnk = load64(pl);
-            var src_cstr = _fsl_str_to_cstr(hapi_link_source(lnk));
-            var tgt_cstr = _fsl_str_to_cstr(hapi_link_target(lnk));
-            var ar = audit_append_link_r(pkg_name_cstr, pkg_ver_cstr,
-                                         manifest_hash,
-                                         src_cstr, tgt_cstr,
-                                         abs_src, abs_tgt);
-            if (is_err_result(ar) == 1) {
-                _hlnk_eputs("hapi: audit-trail write failed for ");
-                eprint(abs_tgt, strlen(abs_tgt));
-                _hlnk_eputs("\n");
-                return 1;
-            }
-            written = written + 1;
-            _hlnk_puts("  + ");
-            print(abs_tgt, strlen(abs_tgt));
-            _hlnk_puts(" -> ");
-            print(rel, strlen(rel));
-            _hlnk_puts("\n");
         }
         j = j + 1;
     }

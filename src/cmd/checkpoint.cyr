@@ -14,11 +14,16 @@
 #   1  audit-trail write failed
 
 include "src/audit.cyr"
+include "src/cli.cyr"
 
 fn _hck_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hck_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
 
 fn cmd_checkpoint(): i64 {
+    if (hapi_dry_run() == 1) {
+        _hck_puts("checkpoint (dry-run; no entry written)\n");
+        return 0;
+    }
     var r = audit_append_rollback_marker_r();
     if (is_err_result(r) == 1) {
         _hck_eputs("hapi: audit-trail write failed (could not append checkpoint)\n");

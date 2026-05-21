@@ -20,6 +20,7 @@ include "src/manifest_write.cyr"
 include "src/audit.cyr"
 include "src/fs_link.cyr"
 include "src/cmd/link.cyr"   # link_set_scope_root + _hlnk_scope_root_override
+include "src/cli.cyr"
 
 fn _hap_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hap_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
@@ -200,6 +201,20 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
         return 1;
     }
 
+    var tgt_parent = _fsl_path_dirname(abs_target);
+    var rel = fsl_compute_relative(tgt_parent, abs_source);
+
+    if (hapi_dry_run() == 1) {
+        _hap_puts("  ~ ");
+        _hap_puts(abs_target);
+        _hap_puts(" -> ");
+        _hap_puts(rel);
+        _hap_puts("  (dry-run)\nwould adopt into ");
+        _hap_puts(manifest_path);
+        _hap_puts("\n");
+        return 0;
+    }
+
     # 1. Move the file into the package (sys_rename, syscall 82).
     var rrc = syscall(82, abs_target, abs_source);
     if (rrc < 0) {
@@ -212,8 +227,6 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     }
 
     # 2. Create the symlink back. Same relative-target math as link.
-    var tgt_parent = _fsl_path_dirname(abs_target);
-    var rel = fsl_compute_relative(tgt_parent, abs_source);
     var crc = link_create(rel, abs_target);
     if (crc < 0) {
         # Rollback the move on failure.

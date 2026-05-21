@@ -25,6 +25,7 @@
 include "src/audit.cyr"
 include "src/audit_reader.cyr"
 include "src/fs_link.cyr"
+include "src/cli.cyr"
 
 fn _hul_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hul_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
@@ -145,6 +146,7 @@ fn _hul_remove_one(entry): i64 {
     if (expected == 0 || _hul_cstr_eq(current, expected) == 0) {
         return 1;
     }
+    if (hapi_dry_run() == 1) { return 0; }
     var urc = sys_unlink(abs_tgt);
     if (urc < 0) { return 0 - 1; }
     var ar = audit_append_unlink_r(
@@ -195,6 +197,7 @@ fn cmd_unlink(pkg_arg): i64 {
         if (rc == 0) {
             _hul_puts("  - ");
             _hul_puts(abs_tgt);
+            if (hapi_dry_run() == 1) { _hul_puts("  (dry-run)"); }
             _hul_puts("\n");
             removed = removed + 1;
         } elif (rc == 1) {

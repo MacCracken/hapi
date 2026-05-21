@@ -27,19 +27,6 @@ auditable rollback story, dogfooded on the maintainer's own dotfiles.
 
 ## Upcoming milestones
 
-### M6 — Capability gate + non-`$HOME` roots (v0.7.0)
-
-- `--root <path>` flag opens a non-default root, gated by an
-  explicit capability check (kavach integration when available;
-  inline-check pattern until then)
-- `--dry-run` flag — show what would change without writing
-- ADR: capability model (`docs/adr/0005-capability-bounded-roots.md`)
-- **Dep gate**: when kavach exposes a stable capability API; until
-  then, a CLI-level allowlist.
-- **Acceptance**: attempt to `link` outside `$HOME` without
-  `--root` fails fast; with `--root /etc/myproject` succeeds when
-  capability is granted.
-
 ### M7 — Dogfood + harden (v0.9.0)
 
 - Maintainer's actual dotfiles migrate to hapi packages

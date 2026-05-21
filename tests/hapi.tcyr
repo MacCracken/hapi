@@ -15,6 +15,8 @@ include "src/cmd/status.cyr"
 include "src/cmd/list.cyr"
 include "src/cmd/check.cyr"
 include "src/cmd/sync.cyr"
+include "src/cap.cyr"
+include "src/cli.cyr"
 
 # Convenience: parse a literal manifest string and assert it
 # returned Err(<expected>). `expected` is one of the HapiMf*
@@ -1214,6 +1216,222 @@ fn test_rollback_reverses_adopt() {
     return 0;
 }
 
+# ============================================================
+# M6 — capability gate + --dry-run tests
+# ============================================================
+
+fn test_cap_path_within_basics() {
+    test_group("cap: path-within prefix matcher");
+
+    # Exact match.
+    assert_eq(_cap_path_within("/etc/myproject", "/etc/myproject"), 1, "exact match");
+
+    # Subdir match.
+    assert_eq(_cap_path_within("/etc/myproject/sub", "/etc/myproject"), 1, "subdir match");
+
+    # Multi-level subdir.
+    assert_eq(_cap_path_within("/etc/myproject/a/b/c", "/etc/myproject"), 1, "deep subdir match");
+
+    # Prefix-byte-collision but different path component — must not match.
+    assert_eq(_cap_path_within("/etc/myprojectextra", "/etc/myproject"), 0,
+              "byte-prefix collision rejected (boundary on /)");
+
+    # Trailing slash on prefix is tolerated.
+    assert_eq(_cap_path_within("/etc/myproject/foo", "/etc/myproject/"), 1,
+              "trailing slash on prefix tolerated");
+
+    # Parent path, not within child prefix.
+    assert_eq(_cap_path_within("/etc", "/etc/myproject"), 0, "parent != within child");
+
+    # Empty prefix never matches.
+    assert_eq(_cap_path_within("/etc", ""), 0, "empty prefix rejected");
+    return 0;
+}
+
+fn test_cap_check_denies_outside_home_and_allowlist() {
+    test_group("cap: denies path outside $HOME and HAPI_ALLOWED_ROOTS");
+
+    cap_set_home("/home/macro");
+    cap_set_allowlist(0);
+    var r = cap_check_root_r("/etc/myproject");
+    assert_eq(is_err_result(r), 1, "denied when no allowlist + outside home");
+    assert_eq(load64(r + 8), HapiCapDenied, "code is HapiCapDenied");
+    cap_set_home(0);
+    return 0;
+}
+
+fn test_cap_check_allows_inside_home() {
+    test_group("cap: allows paths inside $HOME implicitly");
+
+    cap_set_home("/home/macro");
+    cap_set_allowlist(0);
+    var r = cap_check_root_r("/home/macro/projects/x");
+    assert_eq(is_ok(r), 1, "inside-home path allowed without allowlist entry");
+    cap_set_home(0);
+    return 0;
+}
+
+fn test_cap_check_allows_listed_root() {
+    test_group("cap: allows path matching HAPI_ALLOWED_ROOTS");
+
+    cap_set_home("/home/macro");
+    cap_set_allowlist("/etc/myproject:/srv/app");
+    var r = cap_check_root_r("/etc/myproject");
+    assert_eq(is_ok(r), 1, "exact-match allowlist entry passes");
+
+    var r2 = cap_check_root_r("/srv/app/sub/path");
+    assert_eq(is_ok(r2), 1, "subdir of allowlist entry passes");
+
+    var r3 = cap_check_root_r("/etc/myprojectextra");
+    assert_eq(is_err_result(r3), 1, "byte-prefix collision still denied");
+
+    var r4 = cap_check_root_r("/tmp/random");
+    assert_eq(is_err_result(r4), 1, "non-listed path denied");
+
+    cap_set_home(0);
+    cap_set_allowlist(0);
+    return 0;
+}
+
+fn test_dry_run_link_no_writes() {
+    test_group("dry-run: cmd_link writes nothing");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+
+    hapi_set_dry_run(1);
+    assert_eq(cmd_link("docs/examples/dotfiles-zsh", 0), 0, "dry-run link exits 0");
+    hapi_set_dry_run(0);
+
+    # No audit growth.
+    assert_eq(_test_file_size(audit_path), 0, "audit trail unchanged");
+
+    # No symlink at .zshrc.
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT, "no symlink created");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_dry_run_unlink_no_writes() {
+    test_group("dry-run: cmd_unlink writes nothing");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    var size_after_link = _test_file_size(audit_path);
+
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+
+    hapi_set_dry_run(1);
+    assert_eq(cmd_unlink("dotfiles-zsh"), 0, "dry-run unlink exits 0");
+    hapi_set_dry_run(0);
+
+    assert_eq(_test_file_size(audit_path), size_after_link, "audit trail unchanged");
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "symlink still in place");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_dry_run_adopt_no_writes() {
+    test_group("dry-run: cmd_adopt writes nothing");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _test_make_package(0, 0);
+
+    var src_file = alloc(strlen(scope) + 16);
+    memcpy(src_file, scope, strlen(scope));
+    memcpy(src_file + strlen(scope), "/.zshrc\x00", 8);
+    _test_write_file(src_file, "user content");
+
+    hapi_set_dry_run(1);
+    assert_eq(cmd_adopt(".zshrc", pkg), 0, "dry-run adopt exits 0");
+    hapi_set_dry_run(0);
+
+    # Target file is still a regular file (no rename, no symlink).
+    assert_eq(link_probe_kind(link_probe(src_file)), HAPI_LP_FILE, "file untouched");
+
+    # Source path in package doesn't exist (no rename happened).
+    var pkg_src = alloc(strlen(pkg) + 16);
+    memcpy(pkg_src, pkg, strlen(pkg));
+    memcpy(pkg_src + strlen(pkg), "/zshrc\x00", 7);
+    assert_eq(link_probe_kind(link_probe(pkg_src)), HAPI_LP_ABSENT, "package source absent");
+
+    # No audit growth.
+    assert_eq(_test_file_size(audit_path), 0, "audit trail unchanged");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_dry_run_rollback_no_writes() {
+    test_group("dry-run: cmd_rollback writes nothing");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+
+    cmd_link("docs/examples/dotfiles-zsh", 0);
+    var size_after_link = _test_file_size(audit_path);
+
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+
+    hapi_set_dry_run(1);
+    assert_eq(cmd_rollback(), 0, "dry-run rollback exits 0");
+    hapi_set_dry_run(0);
+
+    assert_eq(_test_file_size(audit_path), size_after_link, "audit trail unchanged");
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "symlinks still in place");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_dry_run_checkpoint_no_writes() {
+    test_group("dry-run: cmd_checkpoint writes nothing");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+
+    hapi_set_dry_run(1);
+    assert_eq(cmd_checkpoint(), 0, "dry-run checkpoint exits 0");
+    hapi_set_dry_run(0);
+
+    assert_eq(_test_file_size(audit_path), 0, "audit trail unchanged");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_dry_run_sync_no_writes() {
+    test_group("dry-run: cmd_sync writes nothing");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+
+    hapi_set_dry_run(1);
+    assert_eq(cmd_sync("docs/examples/dotfiles-zsh"), 0, "dry-run sync exits 0");
+    hapi_set_dry_run(0);
+
+    assert_eq(_test_file_size(audit_path), 0, "audit trail unchanged");
+
+    _test_clear_env();
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -1262,6 +1480,16 @@ fn main() {
     test_cmd_check_strict_resets_flag();
     test_cmd_sync_idempotent_clean_tree();
     test_cmd_sync_creates_missing_links();
+    test_cap_path_within_basics();
+    test_cap_check_denies_outside_home_and_allowlist();
+    test_cap_check_allows_inside_home();
+    test_cap_check_allows_listed_root();
+    test_dry_run_link_no_writes();
+    test_dry_run_unlink_no_writes();
+    test_dry_run_adopt_no_writes();
+    test_dry_run_rollback_no_writes();
+    test_dry_run_checkpoint_no_writes();
+    test_dry_run_sync_no_writes();
     return assert_summary();
 }
 

@@ -4,6 +4,56 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0]
+
+### Added
+- ADR 0005: capability-bounded roots. `$HOME` is the
+  implicit default; `--root <path>` opens a non-default
+  scope gated by `cap_check_root_r`. The check is an env-var
+  allowlist (`HAPI_ALLOWED_ROOTS`, colon-separated, absolute
+  paths only) as the explicit stopgap until kavach lands;
+  the API contract `cap_check_root_r(path) -> Result`
+  survives the kavach migration unchanged. Path-within
+  matcher splits on `/` components so `/etc/myproject`
+  never matches `/etc/myprojectextra`.
+- `src/cap.cyr` — owns `cap_check_root_r`, the path-within
+  matcher, and test hooks `cap_set_home` / `cap_set_allowlist`.
+- `src/cli.cyr` — owns the process-wide `_hapi_dry_run`
+  flag with setter / getter. Every mutating cmd checks the
+  flag before its first syscall + audit write.
+- `--root <path>` accepted on **link, adopt, sync, status,
+  list**. Cap-check fires before dispatch; on denial, the
+  binary exits 1 with `hapi: --root path is not in
+  HAPI_ALLOWED_ROOTS (and is not within $HOME)`.
+- `--dry-run` accepted on **link, unlink, adopt, sync,
+  rollback, checkpoint**. Each verb runs its planning
+  phase, prints the would-do lines suffixed `(dry-run)`,
+  and skips every syscall + audit write. Exit codes match
+  the real run.
+- Per-verb arg parsing now rejects unrecognized `--flag`
+  args with exit 2 + `hapi: unexpected flag for `<verb>`:
+  <flag>`. Previously an unknown flag was silently
+  swallowed as a positional arg.
+- `docs/guides/capability.md` — user-facing guide for
+  `--root` + the env-var allowlist.
+- `docs/guides/dry-run.md` — user-facing guide for the
+  composable preview flag.
+
+### Changed
+- `hapi --version` reports 0.7.0; help text grew a
+  **global flags** section listing `--root` and `--dry-run`
+  with their verb scopes.
+- Test suite grew from 163 → 194 assertions (41 → 52
+  groups) — cap × 4, dry-run × 6 (one per mutating verb),
+  plus the M6 unit coverage of the path-within matcher.
+- `HapiMfError` enum gained `HapiMfUnknownSection` and
+  `HapiMfUnknownKey` (used by `check --strict`, shipped in
+  v0.6.0 — listed here for completeness; the variants
+  belong to the M5 work but the M6 dispatcher rewrite
+  surfaced them in shared error-message tables).
+- State.md and roadmap.md updated: M6 retired, M7
+  (dogfood + harden) surfaced as Next.
+
 ## [0.6.0]
 
 ### Added
