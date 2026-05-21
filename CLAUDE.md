@@ -109,6 +109,8 @@ cyrius test                             # run tests/*.tcyr
 - [`docs/examples/`](docs/examples/) — Runnable example manifests
 - [`docs/development/state.md`](docs/development/state.md) — Live state snapshot
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) — Milestones through v1.0
+- [`docs/development/issues/`](docs/development/issues/) — Open dogfood papercuts + design-gap reports (one file per issue; archived on close)
+- [`docs/doc-health.md`](docs/doc-health.md) — Whole-tree doc-currency ledger (fresh / stale / archive / open-question; refreshed in place when docs are touched)
 
 Full doc-tree convention: [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md).
 
