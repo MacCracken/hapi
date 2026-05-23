@@ -76,7 +76,7 @@ loop.
 |------------------------------------|----------------------------------------------|
 | regular file                       | adopted                                      |
 | symlink (any target)               | refused — `hapi unlink <pkg>` first if hapi created it |
-| directory                          | refused — file-scoped only at v0.5.0         |
+| directory                          | refused — adopt is file-scoped at v1.0       |
 | absent                             | refused                                      |
 | source name occupied in package    | refused — would clobber                      |
 | target already in manifest         | refused — duplicate row                      |

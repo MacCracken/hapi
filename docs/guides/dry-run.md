@@ -83,5 +83,5 @@ written.
 
 ## See also
 
-- [`capability.md`](capability.md) — the other M6 global flag.
+- [`capability.md`](capability.md) — `--root` flag for non-`$HOME` scope.
 - [`backup-to.md`](backup-to.md) — opt-in pre-`--force` snapshots.

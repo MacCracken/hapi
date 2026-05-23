@@ -11,9 +11,8 @@ hapi unlink <package-name>
 ```
 
 `<package-name>` is the `package.name` from the manifest, not
-a filesystem path. (At v0.4.0 there's no per-package directory
-registry beyond the audit trail itself; the name is the lookup
-key.)
+a filesystem path. There's no per-package directory registry
+beyond the audit trail itself; the name is the lookup key.
 
 ## What it does
 

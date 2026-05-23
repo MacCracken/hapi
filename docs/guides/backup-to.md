@@ -119,8 +119,8 @@ nor the audit entry is created.
 
 Per [ADR 0002](../adr/0002-audit-trail-format.md), readers tolerate
 unknown additional fields, so a `backup_path` field on a link or
-adopt entry is fully forward- and backward-compatible. Readers from
-v0.7.0 (before `--backup-to` shipped) parse the entry cleanly and
+adopt entry is fully forward- and backward-compatible. Pre-v0.8.0
+readers (before `--backup-to` shipped) parse the entry cleanly and
 ignore the new field.
 
 ## See also

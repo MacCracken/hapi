@@ -21,8 +21,8 @@ No arguments.
 2. Returns 0.
 
 The marker writer (`audit_append_rollback_marker_r`) and the
-walk-to-marker logic in `hapi rollback` shipped in M3 (v0.4.0);
-v0.6.0 wires the user-facing verb.
+walk-to-marker logic in `hapi rollback` use the same audit-trail
+shape; `hapi checkpoint` is the user-facing entry point.
 
 ## Example: bracketing a risky session
 

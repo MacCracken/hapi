@@ -2,8 +2,7 @@
 
 hapi's filesystem touch is bounded by an explicit capability.
 `$HOME` is the default root; touching anything else requires
-an explicit `--root` flag *and* a capability grant. This guide
-covers the v0.7.0 surface — see
+an explicit `--root` flag *and* a capability grant. See
 [ADR 0005](../adr/0005-capability-bounded-roots.md) for the
 rationale.
 
@@ -35,7 +34,7 @@ from the audit trail and don't need a scope.
 
 ## Granting a non-`$HOME` root
 
-v0.7.0 ships with an **env-var allowlist**. Set
+hapi ships with an **env-var allowlist**. Set
 `HAPI_ALLOWED_ROOTS` to a colon-separated list of absolute
 paths; hapi accepts `--root` for any path equal to, or a
 strict subdirectory of, an allowlist entry.
@@ -73,6 +72,13 @@ The migration is *internal-only*: callers continue to use
   user who can set `HAPI_ALLOWED_ROOTS` can expand their own
   scope. The kavach swap closes this gap; until then, treat
   the allowlist as a sanity rail, not a security boundary.
+- The cap-check is **lexical**: `..` segments are collapsed
+  before the prefix-match (per the
+  [v0.9.0 hardening pass](../audit/2026-05-23-audit.md) F-001
+  repair), but **symlinks are not resolved**. A symlink under
+  `$HOME` pointing outside `$HOME` will still pass the check;
+  the kavach migration closes that boundary (F-002 in the same
+  audit doc).
 - `$HOME` is always implicitly allowed and does not need to
   appear in the allowlist.
 - The allowlist accepts **absolute paths only**; relative
@@ -81,4 +87,5 @@ The migration is *internal-only*: callers continue to use
 ## See also
 
 - [ADR 0005 — Capability-bounded roots](../adr/0005-capability-bounded-roots.md)
-- [`dry-run.md`](dry-run.md) — the other M6 global flag.
+- [`dry-run.md`](dry-run.md) — composable preview flag.
+- [`backup-to.md`](backup-to.md) — opt-in pre-`--force` snapshots.

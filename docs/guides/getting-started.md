@@ -5,21 +5,23 @@
 ```sh
 cyrius deps                            # resolve stdlib
 cyrius build src/main.cyr build/hapi   # compile
-./build/hapi                            # prints scaffold version line
-cyrius test                             # run tests/*.tcyr
+./build/hapi --help                    # see the verb set
+cyrius test                            # run tests/*.tcyr
 ```
 
 ## Layout
 
-- `src/main.cyr` — entry point; CLI dispatcher (subcommands land M2+)
+- `src/main.cyr` — entry point + argv dispatcher
+- `src/cmd/{link,unlink,adopt,list,sync,status,rollback,checkpoint,check,inspect}.cyr` —
+  one module per verb
+- `src/manifest.cyr` — `hapi.cyml` parser + canonical re-serializer
+- `src/manifest_write.cyr` — atomic `[[link]]` row append / remove
+- `src/audit.cyr` / `src/audit_reader.cyr` — JSONL trail writer + reader
+- `src/fs_link.cyr` — symlink primitives + path resolution
+- `src/cap.cyr` — `--root` capability check
+- `src/cli.cyr` — `--dry-run` flag plumbing
+- `src/backup.cyr` — `--backup-to` pre-`--force` snapshots
 - `tests/hapi.{tcyr,bcyr,fcyr}` — tests / benchmarks / fuzz
-
-Once subcommands ship, additional layout:
-
-- `src/cmd/link.cyr` / `unlink.cyr` / `adopt.cyr` / `list.cyr` /
-  `sync.cyr` / `status.cyr` / `rollback.cyr`
-- `src/manifest.cyr` — `hapi.cyml` parser
-- `src/audit.cyr` — audit-trail writer / reader
 
 ## Adding a command
 

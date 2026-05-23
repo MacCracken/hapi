@@ -58,8 +58,9 @@ hapi: manifest has an unknown key in a known section (strict mode) (./dotfiles-z
 ```
 
 The lenient run misses the typo. Strict mode catches it. Run
-strict in CI; ship lenient at runtime so a future v0.7.x manifest
-field doesn't break a v0.6.0 hapi binary mid-deployment.
+strict in CI; ship lenient at runtime so a future additive
+manifest field (per ADR 0001's growth contract) doesn't break
+an older hapi binary mid-deployment.
 
 ## What strict rejects
 

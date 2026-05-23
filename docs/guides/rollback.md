@@ -11,8 +11,10 @@ state as running it once.
 hapi rollback
 ```
 
-No arguments at v0.4.0. A future `hapi rollback --to <marker>`
-or `hapi rollback --steps N` may layer on; the v1.0 surface is
+No arguments. `hapi rollback --to <marker>` and
+`hapi rollback --steps N` are reserved as a post-v1.0 surface
+refinement — see the
+[roadmap](../development/roadmap.md) — but the v1.0 contract is
 this no-arg form.
 
 ## What it does
@@ -73,10 +75,9 @@ state but acts as a stopping boundary for `rollback`:
 {"ts":"...","op":"rollback-marker"}
 ```
 
-At v0.4.0 markers must be appended manually (`hapi checkpoint`
-is reserved for a later patch). When present, `hapi rollback`
-reverses only entries after the most recent marker, leaving
-everything before it untouched.
+Markers are appended by [`hapi checkpoint`](checkpoint.md).
+When present, `hapi rollback` reverses only entries after the
+most recent marker, leaving everything before it untouched.
 
 ## Exit codes
 

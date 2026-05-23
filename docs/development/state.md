@@ -29,27 +29,27 @@ v0.6.0 (M5), v0.5.0 (M4), v0.4.0 (M3), v0.3.0 (M2), v0.2.0
 Binary (`hapi`). Argv dispatcher. Ten real verbs frozen at v1.0.0;
 `--version` / `--help` / `-v` / `-h` round out the surface.
 Three global flags plug into per-verb arg parsers:
-`--root <path>` (link / adopt / sync / status / list, M6),
+`--root <path>` (link / adopt / sync / status / list),
 `--dry-run` (link / unlink / adopt / sync / rollback /
-checkpoint, M6), and `--backup-to <dir>` (link / sync /
-adopt, v0.8.0) — opt-in pre-`--force` snapshot.
+checkpoint), and `--backup-to <dir>` (link / sync / adopt) —
+opt-in pre-`--force` snapshot.
 
-### Current command surface
+### Current command surface (frozen at v1.0)
 
-| verb                  | exit codes               | status |
-|-----------------------|--------------------------|--------|
-| `hapi inspect`        | 0 ok / 1 parse / 2 args  | M1     |
-| `hapi link`           | 0 ok / 1 fail / 2 args   | M2     |
-| `hapi unlink`         | 0 ok / 1 refused / 2 args| M3     |
-| `hapi rollback`       | 0 ok / 1 IO error        | M3     |
-| `hapi adopt`          | 0 ok / 1 refused / 2 args| M4     |
-| `hapi list`           | 0 ok / 1 env error       | M5     |
-| `hapi sync`           | 0 ok / 1 fail / 2 args   | M5     |
-| `hapi status`         | 0 ok / 1 drift / 2 args  | M5     |
-| `hapi checkpoint`     | 0 ok / 1 IO error        | M5     |
-| `hapi check --strict` | 0 ok / 1 parse / 2 args  | M5     |
-| `hapi --version`      | 0                        | M1     |
-| `hapi --help`         | 0                        | M1     |
+| verb                  | exit codes               |
+|-----------------------|--------------------------|
+| `hapi inspect`        | 0 ok / 1 parse / 2 args  |
+| `hapi link`           | 0 ok / 1 fail / 2 args   |
+| `hapi unlink`         | 0 ok / 1 refused / 2 args|
+| `hapi rollback`       | 0 ok / 1 IO error        |
+| `hapi adopt`          | 0 ok / 1 refused / 2 args|
+| `hapi list`           | 0 ok / 1 env error       |
+| `hapi sync`           | 0 ok / 1 fail / 2 args   |
+| `hapi status`         | 0 ok / 1 drift / 2 args  |
+| `hapi checkpoint`     | 0 ok / 1 IO error        |
+| `hapi check --strict` | 0 ok / 1 parse / 2 args  |
+| `hapi --version`      | 0                        |
+| `hapi --help`         | 0                        |
 
 ## Source
 
@@ -80,7 +80,7 @@ adopt, v0.8.0) — opt-in pre-`--force` snapshot.
 - `src/cmd/rollback.cyr` — reverse-replay; handles
   link / unlink / adopt entries
 - `src/cmd/checkpoint.cyr` — appends `op:rollback-marker`
-  via the M3 audit helper
+  via `audit_append_rollback_marker_r`
 - `src/cmd/status.cyr` — read-only drift classifier over
   manifest [[link]] rows
 - `src/cmd/list.cyr` — trail walker; per-package live-link
@@ -114,57 +114,62 @@ adopt, v0.8.0) — opt-in pre-`--force` snapshot.
   `hapi_set_backup_dir(cstr|0)` and getter
   `hapi_backup_dir()` mirror the dry-run pattern.
 
-M7 onward fills:
+Post-v1.0 implementation work (additive only; tracked in
+[`roadmap.md`](roadmap.md)):
 
-- maintainer's actual dotfiles migrate to hapi packages (M7)
-- P(-1) hardening pass + security audit (M7)
-- per-package manifest discovery for a no-arg `hapi sync`
-  (post-M5; needs a way to recover pkg_dir from a live
-  audit entry — deferred until kavach lands, or a
-  trail-format additive field carries it)
-- kavach swap inside `src/cap.cyr` once kavach exposes a
-  stable capability API (post-M6 — internal-only refactor,
-  no caller changes)
+- per-package manifest discovery for a no-arg `hapi sync` —
+  needs a way to recover pkg_dir from a live audit entry
+  (additive trail field, or a tree-walk heuristic). Internal;
+  no signature change to `cmd_sync`.
+- kavach swap inside `src/cap.cyr` — once kavach exposes a
+  stable capability API, the env-var allowlist gives way to
+  per-component symlink-aware resolution. Closes the F-002
+  finding from
+  [`docs/audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md);
+  `cap_check_root_r(path) -> Result` signature unchanged.
+- stdlib syscall wrappers (`sys_rename` / `sys_fsync` /
+  `sys_fdatasync`) — replace the in-source magic-number
+  `syscall(N, ...)` calls when cyrius lands the proposals.
+  QoL only.
 
 ## Audit trail
 
 - **Location**: `$XDG_STATE_HOME/hapi/audit.jsonl` (or
   `$HOME/.local/state/hapi/audit.jsonl` when unset)
 - **Format**: JSONL, append-only, ADR 0002
-- **Hash**: `sha1c:` + 40 hex (v0.8.0; canonical variant —
-  parses, re-serializes the manifest to a fixed byte form, then
-  hashes). Pre-v0.8.0 entries used `sha1:` over raw file bytes;
-  readers tolerate both prefixes during M7 → M8.
-  `audit_manifest_hash_raw(path)` kept for diagnostics.
+- **Hash**: `sha1c:` + 40 hex — canonical variant: parse the
+  manifest, re-serialize to fixed byte form, sha1 the result.
+  Pre-v0.8.0 entries written under the legacy `sha1:` raw-bytes
+  prefix continue to be tolerated by readers per the migration
+  contract. `audit_manifest_hash_raw(path)` retains the legacy
+  computation for diagnostics.
 - **Entry ops**: `link`, `unlink`, `adopt`, `unadopt`,
   `rollback-marker`
-- **Additive fields (v0.8.0)**: `backup_path` on
-  `link` / `adopt` entries when `--backup-to <dir>` is set.
-  Readers from v0.7.0 tolerate the new field per ADR 0002's
-  growth contract.
-- **Readers**: `unlink` (filters live entries by package),
-  `rollback` (reverse-walks to most recent marker, handles
-  link / unlink / adopt)
-- **Future consumers**: M5 `status` / `sync` / `list` / `checkpoint`
+- **Additive fields**: `backup_path` on `link` / `adopt` entries
+  when `--backup-to <dir>` is set. Pre-v0.8.0 readers tolerate
+  the field per ADR 0002's growth contract.
+- **Readers**: `unlink`, `rollback`, `list`, `status`, `sync`
+  — every verb that consults the trail walks via
+  `src/audit_reader.cyr`.
 
 ## Tests
 
 - `tests/hapi.tcyr` — primary suite. 235 assertions across
   65 test groups (v1.0.0; unchanged from v0.9.0):
-  - Manifest (7 groups): minimal, M1 acceptance, validation,
-    path traversal, comments, on-disk parse, missing file
+  - Manifest (7 groups): minimal, three-link acceptance,
+    validation, path traversal, comments, on-disk parse,
+    missing file
   - Audit writer (2 groups): link entry format, JSON escaping
   - Audit reader (3 groups): round trip, torn-line drop,
     malformed drop
   - fs_link (2 groups): relative computation, probe
-  - link (3 groups): happy/M2 acceptance, conflict refusal,
+  - link (3 groups): happy path, conflict refusal,
     --force refuses directory
-  - unlink (2 groups): M3 acceptance round-trip,
-    user-mutation refusal
+  - unlink (2 groups): round-trip, user-mutation refusal
   - rollback (4 groups): full reverse, link/unlink/link →
     clean, idempotent, stops at marker
   - manifest_write (2 groups): append row, remove row
-  - adopt (5 groups): M4 acceptance happy path, refuse
+  - adopt (5 groups): happy path, refuse
     symlink / directory / absent / duplicate target
   - rollback-of-adopt (1 group): three-step reversal
   - checkpoint (1 group): marker bounds subsequent rollback
@@ -176,8 +181,8 @@ M7 onward fills:
     key in [package], unknown key in [[link]], accepts clean
   - check (1 group): --strict flag does not leak across
     parser invocations
-  - sync (2 groups): M5 acceptance (clean tree -> no audit
-    growth), re-creates a missing link
+  - sync (2 groups): clean tree → no audit growth,
+    re-creates a missing link
   - cap (4 groups): path-within matcher (exact / subdir /
     boundary / empty), deny outside $HOME + allowlist,
     allow inside $HOME, allow listed root (+ byte-prefix
@@ -185,18 +190,18 @@ M7 onward fills:
   - dry-run (6 groups): link / unlink / adopt / sync /
     rollback / checkpoint each write zero audit + zero
     filesystem state under `hapi_set_dry_run(1)`
-  - backup-to (5 groups; v0.8.0): compose_path filename
+  - backup-to (5 groups): compose_path filename
     layout (dir + ts + pkg + basename, no doubled separator),
     link --force snapshots regular-file conflicts with the
     original bytes recoverable from the audit's
     `backup_path` field, symlink conflicts skip the snapshot,
     dry-run writes no snapshot file, adopt snapshots before
     sys_rename
-  - canonical hash (4 groups; v0.8.0): writer emits
+  - canonical hash (4 groups): writer emits
     `sha1c:` prefix, cosmetic edits (comments + whitespace)
     yield identical hash, `[[link]]` row reorder yields
     identical hash, target rename diverges
-  - audit-repair (4 groups; v0.9.0): lexical normalize
+  - audit-repair (4 groups): lexical normalize
     collapses `..` / `.`; cap-check rejects `..` escape from
     `$HOME` (F-001); allowlist entries lex-normalized;
     `hapi_backup_copy` refuses symlink source under
@@ -215,9 +220,11 @@ Pending upstream stdlib work tracked in proposals:
 - `cyrius/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md`
   (`sys_fsync` + `sys_fdatasync`)
 
-M6 ships the env-var allowlist stopgap (`HAPI_ALLOWED_ROOTS`);
-the kavach capability-check dep lands inside `src/cap.cyr`
-once kavach exposes a stable surface.
+v1.0 ships the env-var allowlist stopgap (`HAPI_ALLOWED_ROOTS`)
+for non-`$HOME` roots; the kavach capability service replaces
+it inside `src/cap.cyr` once kavach exposes a stable API.
+Internal-only swap — `cap_check_root_r(path) -> Result` is
+frozen.
 
 ## Consumers
 

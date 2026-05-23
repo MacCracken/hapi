@@ -13,8 +13,8 @@ hapi sync <package-dir|hapi.cyml>
 
 ## What it does
 
-At v0.6.0 sync is operationally identical to `hapi link <pkg>`
-*without* `--force`. The verbs differ in *intent*:
+Operationally, `hapi sync <pkg>` is `hapi link <pkg>` *without*
+`--force`. The verbs differ in *intent*:
 
 - `hapi link` — "create these now" (first apply, or new
   links added to a manifest)
@@ -22,9 +22,10 @@ At v0.6.0 sync is operationally identical to `hapi link <pkg>`
   reconciliation)
 
 Both produce the same audit-trail and filesystem effects.
-A later patch may extend sync to also prune trail entries
-that are no longer present in the manifest — that
-reconciliation is deferred from this milestone.
+Extending sync to also prune trail rows no longer in the
+manifest (`hapi sync --prune`) is a post-v1.0 candidate — see
+[`issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md`](../development/issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md)
+for the design discussion and the full-rotation workaround.
 
 ## Example: idempotent re-run
 

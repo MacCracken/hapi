@@ -41,10 +41,12 @@ ignore (3):
 targets, `..` path traversal — but it does **not** touch the
 scoped root. Specifically:
 
-- Source paths are not checked to exist. (`link` does that, M2.)
-- Targets are not checked against the on-disk state. (`status`
-  does that, M5.)
-- No capability check is performed. (M6.)
+- Source paths are not checked to exist. (That's
+  [`link`](link.md)'s job.)
+- Targets are not checked against the on-disk state. (That's
+  [`status`](status.md)'s job.)
+- No capability check is performed. (That's
+  [`--root` / `capability.md`](capability.md).)
 
 That separation is intentional. `inspect` runs on any well-formed
 manifest, in any working directory, with no filesystem side

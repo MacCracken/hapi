@@ -39,7 +39,7 @@ Project was scaffolded with `cyrius init hapi`. **Do not manually create project
 ```sh
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/hapi   # compile
-./build/hapi                            # prints "hapi v0.1.0 — scaffold"
+./build/hapi --version                  # prints the current version
 cyrius test                             # run tests/*.tcyr
 ```
 
@@ -67,14 +67,20 @@ cyrius test                             # run tests/*.tcyr
 
 ## Process
 
-### P(-1): Hardening (before v0.2.0 first feature cut, and before v1.0)
+### P(-1): Hardening pass (standing process, re-run on touch)
+
+The v1.0 hardening pass shipped 2026-05-23 — see
+[`docs/audit/2026-05-23-audit.md`](docs/audit/2026-05-23-audit.md).
+Re-run this checklist on any change that touches a path
+argument, a syscall, the capability surface, or the audit-trail
+format, and **always** before a major-version cut:
 
 1. **Cleanliness** — `cyrius build`, `cyrius lint`, all tests pass
-2. **Benchmark baseline** — `cyrius bench` for link / sync hot paths once they exist
+2. **Benchmark baseline** — re-run the `sync` harness from `docs/benchmarks.md`; append a row if numbers shift > 2× or warm audit growth becomes non-zero
 3. **Internal review** — every path argument's validation; every syscall's return handling
 4. **External research** — GNU stow corner cases (hidden-file conventions, dotfile collisions, .keep markers); audit-trail design references
 5. **Security audit** — path traversal, symlink loop, TOCTOU, capability scope. File findings in `docs/audit/YYYY-MM-DD-audit.md`
-6. **Documentation audit** — ADRs for manifest format choices; per-command guide pages
+6. **Documentation audit** — ADRs for new design choices; per-command guide pages for new surface; doc-health refresh
 
 ### Work Loop (continuous)
 

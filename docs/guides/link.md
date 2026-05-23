@@ -89,7 +89,7 @@ Every link write appends one JSON-line entry to
 `$HOME/.local/state/hapi/audit.jsonl` when `XDG_STATE_HOME` is
 unset). Format and field semantics are locked in
 [ADR 0002](../adr/0002-audit-trail-format.md). The trail is the
-input to `hapi unlink` (M3) and `hapi rollback` (M3).
+input to [`hapi unlink`](unlink.md) and [`hapi rollback`](rollback.md).
 
 The trail is append-only — `hapi link` never edits or truncates
 existing entries. A re-run that does nothing writes no new
