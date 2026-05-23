@@ -5,12 +5,17 @@
 
 ## Version
 
-**0.7.0** — M6 (`--root` capability gate + `--dry-run`)
-shipped 2026-05-20. M5 (`list` + `sync` + `status` +
-`checkpoint` + `check --strict`) shipped same day. M4
-(`adopt`), M3 (`unlink` + `rollback`), M2 (`link` + audit
-trail), M1 (manifest + `inspect`) all landed earlier the same
-day. M0 scaffold landed 2026-05-19.
+**0.8.0** — M7 issue-repair sweep shipped 2026-05-23:
+status.md exit-1 clarification, new `upstream-drift.md`
+guide, `--backup-to <dir>` flag on link/sync/adopt with
+new `backup-to.md` guide, and manifest-hash canonicalization
+(`sha1:` → `sha1c:` prefix swap; the v1.0 Breaking ADR 0002
+reserved). v0.7.0 (M6 — `--root` + `--dry-run`) shipped
+2026-05-20; v0.6.0 (M5 — list / sync / status / checkpoint /
+check --strict), v0.5.0 (M4 — adopt), v0.4.0 (M3 — unlink +
+rollback), v0.3.0 (M2 — link + audit), v0.2.0 (M1 —
+manifest + inspect) all landed the same day. M0 scaffold
+landed 2026-05-19.
 
 ## Toolchain
 
@@ -18,14 +23,13 @@ day. M0 scaffold landed 2026-05-19.
 
 ## Shape
 
-Binary (`hapi`). Argv dispatcher. Ten real verbs at 0.7.0;
+Binary (`hapi`). Argv dispatcher. Ten real verbs at 0.8.0;
 `--version` / `--help` / `-v` / `-h` round out the surface.
-Two global flags from M6 plug into per-verb arg parsers:
-`--root <path>` (link / adopt / sync / status / list) and
+Three global flags plug into per-verb arg parsers:
+`--root <path>` (link / adopt / sync / status / list, M6),
 `--dry-run` (link / unlink / adopt / sync / rollback /
-checkpoint). M7 (Unreleased) added a third global:
-`--backup-to <dir>` (link / sync / adopt) — opt-in pre-`--force`
-snapshot.
+checkpoint, M6), and `--backup-to <dir>` (link / sync /
+adopt, v0.8.0) — opt-in pre-`--force` snapshot.
 
 ### Current command surface
 
@@ -49,7 +53,7 @@ snapshot.
 - `src/main.cyr` — entry point + argv dispatcher
 - `src/manifest.cyr` — `hapi.cyml` parser + canonical
   re-serializer. `hapi_mf_canonicalize(m, out, cap)` emits
-  the fixed byte form used by the Unreleased `sha1c:`
+  the fixed byte form used by the v0.8.0 `sha1c:`
   manifest_hash variant: `[package]` fields in fixed order,
   `[[link]]` rows sorted by `target`, no comments, single
   blank line between sections.
@@ -57,8 +61,8 @@ snapshot.
   atomically via `tmp+rename`
 - `src/audit.cyr` — JSONL audit-trail writer (link / unlink /
   adopt / unadopt / rollback-marker entries; manifest hash via
-  `hapi_mf_canonicalize` + sha1 with `sha1c:` prefix in
-  Unreleased; XDG path resolution with test override hook).
+  `hapi_mf_canonicalize` + sha1 with `sha1c:` prefix as of
+  v0.8.0; XDG path resolution with test override hook).
   `audit_manifest_hash_raw(path)` retains the v0.x `sha1:`
   raw-bytes variant for trail-format diagnostics.
 - `src/audit_reader.cyr` — JSONL reader; hand-rolled scanner
@@ -119,14 +123,14 @@ M7 onward fills:
 - **Location**: `$XDG_STATE_HOME/hapi/audit.jsonl` (or
   `$HOME/.local/state/hapi/audit.jsonl` when unset)
 - **Format**: JSONL, append-only, ADR 0002
-- **Hash**: `sha1c:` + 40 hex (Unreleased; canonical variant —
+- **Hash**: `sha1c:` + 40 hex (v0.8.0; canonical variant —
   parses, re-serializes the manifest to a fixed byte form, then
-  hashes). Pre-Unreleased entries used `sha1:` over raw file
-  bytes; readers tolerate both prefixes during M7 → M8.
+  hashes). Pre-v0.8.0 entries used `sha1:` over raw file bytes;
+  readers tolerate both prefixes during M7 → M8.
   `audit_manifest_hash_raw(path)` kept for diagnostics.
 - **Entry ops**: `link`, `unlink`, `adopt`, `unadopt`,
   `rollback-marker`
-- **Additive fields (Unreleased)**: `backup_path` on
+- **Additive fields (v0.8.0)**: `backup_path` on
   `link` / `adopt` entries when `--backup-to <dir>` is set.
   Readers from v0.7.0 tolerate the new field per ADR 0002's
   growth contract.
@@ -138,7 +142,7 @@ M7 onward fills:
 ## Tests
 
 - `tests/hapi.tcyr` — primary suite. 218 assertions across
-  61 test groups (Unreleased; was 194 / 52 at v0.7.0):
+  61 test groups (v0.8.0; was 194 / 52 at v0.7.0):
   - Manifest (7 groups): minimal, M1 acceptance, validation,
     path traversal, comments, on-disk parse, missing file
   - Audit writer (2 groups): link entry format, JSON escaping
@@ -173,14 +177,14 @@ M7 onward fills:
   - dry-run (6 groups): link / unlink / adopt / sync /
     rollback / checkpoint each write zero audit + zero
     filesystem state under `hapi_set_dry_run(1)`
-  - backup-to (5 groups; Unreleased): compose_path filename
+  - backup-to (5 groups; v0.8.0): compose_path filename
     layout (dir + ts + pkg + basename, no doubled separator),
     link --force snapshots regular-file conflicts with the
     original bytes recoverable from the audit's
     `backup_path` field, symlink conflicts skip the snapshot,
     dry-run writes no snapshot file, adopt snapshots before
     sys_rename
-  - canonical hash (4 groups; Unreleased): writer emits
+  - canonical hash (4 groups; v0.8.0): writer emits
     `sha1c:` prefix, cosmetic edits (comments + whitespace)
     yield identical hash, `[[link]]` row reorder yields
     identical hash, target rename diverges
@@ -215,14 +219,14 @@ means downstream packagers (zugot recipes) and user manifests.
 ## Next
 
 See [`roadmap.md`](roadmap.md) for the M7 → v1.0 plan. M7
-issue-repair queue progress (Unreleased):
+issue-repair queue progress:
 
-- ✅ `docs/guides/status.md` exit-1 clarification
-- ✅ `docs/guides/upstream-drift.md` new guide
-- ✅ `--backup-to <dir>` flag on link / sync / adopt
-- ✅ Manifest-hash canonicalization (`sha1:` → `sha1c:`)
+- ✅ `docs/guides/status.md` exit-1 clarification (v0.8.0)
+- ✅ `docs/guides/upstream-drift.md` new guide (v0.8.0)
+- ✅ `--backup-to <dir>` flag on link / sync / adopt (v0.8.0)
+- ✅ Manifest-hash canonicalization `sha1:` → `sha1c:` (v0.8.0)
 - ⏳ P(-1) hardening pass + `docs/audit/YYYY-MM-DD-audit.md`
 - ⏳ `docs/benchmarks.md` 3-point trend (sync over 100-pkg home)
 
-The four Unreleased line items represent the v0.8.0 cut
-candidate; the two ⏳ items finish out v0.8.x → v0.9.0.
+v0.8.0 shipped 2026-05-23. Remaining ⏳ items finish out
+v0.8.x → v0.9.0 (the M7 close).

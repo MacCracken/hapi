@@ -4,6 +4,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0]
+
 ### Breaking
 - Audit-trail `manifest_hash` prefix swap: `sha1:` →
   `sha1c:`. Writers emit only the canonical variant going
@@ -100,6 +102,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   semantics.
 - `link.md`, `adopt.md`, `sync.md`, `dry-run.md` each gained
   a `--backup-to` section pointing at the new guide.
+
+### Filed
+- Three M7 dogfood-papercut issues archived to
+  `docs/development/issues/archived/`: status-exit-1
+  (Tier-1 doc note), upstream-drift (Tier-1 new guide),
+  no-backup-to (full `--backup-to <dir>` flag).
 
 ## [0.7.0]
 
