@@ -143,12 +143,85 @@ fn _fsl_getcwd(): i64 {
 
 # Resolve `path` (cstring) to an absolute cstring. If already
 # absolute (starts with '/'), returns a clone. Otherwise prefixes
-# the cwd with '/' as separator.
+# the cwd with '/' as separator. Note: does NOT resolve `..` or
+# `.` segments. Call `fsl_lexical_normalize` afterward when the
+# result will be byte-compared against a permitted prefix (e.g.
+# the capability cap-check).
 fn fsl_to_absolute(path): i64 {
     var n = strlen(path);
     if (n > 0 && load8(path) == 47) { return _fsl_cstr_dup(path); }
     var cwd = _fsl_getcwd();
     return _fsl_path_join(cwd, path);
+}
+
+# Lexical path canonicalization: collapse `.` and `..` segments
+# in `path` (an absolute cstring). Returns a fresh heap cstring.
+#
+# `/a/b/../c` → `/a/c`
+# `/a/./b`    → `/a/b`
+# `/a/b/..`   → `/a`
+# `/..`       → `/` (cannot escape root)
+# `/`         → `/`
+#
+# Lexical means: no filesystem calls; no symlink resolution. A
+# leading symlink in the path is preserved (`/home/user/trap`
+# stays `/home/user/trap` even if `trap` is a symlink). This is
+# exactly the property the capability cap-check needs to reject
+# `--root /home/user/../etc` while leaving the symlink-resolution
+# question for the kavach migration.
+fn fsl_lexical_normalize(path): i64 {
+    var n = strlen(path);
+    if (n == 0 || load8(path) != 47) { return _fsl_cstr_dup(path); }
+
+    var parts = vec_new();
+    var start = 1;
+    var i = 1;
+    while (i <= n) {
+        var at_sep = 0;
+        if (i == n) { at_sep = 1; }
+        elif (load8(path + i) == 47) { at_sep = 1; }
+        if (at_sep == 1) {
+            var seg_len = i - start;
+            if (seg_len > 0) {
+                if (seg_len == 1 && load8(path + start) == 46) {
+                    # "." segment — drop
+                } elif (seg_len == 2 && load8(path + start) == 46
+                                     && load8(path + start + 1) == 46) {
+                    if (vec_len(parts) > 0) { vec_pop(parts); }
+                } else {
+                    vec_push(parts, str_new(path + start, seg_len));
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+
+    var sn = vec_len(parts);
+    if (sn == 0) {
+        var root = alloc(2);
+        store8(root, 47);
+        store8(root + 1, 0);
+        return root;
+    }
+    var total = 0;
+    var k = 0;
+    while (k < sn) {
+        total = total + 1 + str_len(vec_get(parts, k));
+        k = k + 1;
+    }
+    var out = alloc(total + 1);
+    var pos = 0;
+    k = 0;
+    while (k < sn) {
+        store8(out + pos, 47); pos = pos + 1;
+        var s = vec_get(parts, k);
+        memcpy(out + pos, str_data(s), str_len(s));
+        pos = pos + str_len(s);
+        k = k + 1;
+    }
+    store8(out + pos, 0);
+    return out;
 }
 
 # Split a cstring path on '/' into a vec of Str slices that

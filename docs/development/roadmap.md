@@ -59,13 +59,24 @@ M7 dogfooding; ship the fixes before the v1.0 freeze)
   [`archived/2026-05-20-no-backup-to-flag-pre-hapi-bak-housekeeping.md`](issues/archived/2026-05-20-no-backup-to-flag-pre-hapi-bak-housekeeping.md).
 
 **Hardening**
-- P(-1) hardening pass complete — security audit doc filed at
-  `docs/audit/YYYY-MM-DD-audit.md` covering path traversal,
-  symlink-loop detection, TOCTOU, capability-boundary
-  validation
-- 3-point benchmark trend in `docs/benchmarks.md` for `sync`
-  over a realistic 100-package home; baselines captured at
-  v0.8.0, mid-cycle, and v0.9.0
+- ✅ P(-1) hardening pass complete — security audit doc filed
+  at [`docs/audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md)
+  covering path traversal, symlink-loop detection, TOCTOU, and
+  capability-boundary validation. Repairs landed in Unreleased:
+  F-001 (HIGH — `--root` `..` bypass, fixed via lexical
+  normalization), F-003 (LOW — backup-copy TOCTOU symlink race,
+  fixed via O_NOFOLLOW). F-002 (MEDIUM — `--root` symlink escape)
+  deferred to the kavach migration; filed at
+  [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md).
+- ✅ Benchmark baseline in
+  [`docs/benchmarks.md`](../benchmarks.md) for `sync` over a
+  100-package / 350-link synthetic home; first row landed
+  v0.9.0 (cold 72 ms / warm 54 ms / 0 audit growth on a
+  Ryzen 7 5800H tmpfs). Future trend rows fill in on
+  perf-relevant code changes — `cmd_link.cyr`, `audit.cyr`,
+  `fs_link.cyr`, or the manifest parser. Regression gate
+  per the file's acceptance section: > 2× cold-time jump or
+  any non-zero warm audit growth.
 
 **Audit-format migration**
 - ✅ Manifest-hash canonicalization migration `sha1:` → `sha1c:`
@@ -201,7 +212,11 @@ become a quality-of-life patch.
   the v0.7.0 `HAPI_ALLOWED_ROOTS` env-var stopgap inside
   `src/cap.cyr`. Internal-only refactor when kavach ships
   (`cap_check_root_r(path)` signature unchanged); no caller
-  changes, no manifest changes, no audit-format changes.
+  changes, no manifest changes, no audit-format changes. Also
+  closes [F-002](../audit/2026-05-23-audit.md) — kavach's
+  per-component symlink resolution supersedes the v0.8.x
+  lexical-only normalization. Tracked at
+  [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md).
 - **cyriusly starship-install non-clobbering fix** — filed
   upstream at
   [`cyrius/docs/development/issues/2026-05-20-cyriusly-cmdtools-install-clobbers-existing-starship-config.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-20-cyriusly-cmdtools-install-clobbers-existing-starship-config.md).

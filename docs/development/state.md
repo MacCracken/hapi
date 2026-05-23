@@ -5,17 +5,18 @@
 
 ## Version
 
-**0.8.0** — M7 issue-repair sweep shipped 2026-05-23:
-status.md exit-1 clarification, new `upstream-drift.md`
-guide, `--backup-to <dir>` flag on link/sync/adopt with
-new `backup-to.md` guide, and manifest-hash canonicalization
-(`sha1:` → `sha1c:` prefix swap; the v1.0 Breaking ADR 0002
-reserved). v0.7.0 (M6 — `--root` + `--dry-run`) shipped
-2026-05-20; v0.6.0 (M5 — list / sync / status / checkpoint /
-check --strict), v0.5.0 (M4 — adopt), v0.4.0 (M3 — unlink +
-rollback), v0.3.0 (M2 — link + audit), v0.2.0 (M1 —
-manifest + inspect) all landed the same day. M0 scaffold
-landed 2026-05-19.
+**0.9.0** — M7 close shipped 2026-05-23: P(-1) security
+audit pass with `docs/audit/2026-05-23-audit.md` filed
+(F-001 HIGH + F-003 LOW landed; F-002 MEDIUM deferred to
+kavach via `issues/2026-05-23-cap-check-symlink-escape.md`)
+and `docs/benchmarks.md` baseline captured (sync over a
+100-pkg / 350-link home; cold 72 ms, warm 54 ms with 0
+audit growth). v0.8.0 (M7 issue-repair sweep — status guide,
+upstream-drift, `--backup-to`, sha1c canonicalization)
+shipped the same day. v0.7.0 (M6 — `--root` + `--dry-run`)
+2026-05-20; v0.6.0 (M5), v0.5.0 (M4), v0.4.0 (M3),
+v0.3.0 (M2), v0.2.0 (M1) all landed the same day. M0
+scaffold 2026-05-19.
 
 ## Toolchain
 
@@ -23,7 +24,7 @@ landed 2026-05-19.
 
 ## Shape
 
-Binary (`hapi`). Argv dispatcher. Ten real verbs at 0.8.0;
+Binary (`hapi`). Argv dispatcher. Ten real verbs at 0.9.0;
 `--version` / `--help` / `-v` / `-h` round out the surface.
 Three global flags plug into per-verb arg parsers:
 `--root <path>` (link / adopt / sync / status / list, M6),
@@ -90,10 +91,15 @@ adopt, v0.8.0) — opt-in pre-`--force` snapshot.
   the engine is shared
 - `src/cap.cyr` — `--root` capability check. Owns
   `cap_check_root_r(path)`; resolves the arg to absolute,
+  lex-normalizes via `fsl_lexical_normalize` (collapses `.`
+  / `..`; closes the F-001 bypass — see
+  [`docs/audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md)),
   implicitly allows `$HOME`, otherwise prefix-matches
   against `HAPI_ALLOWED_ROOTS` (path-component boundary,
-  not byte boundary). Test hooks `cap_set_home` and
-  `cap_set_allowlist` for unit tests.
+  not byte boundary; each entry also lex-normalized). Test
+  hooks `cap_set_home` and `cap_set_allowlist` for unit tests.
+  Symlink-aware resolution deferred per F-002 to the kavach
+  migration.
 - `src/cli.cyr` — owns the process-wide `_hapi_dry_run`
   flag. Setter `hapi_set_dry_run(0|1)` and getter
   `hapi_dry_run()`. Every mutating cmd checks the flag
@@ -141,8 +147,8 @@ M7 onward fills:
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 218 assertions across
-  61 test groups (v0.8.0; was 194 / 52 at v0.7.0):
+- `tests/hapi.tcyr` — primary suite. 235 assertions across
+  65 test groups (v0.9.0; was 218 / 61 at v0.8.0):
   - Manifest (7 groups): minimal, M1 acceptance, validation,
     path traversal, comments, on-disk parse, missing file
   - Audit writer (2 groups): link entry format, JSON escaping
@@ -188,6 +194,11 @@ M7 onward fills:
     `sha1c:` prefix, cosmetic edits (comments + whitespace)
     yield identical hash, `[[link]]` row reorder yields
     identical hash, target rename diverges
+  - audit-repair (4 groups; v0.9.0): lexical normalize
+    collapses `..` / `.`; cap-check rejects `..` escape from
+    `$HOME` (F-001); allowlist entries lex-normalized;
+    `hapi_backup_copy` refuses symlink source under
+    `O_NOFOLLOW` (F-003)
 
 ## Dependencies
 
@@ -219,14 +230,23 @@ means downstream packagers (zugot recipes) and user manifests.
 ## Next
 
 See [`roadmap.md`](roadmap.md) for the M7 → v1.0 plan. M7
-issue-repair queue progress:
+is now closed; v0.9.0 ships the audit + benchmarks pair.
 
-- ✅ `docs/guides/status.md` exit-1 clarification (v0.8.0)
-- ✅ `docs/guides/upstream-drift.md` new guide (v0.8.0)
-- ✅ `--backup-to <dir>` flag on link / sync / adopt (v0.8.0)
-- ✅ Manifest-hash canonicalization `sha1:` → `sha1c:` (v0.8.0)
-- ⏳ P(-1) hardening pass + `docs/audit/YYYY-MM-DD-audit.md`
-- ⏳ `docs/benchmarks.md` 3-point trend (sync over 100-pkg home)
+M7 close (v0.9.0, 2026-05-23):
+- ✅ P(-1) hardening pass + `docs/audit/2026-05-23-audit.md`
+  (F-001 HIGH + F-003 LOW landed; F-002 MEDIUM deferred to
+  kavach via
+  [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md))
+- ✅ `docs/benchmarks.md` first baseline (sync over 100-pkg /
+  350-link synthetic home; cold 72 ms / warm 54 ms / 0
+  audit growth; methodology + reproduction inlined)
 
-v0.8.0 shipped 2026-05-23. Remaining ⏳ items finish out
-v0.8.x → v0.9.0 (the M7 close).
+M7 issue-repair sweep (v0.8.0, 2026-05-23):
+- ✅ `docs/guides/status.md` exit-1 clarification
+- ✅ `docs/guides/upstream-drift.md` new guide
+- ✅ `--backup-to <dir>` flag on link / sync / adopt
+- ✅ Manifest-hash canonicalization `sha1:` → `sha1c:`
+
+**Next ship is M8 — the v1.0.0 freeze.** Command surface,
+manifest schema, and audit-trail format all become contractual.
+See the roadmap M8 section + the *v1.0 criteria* checklist.

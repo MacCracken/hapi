@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — hapi
 
-> **Last refresh**: 2026-05-23 (Unreleased — M7 sweep: status.md exit-1 clarification, new upstream-drift.md guide, `--backup-to <dir>` flag with new backup-to.md guide + ADR 0002 additive-field note, **manifest-hash canonicalization `sha1:` → `sha1c:`** with ADR 0002 *Hash* section rewrite; three M7 issues archived.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
+> **Last refresh**: 2026-05-23 (v0.9.0 ship — M7 close. `docs/benchmarks.md` first baseline filed alongside the P(-1) audit doc; M7 retired in roadmap; state.md "Next" advanced to M8 / v1.0 freeze.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
 > **Scope**: This repo only (`hapi`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, VERSION, LICENSE, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, cyrius.cyml). Per-stdlib-dep docs live in `cyrius/`; cross-repo state lives in [`development/state.md`](development/state.md), not here.
 >
 > **Convention adopted from agnosticos**: pattern mirrors [`cyrius/docs/doc-health.md`](https://github.com/MacCracken/cyrius/blob/main/docs/doc-health.md) (small-repo variant). Per `first-party-documentation.md § Development Docs`, the ledger lives at `docs/` root (not `docs/development/`) because its scope is the whole tree. Hapi's doc tree is ~34 markdown files (vs cyrius's ~105) so the tier structure here is leaner.
@@ -15,19 +15,22 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
 
-## At a glance — 2026-05-23 inventory (M7 issue-repair sweep in Unreleased)
+## At a glance — 2026-05-23 inventory (v0.9.0 shipped; M7 closed)
 
-**36 markdown files** across the repo (root + docs tree) — gained
-`docs/guides/upstream-drift.md` and `docs/guides/backup-to.md`.
+**39 markdown files** across the repo (root + docs tree) — gained
+`docs/guides/upstream-drift.md`, `docs/guides/backup-to.md`,
+`docs/audit/2026-05-23-audit.md`,
+`issues/2026-05-23-cap-check-symlink-escape.md`, and
+`docs/benchmarks.md`.
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh / touched in current cycle** | ~31 | M5 / M6 / M7 touched; state.md / roadmap.md / CHANGELOG / 5 ADRs (ADR 0002 gained an additive-field note) / **15 guides** / 2 example files / architecture README / adr README / issues README. |
+| ✅ **Fresh / touched in current cycle** | ~34 | M5 / M6 / M7 touched; state.md / roadmap.md / CHANGELOG / 5 ADRs (ADR 0002 gained the canonical-hash + additive-field updates) / **15 guides** / 2 example files / architecture README / adr README / issues README / **audit/ tier (1 file)** / **benchmarks.md (NEW)**. |
 | 🟡 **Stale — refresh in place** | 0 | None flagged. |
 | 🟠 **Read-through outstanding** | 0 | None flagged. |
 | 🔵 **Probably evergreen** | ~3 | LICENSE / SECURITY.md / CODE_OF_CONDUCT.md — load-bearing root files; re-read pass at v1.0, not per-release. |
 | 📦 **Archive — frozen by design** | 3 | Three M7-resolved issues moved to `issues/archived/` (status-exit-1, upstream-drift, no-backup-to). |
-| ❓ **Open strategic question** | 0 | None — remaining M7 issue (`sync-prune`) is post-v1.0 deferred. |
+| ❓ **Open strategic question** | 0 | None — open issues (`sync-prune`, `cap-check-symlink-escape`) are both scoped and deferred to post-v1.0 / kavach. |
 
 Numbers approximate; rolls up from the per-tier tables below.
 
@@ -48,7 +51,8 @@ Numbers approximate; rolls up from the per-tier tables below.
 | `CODE_OF_CONDUCT.md` | (pre-M5) | 🔵 Evergreen | Standard text; re-read pass at v1.0. |
 | `LICENSE` | (pre-M5) | 🔵 Evergreen | GPL-3.0-only; durable. |
 | `cyrius.cyml` | 2026-05-19 | ✅ Fresh | Toolchain pin `6.0.1`. Project manifest. |
-| `docs/doc-health.md` | 2026-05-20 | ✅ Fresh | **This file.** Initial scaffold. |
+| `docs/doc-health.md` | 2026-05-23 | ✅ Fresh | **This file.** v0.9.0 refresh — M7 close. |
+| `docs/benchmarks.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23.** M7 close commitment. First `sync` baseline over a 100-pkg / 350-link synthetic home (cold 72 ms, warm 54 ms with 0 audit growth); methodology + reproduction inlined. Future trend rows fill in when perf-relevant code lands. |
 
 ---
 
@@ -57,6 +61,12 @@ Numbers approximate; rolls up from the per-tier tables below.
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `README.md` | (pre-M5) | ✅ Fresh | Index + conventions. No architecture notes filed yet — earned when a non-obvious invariant deserves capture. Candidates surfacing from M7: upstream-stock-template drift pattern (per the issues filing 2026-05-20). |
+
+## Tier 2.5 — Security audits (`docs/audit/`)
+
+| File | Last touched | Status | Notes |
+|---|---|---|---|
+| `2026-05-23-audit.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23.** P(-1) hardening pass per CLAUDE.md. Files three findings: F-001 HIGH (`--root` `..` bypass — fixed in Unreleased), F-003 LOW (backup-copy TOCTOU symlink race — fixed), F-002 MEDIUM (`--root` symlink escape — deferred to kavach). Accepted boundaries F-004 (audit-trail trust model), F-005 (single-process TOCTOU). |
 
 ---
 
@@ -70,6 +80,7 @@ Numbers approximate; rolls up from the per-tier tables below.
 | `roadmap.md` | 2026-05-23 | ✅ Fresh | Through v1.0 plan; M6 retired, M7 (dogfood + harden) underway. M7 issue-repair list now shows ✅ for the three Unreleased fixes (status-exit-1, upstream-drift, `--backup-to`); deferred-section links re-pointed at `issues/archived/`. Three M7 issues archived. |
 | `issues/README.md` | 2026-05-20 | ✅ Fresh | Filing conventions for hapi-side dogfood papercuts; severity guide; triage + archival lifecycle; cross-repo upstream-issue pointer. |
 | `issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md` | 2026-05-20 | 🟡 Open | Low severity; M7 dogfood papercut. Deferred to post-v1.0 per existing roadmap entry. |
+| `issues/2026-05-23-cap-check-symlink-escape.md` | 2026-05-23 | 🟡 Open | **New 2026-05-23.** Medium severity; F-002 from the P(-1) audit. `--root` cap-check is lexical-only; symlinked path components escape. Deferred to the kavach migration per ADR 0005. |
 | `issues/archived/2026-05-20-status-exit-1-short-circuits-script-chains.md` | 2026-05-23 | 📦 Archived | Resolved in Unreleased via Tier-1 guide-doc note (`docs/guides/status.md` *Exit-1 is an assertion, not a predicate* section). |
 | `issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md` | 2026-05-23 | 📦 Archived | Resolved in Unreleased via Tier-1 new guide `docs/guides/upstream-drift.md`. Tier-2/3 remain post-v1.0 candidates. |
 | `issues/archived/2026-05-20-no-backup-to-flag-pre-hapi-bak-housekeeping.md` | 2026-05-23 | 📦 Archived | Resolved in Unreleased via the `--backup-to <dir>` flag on link / sync / adopt + the new `docs/guides/backup-to.md` guide + ADR 0002 additive-field note for `backup_path`. |
@@ -158,9 +169,9 @@ Items that are *scheduled* doc decisions, not stale state. Surfaced here so they
 
 | # | Commitment | Trigger | Source | Notes |
 |---|---|---|---|---|
-| 1 | **Security audit doc** — `docs/audit/YYYY-MM-DD-audit.md` filed before v1.0 cut per CLAUDE.md P(-1) Hardening step 5. | Before v1.0 release | [`CLAUDE.md`](../CLAUDE.md) Process P(-1) | Earned at M7; covers path-traversal, symlink-loop, TOCTOU, capability boundary per roadmap M7 entry. |
-| 2 | **`docs/benchmarks.md` 3-point trend** — `sync` over a realistic 100-package home; baselines at v0.8.0, mid-cycle, v0.9.0 per roadmap M7. | v0.8.0 cut | roadmap M7 entry | Earned at M7; v1.0 criteria requires the benchmarks file present. |
-| 3 | **`docs/architecture/NNN-upstream-drift-pattern.md`** — formalize the drift-audit pattern in the architecture tier once a second drifting-upstream consumer hits the pattern. | When sway / fish / kitty (or sibling) experiences a stock-template rewrite during dogfood | `issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md` Tier-2 | Tier-1 guide (`upstream-drift.md`) landed 2026-05-23; architecture note follows. |
+| 1 | **`docs/architecture/NNN-upstream-drift-pattern.md`** — formalize the drift-audit pattern in the architecture tier once a second drifting-upstream consumer hits the pattern. | When sway / fish / kitty (or sibling) experiences a stock-template rewrite during dogfood | `issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md` Tier-2 | Tier-1 guide (`upstream-drift.md`) landed 2026-05-23; architecture note follows. |
+| 2 | **Re-run P(-1) audit** for v1.0 / on any new code touching paths, syscalls, or the capability surface. | Pre-v1.0 freeze + on touch | [`audit/2026-05-23-audit.md`](audit/2026-05-23-audit.md) sign-off | Standing commitment per CLAUDE.md Process P(-1). |
+| 3 | **`docs/benchmarks.md` trend rows** — append a new row each release that touches `cmd_link.cyr` / `audit.cyr` / `fs_link.cyr` / the manifest parser. | On perf-relevant code change | [`benchmarks.md`](benchmarks.md) acceptance gates | First baseline filed 2026-05-23 (v0.9.0); regression gate is "> 2× cold-time jump OR any non-zero warm audit growth." |
 
 ---
 

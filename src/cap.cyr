@@ -54,7 +54,10 @@ fn _cap_path_within(path, prefix): i64 {
 }
 
 # Walk HAPI_ALLOWED_ROOTS (colon-separated). Returns 1 if
-# `path` falls within any entry, 0 otherwise.
+# `path` falls within any entry, 0 otherwise. Each allowlist
+# entry is lexically normalized before the prefix-match so a
+# misformatted entry like `/etc/myproject/../escape` cannot
+# slip a non-prefix through the matcher.
 fn _cap_in_allowlist(path): i64 {
     var raw = _cap_allowlist_override;
     if (raw == 0) { raw = getenv("HAPI_ALLOWED_ROOTS"); }
@@ -74,7 +77,8 @@ fn _cap_in_allowlist(path): i64 {
                 store8(seg + seg_len, 0);
                 # Only absolute paths can be allowlist entries.
                 if (load8(seg) == 47) {
-                    if (_cap_path_within(path, seg) == 1) { hit = 1; }
+                    var norm = fsl_lexical_normalize(seg);
+                    if (_cap_path_within(path, norm) == 1) { hit = 1; }
                 }
             }
             start = i + 1;
@@ -87,20 +91,23 @@ fn _cap_in_allowlist(path): i64 {
 # Resolve `--root` to an absolute cstring and verify capability.
 # Returns Ok(absolute_root_cstr) on success, Err(HapiCap*) on
 # denial. Caller passes the user-supplied flag value verbatim
-# (may be relative; we canonicalize via fsl_to_absolute).
+# (may be relative; we canonicalize via fsl_to_absolute, then
+# lexically normalize so `..` segments cannot escape the cap-
+# checked prefix). Symlink-following resolution is out of scope
+# for v0.8.x — the kavach migration owns that work.
 fn cap_check_root_r(root_arg): Result {
     if (root_arg == 0 || strlen(root_arg) == 0) {
         return Err(HapiCapInvalidPath);
     }
-    var abs_root = fsl_to_absolute(root_arg);
+    var abs_root = fsl_lexical_normalize(fsl_to_absolute(root_arg));
 
     # $HOME is always implicitly allowed. Compare against the
-    # canonicalized $HOME — fsl_to_absolute is a no-op on an
-    # already-absolute $HOME, which is the typical shape.
+    # lexically-normalized $HOME — same canonicalization as the
+    # candidate path so prefix-match is meaningful.
     var home = _cap_home_override;
     if (home == 0) { home = getenv("HOME"); }
     if (home != 0 && strlen(home) > 0) {
-        var abs_home = fsl_to_absolute(home);
+        var abs_home = fsl_lexical_normalize(fsl_to_absolute(home));
         if (_cap_path_within(abs_root, abs_home) == 1) {
             return Ok(abs_root);
         }

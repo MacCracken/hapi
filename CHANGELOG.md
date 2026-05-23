@@ -4,6 +4,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0]
+
+### Security
+- **F-001 [HIGH] — `--root` `..` bypass**, fixed.
+  `cap_check_root_r` now lexically normalizes the resolved
+  path (and `$HOME`, and each `HAPI_ALLOWED_ROOTS` entry)
+  before the byte-prefix match. The pre-fix bypass —
+  `--root /home/user/../etc/secret` passing as "within
+  $HOME" while denoting `/home/etc/secret` — is rejected.
+  New helper `fsl_lexical_normalize(path)` in
+  `src/fs_link.cyr` collapses `.` and `..` segments without
+  filesystem calls. Symbol-only fix; no caller signature
+  changes.
+- **F-003 [LOW] — backup-copy TOCTOU symlink race**, fixed.
+  `hapi_backup_copy` now opens the source with
+  `O_NOFOLLOW` (0x20000), so a `mv symlink → src` race
+  between probe and copy fails with `ELOOP` instead of
+  copying through the symlink. Defends the documented
+  "snapshot of the original file's bytes" contract.
+- **F-002 [MEDIUM] — `--root` symlink escape**, deferred.
+  Lexical normalize does not resolve symlinks; the kavach
+  migration owns the proper per-component resolution.
+  Filed at `issues/2026-05-23-cap-check-symlink-escape.md`
+  with reproduction + workaround.
+
+### Added
+- `docs/audit/2026-05-23-audit.md` — P(-1) hardening pass
+  per CLAUDE.md Process step. Covers path traversal,
+  symlink loops, TOCTOU, and capability boundary. Files
+  three repairs (F-001 HIGH, F-003 LOW landed; F-002 MEDIUM
+  deferred to kavach) and two accepted boundaries (F-004,
+  F-005 per ADRs 0002 / 0004).
+- `fsl_lexical_normalize(path)` in `src/fs_link.cyr` —
+  pure-string `.` / `..` collapser. Used by
+  `cap_check_root_r` and the `HAPI_ALLOWED_ROOTS` walker.
+- Test suite grew 218 → 235 assertions (61 → 65 groups).
+  New groups: lexical normalize, cap-check dotdot reject,
+  allowlist normalization, backup-copy O_NOFOLLOW defense.
+- `docs/benchmarks.md` — first M7 baseline. `sync` over a
+  100-package / 350-link synthetic home: cold 72 ms (205 µs
+  per link), warm 54 ms (154 µs per probe; 0 audit growth
+  per the idempotency contract). Per-entry audit size 289
+  bytes average — comfortably under the PIPE_BUF atomicity
+  ceiling per ADR 0002. Reproduction harness inlined.
+
+### Filed
+- One open issue from the audit pass:
+  `issues/2026-05-23-cap-check-symlink-escape.md` (F-002
+  MEDIUM) — `--root` symlinked-component escape. Deferred
+  to the kavach migration per ADR 0005.
+
 ## [0.8.0]
 
 ### Breaking

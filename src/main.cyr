@@ -1,6 +1,6 @@
 # hapi — main entry point.
 #
-# Argv dispatcher. Ten verbs at 0.8.0; --version / --help round
+# Argv dispatcher. Ten verbs at 0.9.0; --version / --help round
 # out the surface. Global flags landed in M6:
 #   --root <path>  — open a non-$HOME scope, gated by ADR 0005
 #                    (HAPI_ALLOWED_ROOTS stopgap, kavach later).
@@ -42,7 +42,7 @@ include "lib/args.cyr"
 # project root. CLAUDE.md's work loop calls out "version sync"
 # explicitly — bump this string in the same commit as VERSION.
 fn hapi_print_version(): i64 {
-    println("hapi 0.8.0");
+    println("hapi 0.9.0");
     return 0;
 }
 

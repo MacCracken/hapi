@@ -108,10 +108,18 @@ fn hapi_backup_compose_path(dir, pkg, src_path): i64 {
 # parent of `dst` first. Returns 0 on success or a negative
 # errno on the first IO failure. 8 KiB read buffer; loop to
 # handle short writes.
+#
+# Source open uses O_NOFOLLOW so a TOCTOU race that swaps the
+# regular file for a symlink between the link/adopt probe and
+# the copy fails with ELOOP rather than leaking the symlink
+# target's content into the backup. The caller's probe already
+# verified the path is a regular file; O_NOFOLLOW makes the
+# property survive the race window.
 fn hapi_backup_copy(src, dst): i64 {
     var mkrc = fsl_mkdir_parents(dst);
     if (mkrc < 0) { return mkrc; }
-    var rfd = file_open(src, O_RDONLY, 0);
+    # O_NOFOLLOW = 0x20000 on Linux x86_64.
+    var rfd = file_open(src, O_RDONLY | 131072, 0);
     if (rfd < 0) { return rfd; }
     var wfd = file_open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
     if (wfd < 0) { file_close(rfd); return wfd; }

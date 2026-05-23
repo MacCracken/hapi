@@ -1445,6 +1445,118 @@ fn test_dry_run_sync_no_writes() {
 }
 
 # ============================================================
+# M7 — security hardening repairs (v0.9.0 audit pass)
+# ============================================================
+
+fn test_lexical_normalize_dotdot_collapses() {
+    test_group("audit-repair: lexical normalize collapses ..");
+
+    # /home/user/../etc/secret — `..` pops "user", leaving
+    # [home, etc, secret]. The bypass demo it defeats:
+    # this path is no longer byte-prefix-matchable to /home/user,
+    # so cap_check_root_r denies it (see test below).
+    var a = fsl_lexical_normalize("/home/user/../etc/secret");
+    assert_eq(memeq(a, "/home/etc/secret", 16), 1, ".. pops one component");
+    assert_eq(strlen(a), 16, "no trailing junk");
+
+    var b = fsl_lexical_normalize("/a/b/c/../../d");
+    assert_eq(memeq(b, "/a/d", 4), 1, "successive .. pops two");
+    assert_eq(strlen(b), 4, "no trailing junk");
+
+    var c = fsl_lexical_normalize("/a/./b/./");
+    assert_eq(memeq(c, "/a/b", 4), 1, ". segments dropped");
+    assert_eq(strlen(c), 4, "no trailing junk");
+
+    var d = fsl_lexical_normalize("/..");
+    assert_eq(memeq(d, "/", 1), 1, ".. at root stays at root");
+    assert_eq(strlen(d), 1, "root is one byte");
+
+    var e = fsl_lexical_normalize("/");
+    assert_eq(memeq(e, "/", 1), 1, "root canonicalizes to root");
+    assert_eq(strlen(e), 1, "root is one byte");
+
+    return 0;
+}
+
+fn test_cap_check_rejects_dotdot_escape() {
+    test_group("audit-repair: cap check rejects .. that escapes $HOME");
+
+    cap_set_home("/home/user");
+    cap_set_allowlist("");
+
+    # The bypass case: /home/user/../etc looks like it starts
+    # with /home/user but actually resolves to /etc.
+    var r = cap_check_root_r("/home/user/../etc");
+    assert_eq(is_err_result(r), 1, "escape via .. is denied");
+
+    # Legitimate under-$HOME path still allowed.
+    var r2 = cap_check_root_r("/home/user/dotfiles");
+    assert_eq(is_ok(r2), 1, "honest subpath still allowed");
+
+    # And $HOME itself.
+    var r3 = cap_check_root_r("/home/user");
+    assert_eq(is_ok(r3), 1, "$HOME itself still allowed");
+
+    cap_set_home(0);
+    cap_set_allowlist(0);
+    return 0;
+}
+
+fn test_cap_check_normalizes_allowlist_entries() {
+    test_group("audit-repair: allowlist entries lex-normalized too");
+
+    cap_set_home("/dev/null");   # force allowlist path
+    cap_set_allowlist("/etc/myproject/../escape:/srv/legit");
+
+    # The malformed entry must not gate access to /escape via
+    # byte-prefix match — the entry normalizes to /escape, so
+    # paths under /escape pass, but /etc/myproject paths do NOT.
+    var r1 = cap_check_root_r("/etc/myproject/anything");
+    assert_eq(is_err_result(r1), 1, "malformed allowlist entry no longer gates /etc/myproject");
+
+    var r2 = cap_check_root_r("/srv/legit/sub");
+    assert_eq(is_ok(r2), 1, "honest allowlist entry still works");
+
+    cap_set_home(0);
+    cap_set_allowlist(0);
+    return 0;
+}
+
+fn test_backup_copy_refuses_symlink_source() {
+    test_group("audit-repair: backup_copy fails on symlink source (TOCTOU defense)");
+
+    var scratch = _test_scratch_dir();
+
+    # Plant a regular file and a symlink to it. The probe step
+    # in cmd_link / cmd_adopt would only ever pass us a regular
+    # file path — but the kernel-level O_NOFOLLOW means even if
+    # an attacker races a swap, we refuse rather than copy
+    # through the symlink.
+    var real = alloc(strlen(scratch) + 16);
+    memcpy(real, scratch, strlen(scratch));
+    memcpy(real + strlen(scratch), "/real\x00", 6);
+    _test_write_file(real, "secret bytes");
+
+    var link = alloc(strlen(scratch) + 16);
+    memcpy(link, scratch, strlen(scratch));
+    memcpy(link + strlen(scratch), "/link\x00", 6);
+    sys_symlink(real, link);
+
+    var dst = alloc(strlen(scratch) + 16);
+    memcpy(dst, scratch, strlen(scratch));
+    memcpy(dst + strlen(scratch), "/copy\x00", 6);
+
+    var rc = hapi_backup_copy(link, dst);
+    assert(rc < 0, "copy through symlink refused");
+
+    # Direct (non-symlink) copy still works.
+    var rc2 = hapi_backup_copy(real, dst);
+    assert_eq(rc2, 0, "regular-file copy succeeds");
+
+    return 0;
+}
+
+# ============================================================
 # M7 — manifest-hash canonicalization (sha1: → sha1c:)
 # ============================================================
 
@@ -1767,6 +1879,10 @@ fn main() {
     test_dry_run_rollback_no_writes();
     test_dry_run_checkpoint_no_writes();
     test_dry_run_sync_no_writes();
+    test_lexical_normalize_dotdot_collapses();
+    test_cap_check_rejects_dotdot_escape();
+    test_cap_check_normalizes_allowlist_entries();
+    test_backup_copy_refuses_symlink_source();
     test_canonical_hash_prefix();
     test_canonical_hash_ignores_comments_and_whitespace();
     test_canonical_hash_row_reorder_collides();
