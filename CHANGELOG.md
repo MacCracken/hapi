@@ -4,6 +4,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Breaking
+- Audit-trail `manifest_hash` prefix swap: `sha1:` →
+  `sha1c:`. Writers emit only the canonical variant going
+  forward; readers tolerate both prefixes during the
+  M7 → M8 transition. Per ADR 0002, this is the prefix-swap
+  Breaking the spec reserved at the format's introduction —
+  the surrounding line format is unchanged. The
+  `manifest_hash` field is diagnostic-only (rollback's
+  identity check is `(pkg, target)`), so no consumer code
+  needs to special-case the prefix; v0.x trails continue
+  to read cleanly. Canonical form: `[package]` fields in
+  fixed order (`name`, `version`, `description?`, `ignore?`),
+  `[[link]]` rows sorted by `target` lex byte order, no
+  comments, single blank line between sections, only `"` and
+  `\` escaped in strings. Cosmetic edits (whitespace,
+  comments, row reordering) now produce the same hash.
+
 ### Added
 - `--backup-to <dir>` global flag — opt-in pre-`--force`
   snapshot. Accepted on **link, sync, adopt**; rejected with
@@ -27,6 +44,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   new flag (semantics, filename layout, when to use it,
   composition with `--dry-run` / `--root`, audit-trail
   growth note).
+- `hapi_mf_canonicalize(m, out, cap)` in `src/manifest.cyr`
+  — re-serializes a parsed manifest to a fixed byte
+  representation: `[package]` fields in fixed order,
+  `[[link]]` rows sorted by `target`, no comments, single
+  blank line between sections, only `"` and `\` escaped.
+  Internal contract; bytes never surface to users.
+- `audit_manifest_hash_raw(path)` in `src/audit.cyr` —
+  legacy `sha1:` over raw file bytes, kept for trail-format
+  diagnostics on pre-Unreleased entries. New entries use
+  the canonical form by default.
 - `docs/guides/status.md` — *Exit-1 is an assertion, not a
   predicate* section. Documents that `status`'s exit-1-on-drift
   is for CI / assertion use; points users at `link --dry-run`
@@ -47,6 +74,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `hapi merge` verb remain post-v1.0 candidates.
 
 ### Changed
+- `audit_manifest_hash(path)` now parses the manifest,
+  canonicalizes it via `hapi_mf_canonicalize`, and hashes
+  the canonical bytes. Returns `sha1c:` + 40 hex chars
+  (was `sha1:` over raw file bytes at v0.7.0).
+- ADR 0002 — gained a *Hash* table documenting both
+  `sha1:` and `sha1c:` prefixes, the canonical re-serialization
+  rules, and the reader-tolerates-both contract.
 - `audit_format_link` / `audit_append_link_r` /
   `audit_format_adopt` / `audit_append_adopt_r` grew an
   optional last parameter `backup_path` (cstring, 0 when
@@ -54,13 +88,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only when the value is non-empty. `audit_format_unlink` /
   `audit_format_unadopt` signatures unchanged — those ops
   never carry a backup.
-- Test suite: 194 → 210 assertions (52 → 57 groups). Five
+- Test suite: 194 → 218 assertions (52 → 61 groups). Five
   new groups cover the compose-path filename layout, the
   link --force snapshot end-to-end (audit + on-disk read-back),
   symlink-conflict skip, dry-run no-write invariant, and the
-  adopt-before-rename snapshot. The existing
-  `test_audit_format_link` gained two assertions for the
-  optional-field presence/absence semantics.
+  adopt-before-rename snapshot. Four new canonicalization
+  groups cover the `sha1c:` prefix, comment/whitespace
+  collisions, row-reorder collisions, and value-change
+  divergence. The existing `test_audit_format_link` gained
+  two assertions for the optional-field presence/absence
+  semantics.
 - `link.md`, `adopt.md`, `sync.md`, `dry-run.md` each gained
   a `--backup-to` section pointing at the new guide.
 

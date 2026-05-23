@@ -68,15 +68,16 @@ M7 dogfooding; ship the fixes before the v1.0 freeze)
   v0.8.0, mid-cycle, and v0.9.0
 
 **Audit-format migration**
-- Manifest-hash canonicalization migration `sha1:` → `sha1c:`
-  per ADR 0002's reserved prefix swap. The v0.x audit hash is
-  over raw file bytes, so a cosmetic edit (trailing newline,
-  comment change) produces a different hash. The canonical
-  variant hashes the parsed-and-re-serialized manifest so
-  semantically-identical manifests collide. Migration: read
-  both prefixes during the M7 → M8 window; write only `sha1c:`
-  from M8 forward. The `Breaking` lives on the prefix swap,
-  not on the surrounding line format.
+- ✅ Manifest-hash canonicalization migration `sha1:` → `sha1c:`
+  per ADR 0002's reserved prefix swap. Landed in Unreleased.
+  Writers emit only `sha1c:` going forward; readers tolerate
+  both prefixes during the M7 → M8 window. Canonical form:
+  `[package]` fields in fixed order, `[[link]]` rows sorted by
+  `target`, no comments, single blank line between sections,
+  only `"` and `\` escaped in strings. Cosmetic edits
+  (whitespace, comments, row reordering) now produce the same
+  hash; semantic edits still diverge. ADR 0002 *Hash* section
+  rewritten with the prefix table and the canonical-form rules.
 
 ### M8 — v1.0.0
 

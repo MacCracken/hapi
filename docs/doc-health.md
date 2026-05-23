@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — hapi
 
-> **Last refresh**: 2026-05-23 (Unreleased — M7 issue-repair sweep: status.md exit-1 clarification, new upstream-drift.md guide, `--backup-to <dir>` flag with new backup-to.md guide + ADR 0002 additive-field note; three M7 issues archived.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
+> **Last refresh**: 2026-05-23 (Unreleased — M7 sweep: status.md exit-1 clarification, new upstream-drift.md guide, `--backup-to <dir>` flag with new backup-to.md guide + ADR 0002 additive-field note, **manifest-hash canonicalization `sha1:` → `sha1c:`** with ADR 0002 *Hash* section rewrite; three M7 issues archived.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
 > **Scope**: This repo only (`hapi`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, VERSION, LICENSE, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, cyrius.cyml). Per-stdlib-dep docs live in `cyrius/`; cross-repo state lives in [`development/state.md`](development/state.md), not here.
 >
 > **Convention adopted from agnosticos**: pattern mirrors [`cyrius/docs/doc-health.md`](https://github.com/MacCracken/cyrius/blob/main/docs/doc-health.md) (small-repo variant). Per `first-party-documentation.md § Development Docs`, the ledger lives at `docs/` root (not `docs/development/`) because its scope is the whole tree. Hapi's doc tree is ~34 markdown files (vs cyrius's ~105) so the tier structure here is leaner.
@@ -85,7 +85,7 @@ Numbers approximate; rolls up from the per-tier tables below.
 | `README.md` | 2026-05-20 | ✅ Fresh | Index updated for ADR 0005. |
 | `template.md` | (pre-M5) | 🔵 Evergreen | Copy-as-starting-point. |
 | `0001-hapi-cyml-manifest-schema.md` | (M1) | 🔵 Evergreen | Manifest schema; frozen at v1.0 per CLAUDE.md. |
-| `0002-audit-trail-format.md` | 2026-05-23 | ✅ Fresh | Audit-trail format; frozen at v1.0. Reserves `sha1:` → `sha1c:` canonicalization swap for M7. Gained an *Additive fields shipped after the initial format* subsection registering the Unreleased `backup_path` field. |
+| `0002-audit-trail-format.md` | 2026-05-23 | ✅ Fresh | Audit-trail format; frozen at v1.0. **Canonical-hash migration landed in Unreleased — `sha1:` → `sha1c:` prefix swap with the canonical re-serialization rules documented in the *Hash* table.** Also gained an *Additive fields shipped after the initial format* subsection registering the Unreleased `backup_path` field. |
 | `0003-symlink-target-shape.md` | (M2) | 🔵 Evergreen | Relative-from-link-parent symlink shape. |
 | `0004-adopt-op-semantics.md` | (M4) | 🔵 Evergreen | Adopt verb design; atomic single-entry audit + three-step conditional rollback. |
 | `0005-capability-bounded-roots.md` | 2026-05-20 | ✅ Fresh | M6 ship; `--root` + `HAPI_ALLOWED_ROOTS` stopgap until kavach lands. |
@@ -159,9 +159,8 @@ Items that are *scheduled* doc decisions, not stale state. Surfaced here so they
 | # | Commitment | Trigger | Source | Notes |
 |---|---|---|---|---|
 | 1 | **Security audit doc** — `docs/audit/YYYY-MM-DD-audit.md` filed before v1.0 cut per CLAUDE.md P(-1) Hardening step 5. | Before v1.0 release | [`CLAUDE.md`](../CLAUDE.md) Process P(-1) | Earned at M7; covers path-traversal, symlink-loop, TOCTOU, capability boundary per roadmap M7 entry. |
-| 2 | **Manifest-hash canonicalization migration** — `sha1:` → `sha1c:` prefix swap per ADR 0002, deferred from M2 to M7. | M7 → M8 transition | ADR 0002, roadmap M7 entry | Audit-format `Breaking` lives on the prefix swap. Migration window: read both prefixes during M7 → M8, write only `sha1c:` from M8 forward. |
-| 3 | **`docs/benchmarks.md` 3-point trend** — `sync` over a realistic 100-package home; baselines at v0.8.0, mid-cycle, v0.9.0 per roadmap M7. | v0.8.0 cut | roadmap M7 entry | Earned at M7; v1.0 criteria requires the benchmarks file present. |
-| 4 | **`docs/architecture/NNN-upstream-drift-pattern.md`** — formalize the drift-audit pattern in the architecture tier once a second drifting-upstream consumer hits the pattern. | When sway / fish / kitty (or sibling) experiences a stock-template rewrite during dogfood | `issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md` Tier-2 | Tier-1 guide (`upstream-drift.md`) landed 2026-05-23; architecture note follows. |
+| 2 | **`docs/benchmarks.md` 3-point trend** — `sync` over a realistic 100-package home; baselines at v0.8.0, mid-cycle, v0.9.0 per roadmap M7. | v0.8.0 cut | roadmap M7 entry | Earned at M7; v1.0 criteria requires the benchmarks file present. |
+| 3 | **`docs/architecture/NNN-upstream-drift-pattern.md`** — formalize the drift-audit pattern in the architecture tier once a second drifting-upstream consumer hits the pattern. | When sway / fish / kitty (or sibling) experiences a stock-template rewrite during dogfood | `issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md` Tier-2 | Tier-1 guide (`upstream-drift.md`) landed 2026-05-23; architecture note follows. |
 
 ---
 

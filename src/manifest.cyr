@@ -384,6 +384,176 @@ fn hapi_mf_parse_file_r(path): Result {
     return hapi_mf_parse_header_r(hdr, hdr_len);
 }
 
+# ----------------------------------------------------------------
+# Canonical re-serialization (M7 — sha1: → sha1c: migration)
+# ----------------------------------------------------------------
+#
+# Produces a fixed byte representation of a parsed manifest so
+# that semantically-identical manifests collide under sha1.
+# Differs from the on-disk file format in these ways:
+#
+#   - no comments, no blank-line variation (exactly one blank
+#     between sections; final `\n` at EOF; no trailing whitespace)
+#   - field order in [package] is fixed:
+#         name, version, description, ignore
+#     (optional fields skipped when absent)
+#   - `[[link]]` rows are sorted by `target` lex byte-order so
+#     row reordering in the source manifest produces the same
+#     hash; `target` uniqueness is already enforced by the parser
+#   - strings escape only `"` and `\` (matches the parser's
+#     coarse \-skips-the-next-byte rule)
+#
+# This is an INTERNAL contract — the bytes are never seen by
+# users. Anything consistent works; this layout is stable enough
+# to freeze under the v1.0 audit-trail contract.
+
+fn _hapi_mf_link_cmp_target(a, b): i64 {
+    var ta = hapi_link_target(a);
+    var tb = hapi_link_target(b);
+    var da = str_data(ta);
+    var db = str_data(tb);
+    var la = str_len(ta);
+    var lb = str_len(tb);
+    var min = la;
+    if (lb < min) { min = lb; }
+    var i = 0;
+    while (i < min) {
+        var ca = load8(da + i);
+        var cb = load8(db + i);
+        if (ca != cb) { return ca - cb; }
+        i = i + 1;
+    }
+    return la - lb;
+}
+
+fn _hapi_mf_clone_links(links): i64 {
+    var v = vec_new();
+    var n = vec_len(links);
+    var i = 0;
+    while (i < n) {
+        vec_push(v, vec_get(links, i));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn _hapi_mf_sort_links_by_target(links): i64 {
+    var n = vec_len(links);
+    var i = 1;
+    while (i < n) {
+        var x = vec_get(links, i);
+        var j = i;
+        var go = 1;
+        while (j > 0 && go == 1) {
+            var prev = vec_get(links, j - 1);
+            if (_hapi_mf_link_cmp_target(prev, x) > 0) {
+                vec_set(links, j, prev);
+                j = j - 1;
+            } else { go = 0; }
+        }
+        vec_set(links, j, x);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Emit `prefix"<escaped value>"\n` to `out` at *pos_ptr; bumps pos.
+fn _hapi_mf_emit_kv(out, pos_ptr, key, val_data, val_len): i64 {
+    var pos = load64(pos_ptr);
+    var klen = strlen(key);
+    memcpy(out + pos, key, klen); pos = pos + klen;
+    store8(out + pos, 32); pos = pos + 1;     # space
+    store8(out + pos, 61); pos = pos + 1;     # =
+    store8(out + pos, 32); pos = pos + 1;     # space
+    store8(out + pos, 34); pos = pos + 1;     # "
+    var i = 0;
+    while (i < val_len) {
+        var c = load8(val_data + i);
+        if (c == 34 || c == 92) {
+            store8(out + pos, 92); pos = pos + 1;
+        }
+        store8(out + pos, c); pos = pos + 1;
+        i = i + 1;
+    }
+    store8(out + pos, 34); pos = pos + 1;     # "
+    store8(out + pos, 10); pos = pos + 1;     # \n
+    store64(pos_ptr, pos);
+    return 0;
+}
+
+# Re-serialize parsed manifest `m` into `out` (max `cap` bytes).
+# Returns bytes written. Caller is responsible for sizing `out`
+# generously (64 KB is plenty for realistic manifests).
+fn hapi_mf_canonicalize(m, out, cap): i64 {
+    var pos = 0;
+
+    var hdr = "[package]\n";
+    var hlen = 10;
+    memcpy(out + pos, hdr, hlen); pos = pos + hlen;
+
+    var nm = hapi_mf_name(m);
+    _hapi_mf_emit_kv(out, &pos, "name", str_data(nm), str_len(nm));
+
+    var ver = hapi_mf_version(m);
+    _hapi_mf_emit_kv(out, &pos, "version", str_data(ver), str_len(ver));
+
+    var desc = hapi_mf_description(m);
+    if (desc != 0 && str_len(desc) > 0) {
+        _hapi_mf_emit_kv(out, &pos, "description", str_data(desc), str_len(desc));
+    }
+
+    var ig = hapi_mf_ignore(m);
+    var ign = vec_len(ig);
+    if (ign > 0) {
+        var prefix = "ignore = [";
+        var plen = 10;
+        memcpy(out + pos, prefix, plen); pos = pos + plen;
+        var i = 0;
+        while (i < ign) {
+            if (i > 0) {
+                store8(out + pos, 44); pos = pos + 1;   # ,
+                store8(out + pos, 32); pos = pos + 1;   # space
+            }
+            store8(out + pos, 34); pos = pos + 1;       # "
+            var s = vec_get(ig, i);
+            var sd = str_data(s);
+            var sl = str_len(s);
+            var k = 0;
+            while (k < sl) {
+                var c = load8(sd + k);
+                if (c == 34 || c == 92) {
+                    store8(out + pos, 92); pos = pos + 1;
+                }
+                store8(out + pos, c); pos = pos + 1;
+                k = k + 1;
+            }
+            store8(out + pos, 34); pos = pos + 1;       # "
+            i = i + 1;
+        }
+        store8(out + pos, 93); pos = pos + 1;           # ]
+        store8(out + pos, 10); pos = pos + 1;           # \n
+    }
+
+    var sorted = _hapi_mf_clone_links(hapi_mf_links(m));
+    _hapi_mf_sort_links_by_target(sorted);
+    var nlinks = vec_len(sorted);
+    var j = 0;
+    while (j < nlinks) {
+        store8(out + pos, 10); pos = pos + 1;           # blank line
+        var lhdr = "[[link]]\n";
+        var llen = 9;
+        memcpy(out + pos, lhdr, llen); pos = pos + llen;
+        var lk = vec_get(sorted, j);
+        var src = hapi_link_source(lk);
+        var tgt = hapi_link_target(lk);
+        _hapi_mf_emit_kv(out, &pos, "source", str_data(src), str_len(src));
+        _hapi_mf_emit_kv(out, &pos, "target", str_data(tgt), str_len(tgt));
+        j = j + 1;
+    }
+
+    return pos;
+}
+
 # Map a HapiMfError code to a human cstring. Used by inspect and
 # by future commands when they surface a parse failure.
 fn hapi_mf_err_msg(code): i64 {

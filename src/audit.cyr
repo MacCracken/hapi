@@ -20,6 +20,7 @@ include "lib/syscalls.cyr"
 include "lib/sha1.cyr"
 include "lib/chrono.cyr"
 include "lib/result.cyr"
+include "src/manifest.cyr"
 
 enum HapiAuditError {
     HapiAuditMkdirFailed;
@@ -334,15 +335,53 @@ fn audit_append_rollback_marker_r(): Result {
     return _audit_append_bytes(buf, n);
 }
 
-# Compute the manifest hash. Reads the file from disk and
-# returns a heap-allocated null-terminated cstring of the form
-# "sha1:" + 40 hex chars. Returns 0 on read failure.
+# Compute the manifest hash. Parses the manifest, re-serializes
+# it canonically, sha1s the canonical bytes, returns a heap-
+# allocated cstring of the form "sha1c:" + 40 hex chars. Returns
+# 0 if the manifest doesn't parse or read fails.
 #
-# Per ADR 0002, the hash input is raw file bytes (no
-# canonicalization in M2). The "sha1:" prefix is part of the
-# v1.0 forward-compat plan — a future canonicalization switch
-# will bump to "sha1c:".
+# Per ADR 0002, the canonical hash makes cosmetic edits (whitespace,
+# comments, link-row reordering) produce the same hash. The
+# previous variant `audit_manifest_hash_raw(path)` (sha1 over
+# raw file bytes; prefix `sha1:`) is kept for trail-format
+# diagnostics; new entries use the canonical hash. Readers
+# tolerate both prefixes during the M7 → M8 transition.
 fn audit_manifest_hash(path): i64 {
+    var mr = hapi_mf_parse_file_r(path);
+    if (is_err_result(mr) == 1) { return 0; }
+    var m = load64(mr + 8);
+
+    var cbuf = alloc(65536);
+    var n = hapi_mf_canonicalize(m, cbuf, 65536);
+    if (n <= 0) { return 0; }
+
+    var digest[20];
+    sha1(cbuf, n, &digest);
+
+    var out = alloc(47);
+    var prefix = "sha1c:";
+    memcpy(out, prefix, 6);
+    var i = 0;
+    while (i < 20) {
+        var b = load8(&digest + i);
+        var hi = b / 16;
+        var lo = b - hi * 16;
+        if (hi < 10) { store8(out + 6 + i * 2, 48 + hi); }
+        else { store8(out + 6 + i * 2, 87 + hi); }
+        if (lo < 10) { store8(out + 6 + i * 2 + 1, 48 + lo); }
+        else { store8(out + 6 + i * 2 + 1, 87 + lo); }
+        i = i + 1;
+    }
+    store8(out + 46, 0);
+    return out;
+}
+
+# Legacy raw-bytes hash. `sha1:` + 40 hex chars over the file's
+# raw bytes (no parse, no canonicalization). Kept for trail-
+# format diagnostics — a reader walking pre-M7 entries that
+# wants to re-verify the hash against the on-disk file uses
+# this. Returns 0 on read failure.
+fn audit_manifest_hash_raw(path): i64 {
     var buf = alloc(262144);
     var n = file_read_all(path, buf, 262144);
     if (n <= 0) { return 0; }

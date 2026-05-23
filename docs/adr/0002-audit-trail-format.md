@@ -1,7 +1,7 @@
 # 0002 — Audit-trail format
 
 **Status**: Accepted
-**Date**: 2026-05-20
+**Date**: 2026-05-20 (canonical-hash migration: 2026-05-23)
 
 ## Context
 
@@ -103,14 +103,37 @@ window without `Breaking` every minor.
 
 ### Hash
 
-`manifest_hash` is `"sha1:" + lowercase-hex(sha1(manifest_bytes))`.
-For M2, the input to sha1 is the *raw bytes of `hapi.cyml` as read
-from disk*. Canonicalization (re-serialize the parsed AST to a
-fixed byte form, then hash) is reserved for a later patch and
-will land before v1.0 as a `Breaking` change in the hash prefix
-(`sha1:` → `sha1c:` or similar). Recording the prefix in the
-trail today means M3 / v1.0 readers can detect and reject
-pre-canonical entries cleanly.
+`manifest_hash` is `"<prefix>:" + lowercase-hex(sha1(input))`,
+where the prefix tags how the input was prepared:
+
+| prefix    | input to sha1                            | written by         |
+|-----------|------------------------------------------|--------------------|
+| `sha1:`   | raw bytes of `hapi.cyml` as read on disk | v0.x writers (pre-Unreleased) |
+| `sha1c:`  | canonical re-serialization of the parsed manifest (see below) | Unreleased onward — writers emit only this |
+
+Canonical re-serialization rules (matching `hapi_mf_canonicalize`
+in `src/manifest.cyr`):
+
+- `[package]` fields emitted in fixed order: `name`, `version`,
+  `description` (only if present), `ignore` (only if non-empty).
+- `[[link]]` rows sorted by `target` in lex byte order — row
+  reordering in the source manifest does not change the hash.
+- No comments; no blank-line variation (exactly one blank line
+  between sections); final `\n` at EOF; no trailing whitespace.
+- Strings escape only `"` and `\` (matches the parser's coarse
+  rule).
+
+**Readers tolerate both prefixes.** v0.x audit trails written
+under `sha1:` parse cleanly on Unreleased readers; new entries
+on the same machine accumulate under `sha1c:`. The
+`manifest_hash` field is diagnostic-only (rollback's identity
+check is `(pkg, target)`, not the hash), so the migration is
+transparent — no consumer code needs to special-case the prefix.
+
+This is the **Breaking** change ADR 0002 reserved for v1.0: the
+prefix swap. The surrounding line format is unchanged, so older
+tooling (`jq`, `cat`, the audit reader from v0.7.0) continues
+to work without modification.
 
 sha1 is fine here — this is an integrity / replay hash, not a
 cryptographic identity. Collision resistance against an attacker
