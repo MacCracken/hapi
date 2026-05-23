@@ -28,7 +28,8 @@ include "lib/syscalls.cyr"
 #   +48  target (cstring or 0)
 #   +56  abs_source (cstring or 0)
 #   +64  abs_target (cstring or 0)
-#   +72  (reserved)
+#   +72  backup_path (cstring or 0; only set on link/adopt
+#        entries written under --backup-to)
 fn _hae_new(): i64 {
     var e = alloc(80);
     var i = 0;
@@ -44,6 +45,7 @@ fn hae_source(e): i64 { return load64(e + 40); }
 fn hae_target(e): i64 { return load64(e + 48); }
 fn hae_abs_source(e): i64 { return load64(e + 56); }
 fn hae_abs_target(e): i64 { return load64(e + 64); }
+fn hae_backup_path(e): i64 { return load64(e + 72); }
 
 fn _har_cstr_eq(a, b): i64 {
     if (a == 0 || b == 0) { return 0; }
@@ -163,6 +165,7 @@ fn _har_assign_field(entry, key, value): i64 {
     elif (_har_cstr_eq(key, "target") == 1)       { store64(entry + 48, value); }
     elif (_har_cstr_eq(key, "abs_source") == 1)   { store64(entry + 56, value); }
     elif (_har_cstr_eq(key, "abs_target") == 1)   { store64(entry + 64, value); }
+    elif (_har_cstr_eq(key, "backup_path") == 1)  { store64(entry + 72, value); }
     # Unknown fields silently dropped — additive growth per ADR 0002.
     return 0;
 }

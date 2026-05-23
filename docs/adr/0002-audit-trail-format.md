@@ -95,6 +95,12 @@ Unknown additional fields MUST be tolerated by readers. This is
 the only way the format stays additive across the v0.x → v1.0
 window without `Breaking` every minor.
 
+#### Additive fields shipped after the initial format
+
+| field         | type   | shipped in | meaning                                                |
+|---------------|--------|------------|--------------------------------------------------------|
+| `backup_path` | string | Unreleased | absolute path to a pre-`--force` snapshot of the prior file content. Present on `link` / `adopt` entries when the writer was invoked with `--backup-to <dir>`; omitted otherwise. Readers that don't know this field ignore it per the growth contract. |
+
 ### Hash
 
 `manifest_hash` is `"sha1:" + lowercase-hex(sha1(manifest_bytes))`.

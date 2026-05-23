@@ -66,6 +66,22 @@ data; if you genuinely want to replace one, `rm -rf` with your
 eyes on the screen and then re-run `hapi link`. The flag is a
 small escape hatch, not a sledgehammer.
 
+## Preserving the original bytes — `--backup-to`
+
+`--force` over a regular file is irreversible by itself — the
+file's bytes are gone. For a recoverable safety net, pair it
+with `--backup-to <dir>`:
+
+```sh
+hapi link --force --backup-to ~/.local/share/hapi/backups pkg
+```
+
+The flag copies each `--force`-removed regular file to a
+timestamped path under `<dir>` before the unlink, and records the
+location as a `backup_path` field on the audit entry. Symlink
+conflicts are skipped (no bytes to preserve). See
+[`backup-to.md`](backup-to.md) for the full semantics.
+
 ## Audit trail
 
 Every link write appends one JSON-line entry to

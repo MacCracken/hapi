@@ -40,22 +40,23 @@ milestone. Spans the v0.8.x patch series + the v0.9.0 cut.
 **Issue repairs** (filed in [`issues/`](issues/) during early
 M7 dogfooding; ship the fixes before the v1.0 freeze)
 
-- **`docs/guides/status.md` clarification** — document that
+- ✅ **`docs/guides/status.md` clarification** — document that
   `status`'s exit-1-on-drift is for assertion / CI use, and that
   `link --dry-run` is the right pre-flight for `&&` chains.
-  Resolves [`2026-05-20-status-exit-1-short-circuits-script-chains.md`](issues/2026-05-20-status-exit-1-short-circuits-script-chains.md)
-  Tier-1.
-- **New guide `docs/guides/upstream-drift.md`** — codify the
+  Resolved in Unreleased; issue archived at
+  [`archived/2026-05-20-status-exit-1-short-circuits-script-chains.md`](issues/archived/2026-05-20-status-exit-1-short-circuits-script-chains.md).
+- ✅ **New guide `docs/guides/upstream-drift.md`** — codify the
   audit + merge workflow for upstreams that rewrite their
   stock-config templates every few releases (hyprland-class).
-  Resolves [`2026-05-20-upstream-stock-template-drift-pattern.md`](issues/2026-05-20-upstream-stock-template-drift-pattern.md)
-  Tier-1.
-- **`--backup-to <dir>` flag** on `link` / `sync` / `adopt` —
+  Resolved in Unreleased; issue archived at
+  [`archived/2026-05-20-upstream-stock-template-drift-pattern.md`](issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md).
+- ✅ **`--backup-to <dir>` flag** on `link` / `sync` / `adopt` —
   opt-in pre-`--force` snapshot to a user-chosen directory so
   the manual `.pre-hapi.bak` ritual goes away. Audit-trail
   carries the new `backup_path` field additively per ADR 0002's
   growth contract; print-line surfaces the destination.
-  Resolves [`2026-05-20-no-backup-to-flag-pre-hapi-bak-housekeeping.md`](issues/2026-05-20-no-backup-to-flag-pre-hapi-bak-housekeeping.md).
+  Resolved in Unreleased; issue archived at
+  [`archived/2026-05-20-no-backup-to-flag-pre-hapi-bak-housekeeping.md`](issues/archived/2026-05-20-no-backup-to-flag-pre-hapi-bak-housekeeping.md).
 
 **Hardening**
 - P(-1) hardening pass complete — security audit doc filed at
@@ -156,21 +157,21 @@ deferral so the call can be revisited with full context post-v1.0.
   (`unlink + edit manifest + link`); the `--prune` surface is
   a post-v1.0 candidate, possibly default-on at a major bump.
 - **`hapi status --quiet` flag** — deferred per
-  [`issues/2026-05-20-status-exit-1-short-circuits-script-chains.md`](issues/2026-05-20-status-exit-1-short-circuits-script-chains.md)
-  Tier-2. The v1.0 fix is the guide-doc note (Tier-1); a
-  `--quiet` flag that flips the exit-code semantic is a
-  post-v1.0 ergonomic addition if the pattern keeps recurring.
+  [`issues/archived/2026-05-20-status-exit-1-short-circuits-script-chains.md`](issues/archived/2026-05-20-status-exit-1-short-circuits-script-chains.md)
+  Tier-2. The v1.0 fix is the guide-doc note (Tier-1, landed in
+  Unreleased); a `--quiet` flag that flips the exit-code semantic
+  is a post-v1.0 ergonomic addition if the pattern keeps recurring.
 - **`docs/architecture/NNN-upstream-drift-pattern.md`** —
   architecture-note formalization of the drift-audit workflow
   per
-  [`issues/2026-05-20-upstream-stock-template-drift-pattern.md`](issues/2026-05-20-upstream-stock-template-drift-pattern.md)
+  [`issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md`](issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md)
   Tier-2. Earned when the second drifting-upstream consumer
   hits the pattern (likely sway / fish / kitty when an upstream
-  rewrite drops); guide-doc lands at v1.0, architecture-note
+  rewrite drops); guide-doc landed in Unreleased, architecture-note
   follows.
 - **`hapi merge <pkg>` verb** — speculative 3-way merge driver
   for drifting upstreams per
-  [`issues/2026-05-20-upstream-stock-template-drift-pattern.md`](issues/2026-05-20-upstream-stock-template-drift-pattern.md)
+  [`issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md`](issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md)
   Tier-3. Outside v1.0 scope; needs a data model for
   "stock-template version" before earning its place.
 - **`hapi trail compact`** — ADR 0002 notes the trail grows

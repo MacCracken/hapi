@@ -1,0 +1,138 @@
+# backup.cyr — opt-in pre-`--force` file snapshots.
+#
+# When `--backup-to <dir>` is set on the command line, the
+# mutating verbs (link --force, sync --force, adopt) snapshot
+# the existing on-disk file content to a timestamped path under
+# <dir> *before* the destructive step (unlink / rename). The
+# audit-trail entry gains an additive `backup_path` field per
+# ADR 0002's growth contract.
+#
+# Filename shape: <YYYYMMDD-HHMMSS>-<pkg>-<basename>. The
+# timestamp is the local wall clock at snapshot time; the pkg
+# tag disambiguates concurrent backups across packages; the
+# basename keeps human reviewers oriented.
+#
+# Process-wide state mirrors the dry-run setter/getter pattern
+# in `cli.cyr`. Tests flip `_hapi_backup_dir` via the setter;
+# the dispatcher sets it from `--backup-to <path>` in main();
+# nobody else.
+
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/chrono.cyr"
+include "src/fs_link.cyr"
+
+var _hapi_backup_dir = 0;
+
+fn hapi_set_backup_dir(d): i64 { _hapi_backup_dir = d; return 0; }
+fn hapi_backup_dir(): i64 { return _hapi_backup_dir; }
+
+# Build the timestamp half of the backup filename — 15 chars,
+# format "YYYYMMDD-HHMMSS". Heap-allocated, null-terminated.
+fn _hbk_ts(): i64 {
+    var d = epoch_to_date(clock_epoch_secs());
+    var out = alloc(16);
+    var y  = load64(d);
+    var mo = load64(d + 8);
+    var dy = load64(d + 16);
+    var hr = load64(d + 24);
+    var mn = load64(d + 32);
+    var sc = load64(d + 40);
+    store8(out,      48 + y / 1000);
+    store8(out + 1,  48 + (y / 100) % 10);
+    store8(out + 2,  48 + (y / 10) % 10);
+    store8(out + 3,  48 + y % 10);
+    store8(out + 4,  48 + mo / 10);
+    store8(out + 5,  48 + mo % 10);
+    store8(out + 6,  48 + dy / 10);
+    store8(out + 7,  48 + dy % 10);
+    store8(out + 8,  45);                   # -
+    store8(out + 9,  48 + hr / 10);
+    store8(out + 10, 48 + hr % 10);
+    store8(out + 11, 48 + mn / 10);
+    store8(out + 12, 48 + mn % 10);
+    store8(out + 13, 48 + sc / 10);
+    store8(out + 14, 48 + sc % 10);
+    store8(out + 15, 0);
+    return out;
+}
+
+# Basename of `path` (everything after the last `/`). Returns a
+# heap-allocated cstring. "/foo" → "foo"; "x" → "x"; "/a/" → "".
+fn _hbk_basename(path): i64 {
+    var n = strlen(path);
+    var last = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(path + i) == 47) { last = i; }
+        i = i + 1;
+    }
+    var start = last + 1;
+    var len = n - start;
+    var out = alloc(len + 1);
+    memcpy(out, path + start, len);
+    store8(out + len, 0);
+    return out;
+}
+
+# Compose the destination backup path:
+#   <dir>/<ts>-<pkg>-<basename(src_path)>
+# Inserts a `/` between <dir> and the tail only if <dir> doesn't
+# already end in one. Returns a heap cstring.
+fn hapi_backup_compose_path(dir, pkg, src_path): i64 {
+    var ts = _hbk_ts();
+    var bn = _hbk_basename(src_path);
+    var dl = strlen(dir);
+    var tl = strlen(ts);
+    var pl = strlen(pkg);
+    var bl = strlen(bn);
+    var sep = 1;
+    if (dl > 0 && load8(dir + dl - 1) == 47) { sep = 0; }
+    var total = dl + sep + tl + 1 + pl + 1 + bl + 1;
+    var out = alloc(total);
+    var pos = 0;
+    memcpy(out, dir, dl); pos = dl;
+    if (sep == 1) { store8(out + pos, 47); pos = pos + 1; }
+    memcpy(out + pos, ts, tl); pos = pos + tl;
+    store8(out + pos, 45); pos = pos + 1;   # -
+    memcpy(out + pos, pkg, pl); pos = pos + pl;
+    store8(out + pos, 45); pos = pos + 1;   # -
+    memcpy(out + pos, bn, bl); pos = pos + bl;
+    store8(out + pos, 0);
+    return out;
+}
+
+# Byte-copy a regular file from `src` to `dst`. mkdir -p the
+# parent of `dst` first. Returns 0 on success or a negative
+# errno on the first IO failure. 8 KiB read buffer; loop to
+# handle short writes.
+fn hapi_backup_copy(src, dst): i64 {
+    var mkrc = fsl_mkdir_parents(dst);
+    if (mkrc < 0) { return mkrc; }
+    var rfd = file_open(src, O_RDONLY, 0);
+    if (rfd < 0) { return rfd; }
+    var wfd = file_open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (wfd < 0) { file_close(rfd); return wfd; }
+    var buf = alloc(8192);
+    var go = 1;
+    var err = 0;
+    while (go == 1) {
+        var n = file_read(rfd, buf, 8192);
+        if (n < 0) { err = n; go = 0; }
+        elif (n == 0) { go = 0; }
+        else {
+            var wp = 0;
+            while (wp < n && err == 0) {
+                var w = file_write(wfd, buf + wp, n - wp);
+                if (w <= 0) { err = w; }
+                else { wp = wp + w; }
+            }
+            if (err != 0) { go = 0; }
+        }
+    }
+    file_close(rfd);
+    file_close(wfd);
+    return err;
+}

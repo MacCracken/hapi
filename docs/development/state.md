@@ -23,7 +23,9 @@ Binary (`hapi`). Argv dispatcher. Ten real verbs at 0.7.0;
 Two global flags from M6 plug into per-verb arg parsers:
 `--root <path>` (link / adopt / sync / status / list) and
 `--dry-run` (link / unlink / adopt / sync / rollback /
-checkpoint).
+checkpoint). M7 (Unreleased) added a third global:
+`--backup-to <dir>` (link / sync / adopt) — opt-in pre-`--force`
+snapshot.
 
 ### Current command surface
 
@@ -84,6 +86,13 @@ checkpoint).
   flag. Setter `hapi_set_dry_run(0|1)` and getter
   `hapi_dry_run()`. Every mutating cmd checks the flag
   before its first syscall / audit write.
+- `src/backup.cyr` — owns the process-wide
+  `_hapi_backup_dir` cstring (set by `--backup-to <dir>`),
+  the `<YYYYMMDD-HHMMSS>-<pkg>-<basename>` filename
+  composer, and the byte-copy primitive used by link's
+  `--force` path and adopt's pre-rename step. Setter
+  `hapi_set_backup_dir(cstr|0)` and getter
+  `hapi_backup_dir()` mirror the dry-run pattern.
 
 M7 onward fills:
 
@@ -108,6 +117,10 @@ M7 onward fills:
   canonical variant `sha1c:` reserved for M7 migration
 - **Entry ops**: `link`, `unlink`, `adopt`, `unadopt`,
   `rollback-marker`
+- **Additive fields (Unreleased)**: `backup_path` on
+  `link` / `adopt` entries when `--backup-to <dir>` is set.
+  Readers from v0.7.0 tolerate the new field per ADR 0002's
+  growth contract.
 - **Readers**: `unlink` (filters live entries by package),
   `rollback` (reverse-walks to most recent marker, handles
   link / unlink / adopt)
@@ -115,8 +128,8 @@ M7 onward fills:
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 194 assertions across
-  52 test groups:
+- `tests/hapi.tcyr` — primary suite. 210 assertions across
+  57 test groups (Unreleased; was 194 / 52 at v0.7.0):
   - Manifest (7 groups): minimal, M1 acceptance, validation,
     path traversal, comments, on-disk parse, missing file
   - Audit writer (2 groups): link entry format, JSON escaping
@@ -151,6 +164,13 @@ M7 onward fills:
   - dry-run (6 groups): link / unlink / adopt / sync /
     rollback / checkpoint each write zero audit + zero
     filesystem state under `hapi_set_dry_run(1)`
+  - backup-to (5 groups; Unreleased): compose_path filename
+    layout (dir + ts + pkg + basename, no doubled separator),
+    link --force snapshots regular-file conflicts with the
+    original bytes recoverable from the audit's
+    `backup_path` field, symlink conflicts skip the snapshot,
+    dry-run writes no snapshot file, adopt snapshots before
+    sys_rename
 
 ## Dependencies
 
@@ -181,8 +201,15 @@ means downstream packagers (zugot recipes) and user manifests.
 
 ## Next
 
-See [`roadmap.md`](roadmap.md) for the M7 → v1.0 plan. Next
-ship is M7 (dogfood + harden): maintainer's actual dotfiles
-migrate to hapi, P(-1) hardening pass with security audit
-doc, manifest-hash canonicalization migration. Targets
-v0.9.0.
+See [`roadmap.md`](roadmap.md) for the M7 → v1.0 plan. M7
+issue-repair queue progress (Unreleased):
+
+- ✅ `docs/guides/status.md` exit-1 clarification
+- ✅ `docs/guides/upstream-drift.md` new guide
+- ✅ `--backup-to <dir>` flag on link / sync / adopt
+- ⏳ P(-1) hardening pass + `docs/audit/YYYY-MM-DD-audit.md`
+- ⏳ Manifest-hash canonicalization (`sha1:` → `sha1c:`)
+- ⏳ `docs/benchmarks.md` 3-point trend (sync over 100-pkg home)
+
+The three Unreleased line items represent the v0.8.0 cut
+candidate; the three ⏳ items finish out v0.8.x → v0.9.0.

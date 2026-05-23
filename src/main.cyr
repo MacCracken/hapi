@@ -8,6 +8,13 @@
 #   --dry-run      — show what would happen; no syscalls or
 #                    audit writes. Accepted on: link, unlink,
 #                    adopt, sync, rollback, checkpoint.
+# M7 added:
+#   --backup-to <dir> — snapshot the existing on-disk file
+#                    before a destructive overwrite (link --force
+#                    / sync / adopt). Audit entry gains an
+#                    additive `backup_path` field per ADR 0002's
+#                    growth contract. Accepted on: link, sync,
+#                    adopt.
 #
 # The exit-code contract:
 #   0  success
@@ -28,6 +35,7 @@ include "src/cmd/check.cyr"
 include "src/cmd/sync.cyr"
 include "src/cli.cyr"
 include "src/cap.cyr"
+include "src/backup.cyr"
 include "lib/args.cyr"
 
 # VERSION literal kept in sync with the VERSION file at the
@@ -59,6 +67,9 @@ fn hapi_print_usage(): i64 {
     println("                            in HAPI_ALLOWED_ROOTS (colon-separated)");
     println("  --dry-run                 print actions; no syscalls or audit writes");
     println("                            (link/unlink/adopt/sync/rollback/checkpoint)");
+    println("  --backup-to <dir>         snapshot existing file content to <dir> before");
+    println("                            a destructive overwrite (link --force / sync /");
+    println("                            adopt). Audit entry gains `backup_path`.");
     println("");
     println("options:");
     println("  --version, -v             print version and exit");
@@ -155,6 +166,14 @@ fn main(): i64 {
                 if (rc != 0) { return rc; }
                 ai = ai + 1;
             }
+            elif (_hapi_argeq(a, "--backup-to") == 1) {
+                if (ai + 1 >= n) {
+                    eprint("hapi: --backup-to requires a directory argument\n", 49);
+                    return 2;
+                }
+                hapi_set_backup_dir(argv(ai + 1));
+                ai = ai + 1;
+            }
             elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
             elif (path == 0) { path = a; }
             ai = ai + 1;
@@ -187,6 +206,14 @@ fn main(): i64 {
                 if (ai + 1 < n) { v = argv(ai + 1); }
                 var rc = _hapi_apply_root(v);
                 if (rc != 0) { return rc; }
+                ai = ai + 1;
+            }
+            elif (_hapi_argeq(a, "--backup-to") == 1) {
+                if (ai + 1 >= n) {
+                    eprint("hapi: --backup-to requires a directory argument\n", 49);
+                    return 2;
+                }
+                hapi_set_backup_dir(argv(ai + 1));
                 ai = ai + 1;
             }
             elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
@@ -266,6 +293,14 @@ fn main(): i64 {
                 if (ai + 1 < n) { v = argv(ai + 1); }
                 var rc = _hapi_apply_root(v);
                 if (rc != 0) { return rc; }
+                ai = ai + 1;
+            }
+            elif (_hapi_argeq(a, "--backup-to") == 1) {
+                if (ai + 1 >= n) {
+                    eprint("hapi: --backup-to requires a directory argument\n", 49);
+                    return 2;
+                }
+                hapi_set_backup_dir(argv(ai + 1));
                 ai = ai + 1;
             }
             elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }

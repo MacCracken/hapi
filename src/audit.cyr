@@ -187,11 +187,14 @@ fn _audit_emit_comma(out, pos_ptr): i64 {
 }
 
 # Compose a single audit-trail line for a link-shape op into
-# `out`. Used by both link and unlink entries — same field set,
+# `out`. Used by every per-op formatter — same field set,
 # different `op` value. Returns bytes written. Field order is
-# fixed per ADR 0002.
+# fixed per ADR 0002. `backup_path` is appended as an additive
+# field per the ADR's growth contract when non-zero / non-empty;
+# otherwise the entry shape is identical to the v0.7.0 format.
 fn _audit_format_link_op(out, cap, op, pkg, pkg_version, manifest_hash,
-                         source, target, abs_source, abs_target): i64 {
+                         source, target, abs_source, abs_target,
+                         backup_path): i64 {
     var pos = 0;
     var ts = iso8601_now();
     store8(out + pos, 123); pos = pos + 1;     # {
@@ -212,46 +215,55 @@ fn _audit_format_link_op(out, cap, op, pkg, pkg_version, manifest_hash,
     _audit_emit_field(out, &pos, "abs_source", abs_source);
     _audit_emit_comma(out, &pos);
     _audit_emit_field(out, &pos, "abs_target", abs_target);
+    if (backup_path != 0 && strlen(backup_path) > 0) {
+        _audit_emit_comma(out, &pos);
+        _audit_emit_field(out, &pos, "backup_path", backup_path);
+    }
     store8(out + pos, 125); pos = pos + 1;    # }
     store8(out + pos, 10); pos = pos + 1;     # \n
     return pos;
 }
 
 # Compose a link entry. Bytes returned; output is single JSON
-# object + `\n`. Field order per ADR 0002.
+# object + `\n`. Field order per ADR 0002. `backup_path` is an
+# optional additive field — pass 0 when --backup-to was off.
 fn audit_format_link(out, cap, pkg, pkg_version, manifest_hash,
-                     source, target, abs_source, abs_target): i64 {
+                     source, target, abs_source, abs_target,
+                     backup_path): i64 {
     return _audit_format_link_op(out, cap, "link",
         pkg, pkg_version, manifest_hash,
-        source, target, abs_source, abs_target);
+        source, target, abs_source, abs_target, backup_path);
 }
 
 # Compose an unlink entry. Same shape as link with op="unlink".
+# No `backup_path` field on unlink — there's no destructive
+# overwrite to snapshot.
 fn audit_format_unlink(out, cap, pkg, pkg_version, manifest_hash,
                        source, target, abs_source, abs_target): i64 {
     return _audit_format_link_op(out, cap, "unlink",
         pkg, pkg_version, manifest_hash,
-        source, target, abs_source, abs_target);
+        source, target, abs_source, abs_target, 0);
 }
 
 # Compose an adopt entry. Same shape as link with op="adopt".
 # Per ADR 0004 adopt records as a single atomic entry.
+# `backup_path` is an optional additive field as on link.
 fn audit_format_adopt(out, cap, pkg, pkg_version, manifest_hash,
-                      source, target, abs_source, abs_target): i64 {
+                      source, target, abs_source, abs_target,
+                      backup_path): i64 {
     return _audit_format_link_op(out, cap, "adopt",
         pkg, pkg_version, manifest_hash,
-        source, target, abs_source, abs_target);
+        source, target, abs_source, abs_target, backup_path);
 }
 
 # Compose an unadopt entry — the rollback-reverse of adopt.
-# Same shape; op="unadopt". Separate from "unlink" so the
-# package-scoped `hapi unlink` consumer doesn't confuse it
-# with a normal link removal.
+# Same shape; op="unadopt". No backup_path field — rollback
+# reverses a move; nothing is destructively overwritten.
 fn audit_format_unadopt(out, cap, pkg, pkg_version, manifest_hash,
                         source, target, abs_source, abs_target): i64 {
     return _audit_format_link_op(out, cap, "unadopt",
         pkg, pkg_version, manifest_hash,
-        source, target, abs_source, abs_target);
+        source, target, abs_source, abs_target, 0);
 }
 
 # Compose a rollback-marker entry. Minimal fields — just `ts`
@@ -281,10 +293,12 @@ fn _audit_append_bytes(buf, n): Result {
 }
 
 fn audit_append_link_r(pkg, pkg_version, manifest_hash,
-                       source, target, abs_source, abs_target): Result {
+                       source, target, abs_source, abs_target,
+                       backup_path): Result {
     var buf = alloc(4096);
     var n = audit_format_link(buf, 4096, pkg, pkg_version, manifest_hash,
-                              source, target, abs_source, abs_target);
+                              source, target, abs_source, abs_target,
+                              backup_path);
     return _audit_append_bytes(buf, n);
 }
 
@@ -297,10 +311,12 @@ fn audit_append_unlink_r(pkg, pkg_version, manifest_hash,
 }
 
 fn audit_append_adopt_r(pkg, pkg_version, manifest_hash,
-                        source, target, abs_source, abs_target): Result {
+                        source, target, abs_source, abs_target,
+                        backup_path): Result {
     var buf = alloc(4096);
     var n = audit_format_adopt(buf, 4096, pkg, pkg_version, manifest_hash,
-                               source, target, abs_source, abs_target);
+                               source, target, abs_source, abs_target,
+                               backup_path);
     return _audit_append_bytes(buf, n);
 }
 

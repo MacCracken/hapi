@@ -21,6 +21,7 @@ include "src/audit.cyr"
 include "src/fs_link.cyr"
 include "src/cmd/link.cyr"   # link_set_scope_root + _hlnk_scope_root_override
 include "src/cli.cyr"
+include "src/backup.cyr"
 
 fn _hap_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hap_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
@@ -204,15 +205,44 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     var tgt_parent = _fsl_path_dirname(abs_target);
     var rel = fsl_compute_relative(tgt_parent, abs_source);
 
+    # --backup-to: opt-in pre-rename snapshot. The original
+    # bytes are recoverable from the package after the move,
+    # so this is belt-and-suspenders — the user opts in when
+    # they want a parallel copy outside the package tree.
+    var pkg_name_for_backup = _fsl_str_to_cstr(hapi_mf_name(m));
+    var backup_path = 0;
+    if (hapi_backup_dir() != 0) {
+        backup_path = hapi_backup_compose_path(
+            hapi_backup_dir(), pkg_name_for_backup, abs_target);
+    }
+
     if (hapi_dry_run() == 1) {
         _hap_puts("  ~ ");
         _hap_puts(abs_target);
         _hap_puts(" -> ");
         _hap_puts(rel);
+        if (backup_path != 0) {
+            _hap_puts("  (backup -> ");
+            _hap_puts(backup_path);
+            _hap_puts(")");
+        }
         _hap_puts("  (dry-run)\nwould adopt into ");
         _hap_puts(manifest_path);
         _hap_puts("\n");
         return 0;
+    }
+
+    # 0. --backup-to: write the snapshot before any mutation.
+    if (backup_path != 0) {
+        var brc = hapi_backup_copy(abs_target, backup_path);
+        if (brc < 0) {
+            _hap_eputs("hapi: backup-to copy failed (");
+            _hap_eputs(abs_target);
+            _hap_eputs(" -> ");
+            _hap_eputs(backup_path);
+            _hap_eputs(")\n");
+            return 1;
+        }
     }
 
     # 1. Move the file into the package (sys_rename, syscall 82).
@@ -253,7 +283,8 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     var pkg_ver = _fsl_str_to_cstr(hapi_mf_version(m));
     var ar = audit_append_adopt_r(pkg_name, pkg_ver, manifest_hash,
                                   source_cstr, target_cstr,
-                                  abs_source, abs_target);
+                                  abs_source, abs_target,
+                                  backup_path);
     if (is_err_result(ar) == 1) {
         _hap_eputs("hapi: adopt succeeded but audit-trail write failed\n");
         return 1;
@@ -263,6 +294,11 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     _hap_puts(abs_target);
     _hap_puts(" -> ");
     _hap_puts(rel);
+    if (backup_path != 0) {
+        _hap_puts("  (backup -> ");
+        _hap_puts(backup_path);
+        _hap_puts(")");
+    }
     _hap_puts("\nadopted into ");
     _hap_puts(manifest_path);
     _hap_puts("\n");

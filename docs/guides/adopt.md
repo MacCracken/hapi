@@ -85,6 +85,23 @@ loop.
 Every refusal is non-destructive: the target file (or whatever
 is at the target path) is untouched on refusal.
 
+## Preserving the original bytes — `--backup-to`
+
+Adopt's intrinsic safety net is that the original file becomes
+the package source — the bytes are still there, just at a new
+path. For belt-and-suspenders coverage (e.g. a snapshot outside
+the package tree, immune to a subsequent manifest edit), pair
+adopt with `--backup-to <dir>`:
+
+```sh
+hapi adopt --backup-to ~/.local/share/hapi/backups .zshrc dotfiles-zsh
+```
+
+The flag copies the file to a timestamped path under `<dir>`
+*before* the rename and stamps the audit entry with a
+`backup_path` field. See [`backup-to.md`](backup-to.md) for the
+full semantics.
+
 ## Rollback
 
 `hapi rollback` over an `op:adopt` entry is a three-step

@@ -1,8 +1,9 @@
-# `hapi status` exit 1 on drift short-circuits `status && link --force` chains
+# `hapi status` exit 1 on drift short-circuits `status && link --force` chains — RESOLVED
 
 **Discovered:** 2026-05-20 during M7 dotfile dogfooding (git package adoption)
 **Severity:** Low — legitimate semantic; UX papercut for scripted chains
 **Affects:** hapi 0.5.0 through 0.7.0 — applies wherever `hapi status` returns non-zero
+**Resolution:** Tier-1 (Option A) guide-doc note landed in Unreleased; `docs/guides/status.md` now carries the *Exit-1 is an assertion, not a predicate* section pointing users at `link --dry-run` for `&&`-chain pre-flight. No code change. Tier-2 (`--quiet` flag) remains a post-v1.0 candidate per the roadmap.
 
 ## Summary
 

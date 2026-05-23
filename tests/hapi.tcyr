@@ -248,7 +248,7 @@ fn test_audit_format_link() {
     var n = audit_format_link(buf, 4096,
         "pkg", "1.0.0", "sha1:deadbeef",
         "src", ".tgt",
-        "/abs/src", "/abs/tgt");
+        "/abs/src", "/abs/tgt", 0);
     assert(n > 0, "format wrote bytes");
     assert_eq(load8(buf), 123, "starts with {");
     assert_eq(load8(buf + n - 1), 10, "ends with newline");
@@ -259,6 +259,18 @@ fn test_audit_format_link() {
     assert(_test_substr(buf, n, "\"pkg\":\"pkg\"") >= 0, "pkg present");
     assert(_test_substr(buf, n, "\"manifest_hash\":\"sha1:deadbeef\"") >= 0, "manifest_hash present");
     assert(_test_substr(buf, n, "\"abs_target\":\"/abs/tgt\"") >= 0, "abs_target present");
+    # When backup_path arg is 0, the field MUST NOT appear.
+    assert(_test_substr(buf, n, "backup_path") < 0, "backup_path absent when 0");
+
+    # And when it IS set, the field shows up at the tail.
+    var buf2 = alloc(4096);
+    var n2 = audit_format_link(buf2, 4096,
+        "pkg", "1.0.0", "sha1:deadbeef",
+        "src", ".tgt",
+        "/abs/src", "/abs/tgt",
+        "/var/backup/20260523-153042-pkg-foo");
+    assert(_test_substr(buf2, n2, "\"backup_path\":\"/var/backup/20260523-153042-pkg-foo\"") >= 0,
+           "backup_path present when set");
     return 0;
 }
 
@@ -1432,6 +1444,183 @@ fn test_dry_run_sync_no_writes() {
     return 0;
 }
 
+# ============================================================
+# M7 — --backup-to (link --force / sync / adopt snapshots)
+# ============================================================
+
+fn test_backup_compose_path_shape() {
+    test_group("backup: compose_path filename layout");
+    var p = hapi_backup_compose_path("/var/backup", "myPkg", "/home/user/.zshrc");
+    var n = strlen(p);
+    # Must start with "/var/backup/<15 ts chars>-myPkg-.zshrc".
+    assert(_test_substr(p, n, "/var/backup/") == 0, "starts with dir + slash");
+    assert(_test_substr(p, n, "-myPkg-.zshrc") >= 0, "carries pkg + basename");
+    # Single trailing slash on the dir collapses to one separator.
+    var p2 = hapi_backup_compose_path("/var/backup/", "pkg", "/x/y");
+    var n2 = strlen(p2);
+    assert(_test_substr(p2, n2, "/var/backup//") < 0, "no doubled slash");
+    return 0;
+}
+
+fn test_backup_to_link_force_snapshots_file() {
+    test_group("backup: link --force snapshots existing file");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+
+    # Plant a conflicting file with known content at .zshrc.
+    var tgt = alloc(strlen(scope) + 16);
+    memcpy(tgt, scope, strlen(scope));
+    memcpy(tgt + strlen(scope), "/.zshrc\x00", 8);
+    _test_write_file(tgt, "user content");
+
+    # Backup dir under the scratch dir.
+    var bdir = alloc(strlen(scope) + 16);
+    memcpy(bdir, scope, strlen(scope));
+    memcpy(bdir + strlen(scope), "/backups\x00", 9);
+    hapi_set_backup_dir(bdir);
+
+    var rc = cmd_link("docs/examples/dotfiles-zsh", 1);
+    assert_eq(rc, 0, "link --force succeeds with --backup-to");
+    hapi_set_backup_dir(0);
+
+    # Target should now be a symlink.
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_SYMLINK,
+              "target is now a symlink");
+
+    # Find the backup_path in the audit trail and read it back.
+    var entries = audit_read(audit_path);
+    var found_backup = 0;
+    var found_content = 0;
+    var i = 0;
+    while (i < vec_len(entries)) {
+        var e = vec_get(entries, i);
+        var bp = hae_backup_path(e);
+        var t = hae_target(e);
+        if (bp != 0 && t != 0 && _har_cstr_eq(t, ".zshrc") == 1) {
+            found_backup = 1;
+            var rbuf = alloc(4096);
+            var rn = file_read_all(bp, rbuf, 4096);
+            if (rn == 12 && memeq(rbuf, "user content", 12) == 1) {
+                found_content = 1;
+            }
+        }
+        i = i + 1;
+    }
+    assert_eq(found_backup, 1, "audit entry carries backup_path");
+    assert_eq(found_content, 1, "backup file holds original bytes");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_backup_to_skips_symlink_conflict() {
+    test_group("backup: --backup-to does not snapshot symlink conflicts");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    # Plant a symlink-to-elsewhere at .zshrc (no file bytes to save).
+    var tgt = alloc(strlen(scope) + 16);
+    memcpy(tgt, scope, strlen(scope));
+    memcpy(tgt + strlen(scope), "/.zshrc\x00", 8);
+    sys_symlink("/tmp/elsewhere", tgt);
+
+    var bdir = alloc(strlen(scope) + 16);
+    memcpy(bdir, scope, strlen(scope));
+    memcpy(bdir + strlen(scope), "/backups\x00", 9);
+    hapi_set_backup_dir(bdir);
+
+    assert_eq(cmd_link("docs/examples/dotfiles-zsh", 1), 0, "link --force succeeds");
+    hapi_set_backup_dir(0);
+
+    # No backup directory should have been created — symlink
+    # conflicts skip the snapshot.
+    assert_eq(link_probe_kind(link_probe(bdir)), HAPI_LP_ABSENT,
+              "backup dir untouched (no file conflict)");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_backup_to_dry_run_writes_no_backup() {
+    test_group("backup: dry-run does not write the snapshot");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    var tgt = alloc(strlen(scope) + 16);
+    memcpy(tgt, scope, strlen(scope));
+    memcpy(tgt + strlen(scope), "/.zshrc\x00", 8);
+    _test_write_file(tgt, "user content");
+
+    var bdir = alloc(strlen(scope) + 16);
+    memcpy(bdir, scope, strlen(scope));
+    memcpy(bdir + strlen(scope), "/backups\x00", 9);
+    hapi_set_backup_dir(bdir);
+
+    hapi_set_dry_run(1);
+    assert_eq(cmd_link("docs/examples/dotfiles-zsh", 1), 0, "dry-run --force succeeds");
+    hapi_set_dry_run(0);
+    hapi_set_backup_dir(0);
+
+    # Backup dir not created under dry-run; the conflict file is
+    # still in place (no unlink happened).
+    assert_eq(link_probe_kind(link_probe(bdir)), HAPI_LP_ABSENT,
+              "no backup dir under dry-run");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_FILE,
+              "conflict file untouched under dry-run");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_backup_to_adopt_snapshots_before_rename() {
+    test_group("backup: adopt snapshots before sys_rename");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+
+    # Plant the file to adopt with known bytes.
+    var tgt = alloc(strlen(scope) + 16);
+    memcpy(tgt, scope, strlen(scope));
+    memcpy(tgt + strlen(scope), "/.zshrc\x00", 8);
+    _test_write_file(tgt, "user content");
+
+    # Fresh package dir.
+    var pkg = _test_make_package("a", ".a");
+    var bdir = alloc(strlen(scope) + 16);
+    memcpy(bdir, scope, strlen(scope));
+    memcpy(bdir + strlen(scope), "/backups\x00", 9);
+
+    hapi_set_backup_dir(bdir);
+    var rc = cmd_adopt(".zshrc", pkg);
+    hapi_set_backup_dir(0);
+    assert_eq(rc, 0, "adopt with --backup-to succeeds");
+
+    # Audit entry should carry backup_path on the op:adopt row.
+    var entries = audit_read(audit_path);
+    var found = 0;
+    var i = 0;
+    while (i < vec_len(entries)) {
+        var e = vec_get(entries, i);
+        var op = hae_op(e);
+        var bp = hae_backup_path(e);
+        if (op != 0 && _har_cstr_eq(op, "adopt") == 1 && bp != 0) {
+            var rbuf = alloc(4096);
+            var rn = file_read_all(bp, rbuf, 4096);
+            if (rn == 12 && memeq(rbuf, "user content", 12) == 1) { found = 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "adopt audit entry carries a readable backup_path");
+
+    _test_clear_env();
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -1490,6 +1679,11 @@ fn main() {
     test_dry_run_rollback_no_writes();
     test_dry_run_checkpoint_no_writes();
     test_dry_run_sync_no_writes();
+    test_backup_compose_path_shape();
+    test_backup_to_link_force_snapshots_file();
+    test_backup_to_skips_symlink_conflict();
+    test_backup_to_dry_run_writes_no_backup();
+    test_backup_to_adopt_snapshots_before_rename();
     return assert_summary();
 }
 

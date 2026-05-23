@@ -1,8 +1,9 @@
-# `link --force` / adopt have no `--backup-to` flag; user must hand-roll `.pre-hapi.bak` snapshots
+# `link --force` / adopt have no `--backup-to` flag; user must hand-roll `.pre-hapi.bak` snapshots — RESOLVED
 
 **Discovered:** 2026-05-20 during M7 dotfile dogfooding (every conflicting-file adoption)
 **Severity:** Low — convenience feature absence; safety net is achievable manually
 **Affects:** hapi 0.5.0 through 0.7.0 — every `link --force` over a regular file
+**Resolution:** Shipped in Unreleased. `--backup-to <dir>` accepted on link / sync / adopt; snapshots regular-file conflicts (symlinks skipped — no bytes to preserve) before the destructive step. Audit-trail entries carry an additive `backup_path` field per ADR 0002's growth contract. New module `src/backup.cyr` owns the primitives; new cross-cutting guide `docs/guides/backup-to.md` documents semantics. 5 acceptance-test groups added.
 
 ## Summary
 

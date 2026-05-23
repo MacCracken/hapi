@@ -69,16 +69,19 @@ state changed. The output is the *forecast*.
 
 ## Combining flags
 
-`--dry-run` composes freely with `--root` and verb-specific
-flags like `--force`:
+`--dry-run` composes freely with `--root`, `--backup-to`, and
+verb-specific flags like `--force`:
 
 ```sh
-hapi link --root /etc/myproject --dry-run --force pkg
+hapi link --root /etc/myproject --backup-to /var/backups/hapi --dry-run --force pkg
 ```
 
 The cap-check still fires under `--dry-run` — capability
-denials short-circuit before planning starts.
+denials short-circuit before planning starts. Under `--backup-to`
+the would-be destination is printed but no snapshot file is
+written.
 
 ## See also
 
 - [`capability.md`](capability.md) — the other M6 global flag.
+- [`backup-to.md`](backup-to.md) — opt-in pre-`--force` snapshots.

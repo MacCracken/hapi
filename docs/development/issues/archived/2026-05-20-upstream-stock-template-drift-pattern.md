@@ -1,8 +1,9 @@
-# Upstream stock-template drift (hyprland-style) needs a documented audit workflow
+# Upstream stock-template drift (hyprland-style) needs a documented audit workflow — RESOLVED
 
 **Discovered:** 2026-05-20 during M7 dotfile dogfooding (hyprland package adoption)
 **Severity:** Low — process / guide-level surface, not a hapi runtime bug
 **Affects:** any consumer adopting a package where upstream rewrites its stock-config template every few releases
+**Resolution:** Tier-1 fix landed in Unreleased; new guide `docs/guides/upstream-drift.md` codifies the audit + merge ritual, identifies syntax-shift markers, and specifies the tracking-note header convention. Tier-2 (architecture note) and Tier-3 (`hapi merge` verb) remain post-v1.0 candidates per the roadmap.
 
 ## Summary
 

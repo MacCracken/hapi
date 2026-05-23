@@ -66,8 +66,23 @@ Exactly the one missing link is re-created. The other two
 | 1    | conflict (use `hapi link --force` to override), parse error, or IO failure |
 | 2    | bad usage (no path argument)                                  |
 
+## Preserving bytes during destructive overwrites
+
+`hapi sync` inherits `--force` from `cmd_link`, and with it
+`--backup-to <dir>`. When you sync a package whose links would
+overwrite existing regular files, pair the run with
+`--backup-to` to snapshot each file before the destructive step:
+
+```sh
+hapi sync --backup-to ~/.local/share/hapi/backups pkg
+```
+
+See [`backup-to.md`](backup-to.md) for filename layout and
+audit-trail effects.
+
 ## See also
 
 - [`link.md`](link.md) — sync's engine; the `--force` flag for
   override semantics.
 - [`status.md`](status.md) — detect drift before syncing.
+- [`backup-to.md`](backup-to.md) — opt-in pre-`--force` snapshots.
