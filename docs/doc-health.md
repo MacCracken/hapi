@@ -66,7 +66,7 @@ Numbers approximate; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `state.md` | 2026-05-20 | ✅ Fresh | **Rotates every release.** Through v0.7.0 (M6 close). Test count 194 assertions / 52 groups. Source line count + command surface table all current. |
-| `roadmap.md` | 2026-05-20 | ✅ Fresh | Through v1.0 plan; M6 retired, M7 (dogfood + harden) surfaced as Next at v0.9.0. Out-of-scope section updated with M5/M6 deferrals. |
+| `roadmap.md` | 2026-05-20 | ✅ Fresh | Through v1.0 plan; M6 retired, M7 (dogfood + harden) surfaced as Next at v0.9.0. **Refreshed 2026-05-20 (post-v0.7.0 tag)**: trimmed to forward-only; M7 entry restructured with explicit issue-repair line items (status guide-doc note / upstream-drift guide / `--backup-to` flag) pinning the four M7 dogfood papercut filings to remaining-work-before-v1.0. Out-of-scope section gained the post-v1.0-deferred Tier-2/3 items from the same issue set. Upstream-dependencies section now reflects kavach + cyriusly-starship-install as forward-pending. |
 | `issues/README.md` | 2026-05-20 | ✅ Fresh | **New 2026-05-20.** Filing conventions for hapi-side dogfood papercuts; severity guide; triage + archival lifecycle; cross-repo upstream-issue pointer. |
 | `issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md` | 2026-05-20 | 🟡 Open | Low severity; M7 dogfood papercut. Deferred to post-v1.0 per existing roadmap entry. |
 | `issues/2026-05-20-status-exit-1-short-circuits-script-chains.md` | 2026-05-20 | 🟡 Open | Low severity; M7 dogfood papercut. Tier-1 fix (guide-doc note) cheap; Tier-2 (`--quiet` flag) post-v1.0. |

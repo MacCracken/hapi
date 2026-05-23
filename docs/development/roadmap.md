@@ -12,11 +12,13 @@ The hapi v1.0 contract: full CRUD parity with GNU stow plus an
 auditable rollback story, dogfooded on the maintainer's own dotfiles.
 
 - [ ] Command surface frozen — `link` / `unlink` / `adopt` / `sync` /
-      `list` / `status` signatures stable
+      `list` / `status` / `checkpoint` / `check` / `inspect` /
+      `rollback` signatures stable (plus global flags `--root` /
+      `--dry-run` / `--force` / `--strict`)
 - [ ] `hapi.cyml` manifest schema documented and frozen
 - [ ] Audit-trail format documented and frozen (rollback compatibility)
 - [ ] Test coverage: every command's happy path + conflict path +
-      capability-denied path; 100+ assertions
+      capability-denied path; 200+ assertions
 - [ ] Benchmarks captured in `docs/benchmarks.md` for `sync` on a
       realistic 100-package home
 - [ ] Maintainer's dotfiles managed by hapi for at least one release
@@ -24,42 +26,72 @@ auditable rollback story, dogfooded on the maintainer's own dotfiles.
 - [ ] CHANGELOG complete from v0.1.0 onward
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — path
       validation, symlink loop, TOCTOU, capability boundary
+- [ ] All issues filed in `docs/development/issues/` either resolved
+      (moved to `archived/`) or explicitly deferred post-v1.0 with
+      rationale captured in this roadmap's *Deferred* section
 
 ## Upcoming milestones
 
 ### M7 — Dogfood + harden (v0.9.0)
 
-- Maintainer's actual dotfiles migrate to hapi packages
-- One release cycle passes with hapi as the dotfile mgr
-- All real-world bugs / surprises filed in `docs/development/issues/`
-  and resolved
-- P(-1) hardening pass complete — security audit doc filed
-- 3-point benchmark trend in `docs/benchmarks.md`
-- **Manifest-hash canonicalization migration** (carried forward
-  from M2 — ADR 0002 reserves the `sha1:` → `sha1c:` prefix
-  swap for v1.0). The v0.x audit hash is over raw file bytes,
-  so a cosmetic edit (trailing newline, comment change)
-  produces a different hash. The canonical variant hashes the
-  parsed-and-re-serialized manifest so semantically-identical
-  manifests collide. Migration: read both prefixes during the
-  M7 → M8 window; write only `sha1c:` from M8 forward; the
-  `Breaking` lives on the prefix swap, not on the surrounding
-  line format.
+The dedicated "use it for real, fix what breaks, harden what holds"
+milestone. Spans the v0.8.x patch series + the v0.9.0 cut.
+
+**Issue repairs** (filed in [`issues/`](issues/) during early
+M7 dogfooding; ship the fixes before the v1.0 freeze)
+
+- **`docs/guides/status.md` clarification** — document that
+  `status`'s exit-1-on-drift is for assertion / CI use, and that
+  `link --dry-run` is the right pre-flight for `&&` chains.
+  Resolves [`2026-05-20-status-exit-1-short-circuits-script-chains.md`](issues/2026-05-20-status-exit-1-short-circuits-script-chains.md)
+  Tier-1.
+- **New guide `docs/guides/upstream-drift.md`** — codify the
+  audit + merge workflow for upstreams that rewrite their
+  stock-config templates every few releases (hyprland-class).
+  Resolves [`2026-05-20-upstream-stock-template-drift-pattern.md`](issues/2026-05-20-upstream-stock-template-drift-pattern.md)
+  Tier-1.
+- **`--backup-to <dir>` flag** on `link` / `sync` / `adopt` —
+  opt-in pre-`--force` snapshot to a user-chosen directory so
+  the manual `.pre-hapi.bak` ritual goes away. Audit-trail
+  carries the new `backup_path` field additively per ADR 0002's
+  growth contract; print-line surfaces the destination.
+  Resolves [`2026-05-20-no-backup-to-flag-pre-hapi-bak-housekeeping.md`](issues/2026-05-20-no-backup-to-flag-pre-hapi-bak-housekeeping.md).
+
+**Hardening**
+- P(-1) hardening pass complete — security audit doc filed at
+  `docs/audit/YYYY-MM-DD-audit.md` covering path traversal,
+  symlink-loop detection, TOCTOU, capability-boundary
+  validation
+- 3-point benchmark trend in `docs/benchmarks.md` for `sync`
+  over a realistic 100-package home; baselines captured at
+  v0.8.0, mid-cycle, and v0.9.0
+
+**Audit-format migration**
+- Manifest-hash canonicalization migration `sha1:` → `sha1c:`
+  per ADR 0002's reserved prefix swap. The v0.x audit hash is
+  over raw file bytes, so a cosmetic edit (trailing newline,
+  comment change) produces a different hash. The canonical
+  variant hashes the parsed-and-re-serialized manifest so
+  semantically-identical manifests collide. Migration: read
+  both prefixes during the M7 → M8 window; write only `sha1c:`
+  from M8 forward. The `Breaking` lives on the prefix swap,
+  not on the surrounding line format.
 
 ### M8 — v1.0.0
 
-- API frozen, schema frozen, audit-trail format frozen
-- CHANGELOG `Breaking` section for the freeze (no signature changes —
-  the freeze is the contract change)
-- v1.0.0 cut
+- Command surface, manifest schema, audit-trail format all frozen
+- CHANGELOG `Breaking` section for the freeze (no signature
+  changes — the freeze IS the contract change)
+- Every line in *v1.0 criteria* above has its checkbox ticked
+- v1.0.0 tag cut + release notes published
 
 ## Out of scope (for v1.0)
 
 The list keeps future contributors from adding to v1.0 by accident.
 First half is original-design exclusions; second half is items
-explicitly deferred by an ADR or implementation decision during
-prior milestones, with the rationale that the v1.0 surface is
-better without them.
+explicitly deferred by an ADR, an issue filing, or an
+implementation decision during prior milestones, with the
+rationale that the v1.0 surface is better without them.
 
 ### Original-design exclusions
 
@@ -79,8 +111,8 @@ better without them.
 
 ### Deferred during prior milestones (post-v1.0 candidates)
 
-Each entry cites the ADR or doc that documented the deferral so
-the call can be revisited with full context post-v1.0.
+Each entry cites the ADR or issue file that documented the
+deferral so the call can be revisited with full context post-v1.0.
 
 - **Glob-source in `[[link]]` rows** (e.g. `source = "*.zsh"`) —
   deferred per [ADR 0001 § Alternatives](../adr/0001-hapi-cyml-manifest-schema.md).
@@ -114,14 +146,33 @@ the call can be revisited with full context post-v1.0.
   path, so package-dir recovery would need either a tree-walk
   heuristic up from a live entry's `abs_source` until a
   `hapi.cyml` is found, or an additive `manifest_path` field
-  in the trail. v0.6.0 ships per-package sync only; a future
-  patch can layer the no-arg form once one of those discovery
-  paths is chosen.
-- **`hapi sync` reconciliation (prune trail rows no longer in
-  manifest)** — deferred from M5. v0.6.0 sync is link-without-
-  --force; it creates missing rows but doesn't remove links
-  whose manifest row vanished. The full reconciliation surface
-  is post-v1.0 if user demand appears.
+  in the trail. Per-package sync ships at v1.0; the no-arg
+  form can layer on once one of those discovery paths is
+  chosen.
+- **`hapi sync --prune` (remove trail rows no longer in manifest)** —
+  deferred per
+  [`issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md`](issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md).
+  M7 dogfood papercut with a working full-rotation workaround
+  (`unlink + edit manifest + link`); the `--prune` surface is
+  a post-v1.0 candidate, possibly default-on at a major bump.
+- **`hapi status --quiet` flag** — deferred per
+  [`issues/2026-05-20-status-exit-1-short-circuits-script-chains.md`](issues/2026-05-20-status-exit-1-short-circuits-script-chains.md)
+  Tier-2. The v1.0 fix is the guide-doc note (Tier-1); a
+  `--quiet` flag that flips the exit-code semantic is a
+  post-v1.0 ergonomic addition if the pattern keeps recurring.
+- **`docs/architecture/NNN-upstream-drift-pattern.md`** —
+  architecture-note formalization of the drift-audit workflow
+  per
+  [`issues/2026-05-20-upstream-stock-template-drift-pattern.md`](issues/2026-05-20-upstream-stock-template-drift-pattern.md)
+  Tier-2. Earned when the second drifting-upstream consumer
+  hits the pattern (likely sway / fish / kitty when an upstream
+  rewrite drops); guide-doc lands at v1.0, architecture-note
+  follows.
+- **`hapi merge <pkg>` verb** — speculative 3-way merge driver
+  for drifting upstreams per
+  [`issues/2026-05-20-upstream-stock-template-drift-pattern.md`](issues/2026-05-20-upstream-stock-template-drift-pattern.md)
+  Tier-3. Outside v1.0 scope; needs a data model for
+  "stock-template version" before earning its place.
 - **`hapi trail compact`** — ADR 0002 notes the trail grows
   monotonically; a compact verb is owed someday. Out of scope
   for v1.0 — the trail's append-only contract is load-bearing
@@ -134,9 +185,9 @@ the call can be revisited with full context post-v1.0.
 
 ## Upstream dependencies (tracked)
 
-Items hapi needs from sibling repos but doesn't block on (we
+Items hapi needs from sibling repos but doesn't block on — we
 have working magic-number workarounds today; landed wrappers
-become a quality-of-life patch).
+become a quality-of-life patch.
 
 - **`sys_rename` stdlib wrapper** — proposed in
   [`cyrius/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md).
@@ -144,11 +195,21 @@ become a quality-of-life patch).
 - **`sys_fsync` / `sys_fdatasync` stdlib wrappers** — proposed in
   [`cyrius/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md).
   Hapi calls `syscall(74, fd)` in `_hmw_write_atomic`.
-- **kavach capability API** — M6 gate. Until kavach exposes a
-  stable surface, M6 ships with a CLI-level allowlist.
+- **kavach capability API** — the stable surface that replaces
+  the v0.7.0 `HAPI_ALLOWED_ROOTS` env-var stopgap inside
+  `src/cap.cyr`. Internal-only refactor when kavach ships
+  (`cap_check_root_r(path)` signature unchanged); no caller
+  changes, no manifest changes, no audit-format changes.
+- **cyriusly starship-install non-clobbering fix** — filed
+  upstream at
+  [`cyrius/docs/development/issues/2026-05-20-cyriusly-cmdtools-install-clobbers-existing-starship-config.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-20-cyriusly-cmdtools-install-clobbers-existing-starship-config.md).
+  Once landed, the caveat-comment baked into
+  `dotfiles/starship/.config/starship.toml` (and the matching
+  note in `hapi.cyml`) can drop.
 
 ## Cross-references
 
 - [`state.md`](state.md) — live status
-- [`../../CHANGELOG.md`](../../CHANGELOG.md) — release history,
-  including the shipped M0 → M4 narrative
+- [`issues/`](issues/) — open dogfood papercuts + design-gap reports
+- [`../doc-health.md`](../doc-health.md) — whole-tree doc-currency ledger
+- [`../../CHANGELOG.md`](../../CHANGELOG.md) — release history
