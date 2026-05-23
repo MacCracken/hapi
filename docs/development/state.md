@@ -5,18 +5,20 @@
 
 ## Version
 
-**0.9.0** — M7 close shipped 2026-05-23: P(-1) security
-audit pass with `docs/audit/2026-05-23-audit.md` filed
-(F-001 HIGH + F-003 LOW landed; F-002 MEDIUM deferred to
-kavach via `issues/2026-05-23-cap-check-symlink-escape.md`)
-and `docs/benchmarks.md` baseline captured (sync over a
-100-pkg / 350-link home; cold 72 ms, warm 54 ms with 0
-audit growth). v0.8.0 (M7 issue-repair sweep — status guide,
-upstream-drift, `--backup-to`, sha1c canonicalization)
-shipped the same day. v0.7.0 (M6 — `--root` + `--dry-run`)
-2026-05-20; v0.6.0 (M5), v0.5.0 (M4), v0.4.0 (M3),
-v0.3.0 (M2), v0.2.0 (M1) all landed the same day. M0
-scaffold 2026-05-19.
+**1.0.0** — M8 / v1.0 freeze shipped 2026-05-23. Contract
+locked: command surface (ten verbs + five global flags),
+`hapi.cyml` manifest schema (ADR 0001), audit-trail format
+(ADR 0002). All five ADRs now carry *Frozen at v1.0.0*. Full
+write-up at
+[`release-notes/1.0.0.md`](release-notes/1.0.0.md).
+
+Earlier ships (all 2026-05-23 unless noted):
+v0.9.0 (M7 close — P(-1) audit + benchmarks),
+v0.8.0 (M7 sweep — status guide, upstream-drift, `--backup-to`,
+sha1c canonicalization),
+v0.7.0 (M6 — `--root` + `--dry-run`, 2026-05-20),
+v0.6.0 (M5), v0.5.0 (M4), v0.4.0 (M3), v0.3.0 (M2), v0.2.0
+(M1) all 2026-05-20, M0 scaffold 2026-05-19.
 
 ## Toolchain
 
@@ -24,7 +26,7 @@ scaffold 2026-05-19.
 
 ## Shape
 
-Binary (`hapi`). Argv dispatcher. Ten real verbs at 0.9.0;
+Binary (`hapi`). Argv dispatcher. Ten real verbs frozen at v1.0.0;
 `--version` / `--help` / `-v` / `-h` round out the surface.
 Three global flags plug into per-verb arg parsers:
 `--root <path>` (link / adopt / sync / status / list, M6),
@@ -148,7 +150,7 @@ M7 onward fills:
 ## Tests
 
 - `tests/hapi.tcyr` — primary suite. 235 assertions across
-  65 test groups (v0.9.0; was 218 / 61 at v0.8.0):
+  65 test groups (v1.0.0; unchanged from v0.9.0):
   - Manifest (7 groups): minimal, M1 acceptance, validation,
     path traversal, comments, on-disk parse, missing file
   - Audit writer (2 groups): link entry format, JSON escaping
@@ -229,24 +231,34 @@ means downstream packagers (zugot recipes) and user manifests.
 
 ## Next
 
-See [`roadmap.md`](roadmap.md) for the M7 → v1.0 plan. M7
-is now closed; v0.9.0 ships the audit + benchmarks pair.
+**v1.0.0 has shipped.** The contract (command surface, manifest
+schema, audit-trail format) is frozen. The roadmap from here
+forward is the **post-v1.0 / v1.x** backlog — additive growth
+only, with each item tracked to either an open issue, an ADR
+deferral, or a roadmap *Deferred* entry.
 
-M7 close (v0.9.0, 2026-05-23):
-- ✅ P(-1) hardening pass + `docs/audit/2026-05-23-audit.md`
-  (F-001 HIGH + F-003 LOW landed; F-002 MEDIUM deferred to
-  kavach via
-  [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md))
-- ✅ `docs/benchmarks.md` first baseline (sync over 100-pkg /
-  350-link synthetic home; cold 72 ms / warm 54 ms / 0
-  audit growth; methodology + reproduction inlined)
+Candidate post-v1.0 work (ordered loosely by maturity):
 
-M7 issue-repair sweep (v0.8.0, 2026-05-23):
-- ✅ `docs/guides/status.md` exit-1 clarification
-- ✅ `docs/guides/upstream-drift.md` new guide
-- ✅ `--backup-to <dir>` flag on link / sync / adopt
-- ✅ Manifest-hash canonicalization `sha1:` → `sha1c:`
+- **kavach migration** — internal swap inside `src/cap.cyr`
+  when the kavach capability service ships. Closes F-002
+  (`issues/2026-05-23-cap-check-symlink-escape.md`) without
+  touching the `cap_check_root_r` API.
+- **stdlib syscall wrappers** — `sys_rename` / `sys_fsync` /
+  `sys_fdatasync` once the cyrius proposals land. Quality-of-
+  life patch; no behavior change.
+- **`hapi sync --prune`** — re-evaluate if the
+  full-rotation workaround keeps biting in dogfood. Tracked
+  at `issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md`.
+- **`docs/architecture/NNN-upstream-drift-pattern.md`** —
+  earned when a second drifting-upstream consumer (sway /
+  fish / kitty) hits the pattern documented in
+  [`guides/upstream-drift.md`](../guides/upstream-drift.md).
+- **`docs/benchmarks.md` trend rows** — append on any release
+  that touches `cmd_link.cyr` / `audit.cyr` / `fs_link.cyr` /
+  the manifest parser. Regression gate per the file: > 2×
+  cold-time jump or any non-zero warm audit growth.
 
-**Next ship is M8 — the v1.0.0 freeze.** Command surface,
-manifest schema, and audit-trail format all become contractual.
-See the roadmap M8 section + the *v1.0 criteria* checklist.
+The complete v1.0-shipped scope plus the full deferred set
+lives in [`roadmap.md`](roadmap.md). The v1.0 contract itself
+is documented in
+[`release-notes/1.0.0.md`](release-notes/1.0.0.md).

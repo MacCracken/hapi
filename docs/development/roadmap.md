@@ -10,25 +10,40 @@
 
 The hapi v1.0 contract: full CRUD parity with GNU stow plus an
 auditable rollback story, dogfooded on the maintainer's own dotfiles.
+**All criteria below were ticked at the v1.0.0 cut (2026-05-23).**
 
-- [ ] Command surface frozen — `link` / `unlink` / `adopt` / `sync` /
-      `list` / `status` / `checkpoint` / `check` / `inspect` /
-      `rollback` signatures stable (plus global flags `--root` /
-      `--dry-run` / `--force` / `--strict`)
-- [ ] `hapi.cyml` manifest schema documented and frozen
-- [ ] Audit-trail format documented and frozen (rollback compatibility)
-- [ ] Test coverage: every command's happy path + conflict path +
-      capability-denied path; 200+ assertions
-- [ ] Benchmarks captured in `docs/benchmarks.md` for `sync` on a
-      realistic 100-package home
-- [ ] Maintainer's dotfiles managed by hapi for at least one release
-      cycle (real-world dogfood)
-- [ ] CHANGELOG complete from v0.1.0 onward
-- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — path
-      validation, symlink loop, TOCTOU, capability boundary
-- [ ] All issues filed in `docs/development/issues/` either resolved
-      (moved to `archived/`) or explicitly deferred post-v1.0 with
-      rationale captured in this roadmap's *Deferred* section
+- [x] **Command surface frozen** — `link` / `unlink` / `adopt` /
+      `sync` / `list` / `status` / `checkpoint` / `check` /
+      `inspect` / `rollback` signatures stable (plus global flags
+      `--root` / `--dry-run` / `--backup-to` / `--force` /
+      `--strict`). See [`release-notes/1.0.0.md`](release-notes/1.0.0.md)
+      *The verb set frozen* table.
+- [x] **`hapi.cyml` manifest schema documented and frozen** — ADR
+      [`0001`](../adr/0001-hapi-cyml-manifest-schema.md) now carries
+      *Frozen at v1.0.0* status.
+- [x] **Audit-trail format documented and frozen** — ADR
+      [`0002`](../adr/0002-audit-trail-format.md) frozen; canonical
+      `sha1c:` hash and additive-growth contract locked. Pre-v1.0
+      `sha1:` reader tolerance preserved.
+- [x] **Test coverage** — 235 assertions across 65 groups; every
+      verb has happy + conflict + capability-denied paths.
+- [x] **Benchmarks captured** —
+      [`benchmarks.md`](../benchmarks.md) ships the v0.9.0
+      baseline (sync over 100-pkg / 350-link home: cold 72 ms /
+      warm 54 ms / 0 audit growth).
+- [x] **Maintainer's dotfiles dogfooded** — v0.7.0 → v0.8.0 →
+      v0.9.0 cycle, multiple boots / reboots confirmed at session
+      start.
+- [x] **CHANGELOG complete from v0.1.0 onward** — every release
+      from the M0 scaffold has a populated section.
+- [x] **Security audit pass** —
+      [`audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md)
+      filed; F-001 HIGH + F-003 LOW landed in v0.9.0; F-002
+      MEDIUM deferred to kavach with documented workaround.
+- [x] **All filed issues resolved or explicitly deferred** —
+      three archived (status-exit-1, upstream-drift,
+      no-backup-to); two open with explicit post-v1.0 deferrals
+      (sync-prune, cap-check-symlink-escape).
 
 ## Upcoming milestones
 
@@ -90,13 +105,22 @@ M7 dogfooding; ship the fixes before the v1.0 freeze)
   hash; semantic edits still diverge. ADR 0002 *Hash* section
   rewritten with the prefix table and the canonical-form rules.
 
-### M8 — v1.0.0
+### M8 — v1.0.0 ✅ SHIPPED 2026-05-23
 
-- Command surface, manifest schema, audit-trail format all frozen
-- CHANGELOG `Breaking` section for the freeze (no signature
-  changes — the freeze IS the contract change)
-- Every line in *v1.0 criteria* above has its checkbox ticked
-- v1.0.0 tag cut + release notes published
+- ✅ Command surface, manifest schema, audit-trail format all
+  frozen — ADRs 0001 / 0002 / 0003 / 0004 / 0005 each carry
+  *Frozen at v1.0.0 (2026-05-23)* status.
+- ✅ CHANGELOG `Breaking` section for the freeze — see the
+  `[1.0.0]` entry. (No signature changes; the freeze IS the
+  contract change.)
+- ✅ Every *v1.0 criteria* checkbox ticked above.
+- ✅ v1.0.0 tag cut + release notes published at
+  [`release-notes/1.0.0.md`](release-notes/1.0.0.md).
+
+The roadmap.md file from here forward is the **post-v1.0**
+roadmap. Items previously sorted into *Deferred during prior
+milestones (post-v1.0 candidates)* below are the v1.x backlog;
+*Original-design exclusions* remain out of scope.
 
 ## Out of scope (for v1.0)
 

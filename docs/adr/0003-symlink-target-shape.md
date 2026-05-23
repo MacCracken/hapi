@@ -1,7 +1,12 @@
 # 0003 — Symlink target shape (relative vs absolute)
 
-**Status**: Accepted
+**Status**: Accepted — **Frozen at v1.0.0 (2026-05-23)**
 **Date**: 2026-05-20
+
+> Frozen: `hapi link` writes relative symlinks from the link's
+> parent directory to the source. A post-v1.0 `--absolute`
+> opt-in is reserved per the roadmap's *Out of scope* list but
+> the default shape is contractual.
 
 ## Context
 

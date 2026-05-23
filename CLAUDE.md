@@ -116,4 +116,4 @@ Full doc-tree convention: [first-party-documentation.md](https://github.com/MacC
 
 ## CHANGELOG Format
 
-Follow [Keep a Changelog](https://keepachangelog.com/). Manifest format changes are `Breaking` until v1.0, after which the manifest schema is frozen. Audit-trail format changes are always `Breaking` — rollback compatibility is part of the contract.
+Follow [Keep a Changelog](https://keepachangelog.com/). The manifest schema is **frozen as of v1.0.0** (ADR 0001 *Frozen at v1.0.0*); post-v1.0 changes require a major bump. The audit-trail format is **frozen as of v1.0.0** (ADR 0002) — additive growth is allowed (readers tolerate unknown fields); any change to the required-field set or the line shape is `Breaking` and rollback-compatibility is part of the contract.

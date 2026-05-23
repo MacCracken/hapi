@@ -4,6 +4,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0]
+
+### Breaking
+- **Contract freeze.** The v1.0.0 release locks the contract
+  for three surfaces. No signature changed in this release —
+  the freeze IS the contract change.
+  - **Command surface** — ten verbs (`link` / `unlink` /
+    `adopt` / `sync` / `list` / `status` / `checkpoint` /
+    `check` / `inspect` / `rollback`) plus four global flags
+    (`--root`, `--dry-run`, `--backup-to`, `--force`,
+    `--strict`). Arg shapes, exit codes, stdout / stderr line
+    layouts are now contractual.
+  - **`hapi.cyml` manifest schema** per ADR 0001 — frozen.
+    `[package]` + `[[link]]` rows + the `ignore` glob list,
+    with the validation rules in `src/manifest.cyr`.
+  - **Audit-trail format** per ADR 0002 — frozen. JSONL with
+    the required-field set, `sha1c:` canonical-hash prefix,
+    additive-growth contract (readers MUST tolerate unknown
+    fields). Pre-v1.0 `sha1:` raw-bytes hashes continue to be
+    tolerated by readers.
+
+  All five ADRs (0001 / 0002 / 0003 / 0004 / 0005) carry
+  **Status: Frozen at v1.0.0 (2026-05-23)** as of this release.
+  Post-v1.0 surface growth lives in the roadmap's *Deferred*
+  section and any v1.x patch / minor must respect the freeze.
+
+### Added
+- `docs/development/release-notes/1.0.0.md` — the v1.0 release
+  notes. Explains what "v1.0" means concretely (three frozen
+  surfaces), walks the v1.0-criteria checklist, lists the
+  post-v1.0-deferred items with rationale, and gives the
+  v0.9.0 → v1.0.0 upgrade contract (no code changes required;
+  v1.0 readers parse every v0.x trail).
+- All five ADR Status lines updated to *Accepted — Frozen at
+  v1.0.0 (2026-05-23)*; each ADR gains a one-paragraph
+  freeze-contract note immediately under the Status header.
+
+### Changed
+- Roadmap *v1.0 criteria* checklist — every box ticked with
+  the artifact that satisfies it.
+- Roadmap M8 section — marked SHIPPED with the date.
+- CLAUDE.md *CHANGELOG Format* paragraph clarified: manifest
+  format and audit-trail format are now post-v1.0 frozen
+  rather than "Breaking until v1.0."
+
+### Filed
+- Two open issues, both explicitly deferred post-v1.0 with
+  rationale captured in the roadmap:
+  - `issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md`
+    — row removal via full rotation works today; `--prune`
+    surface is post-v1.0 if user demand earns it.
+  - `issues/2026-05-23-cap-check-symlink-escape.md` — F-002
+    MEDIUM from the audit pass. Lexical-only normalization at
+    the cap-check; symlink-aware resolution lands with the
+    kavach migration without breaking the `cap_check_root_r`
+    API.
+
 ## [0.9.0]
 
 ### Security

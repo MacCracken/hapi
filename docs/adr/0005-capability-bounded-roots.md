@@ -1,7 +1,16 @@
 # 0005 — Capability-bounded roots
 
-**Status**: Accepted
+**Status**: Accepted — **Frozen at v1.0.0 (2026-05-23)**
 **Date**: 2026-05-20
+
+> Frozen: `cap_check_root_r(path) -> Result` is the contract.
+> The implementation may swap from the v0.x
+> `HAPI_ALLOWED_ROOTS` env-var stopgap to the kavach capability
+> service — that's internal and does not change callers. The
+> v0.9.0 lexical-normalization repair (F-001) and the v1.0
+> behavior are identical at the interface; the symlink-aware
+> resolution that closes F-002 lands in kavach without breaking
+> the API.
 
 ## Context
 

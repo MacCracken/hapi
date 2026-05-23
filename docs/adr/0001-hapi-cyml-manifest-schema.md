@@ -1,7 +1,14 @@
 # 0001 — hapi.cyml manifest schema
 
-**Status**: Accepted
+**Status**: Accepted — **Frozen at v1.0.0 (2026-05-23)**
 **Date**: 2026-05-20
+
+> Per CLAUDE.md's CHANGELOG Format rule, manifest format changes
+> are `Breaking` until v1.0; after v1.0 the schema is frozen.
+> v1.0.0 ships the schema described here as the contract. Future
+> additive growth is reserved for the *Out of scope (for v1.0)*
+> items in [`docs/development/roadmap.md`](../development/roadmap.md)
+> — none of which are scheduled for v1.x.
 
 ## Context
 

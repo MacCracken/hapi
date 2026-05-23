@@ -1,7 +1,13 @@
 # 0004 — `hapi adopt` semantics
 
-**Status**: Accepted
+**Status**: Accepted — **Frozen at v1.0.0 (2026-05-23)**
 **Date**: 2026-05-20
+
+> Frozen: two positional args, single atomic `op:adopt` audit
+> entry, append-`[[link]]`-row-before-`---`-body, three-step
+> conditional rollback. Post-v1.0 nested-layout adoption
+> (`--source <path>`) is reserved per the roadmap's *Out of
+> scope* list.
 
 ## Context
 

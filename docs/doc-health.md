@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — hapi
 
-> **Last refresh**: 2026-05-23 (v0.9.0 ship — M7 close. `docs/benchmarks.md` first baseline filed alongside the P(-1) audit doc; M7 retired in roadmap; state.md "Next" advanced to M8 / v1.0 freeze.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
+> **Last refresh**: 2026-05-23 (**v1.0.0 ship — M8 freeze.** All five ADRs now carry *Frozen at v1.0.0 (2026-05-23)*; `docs/development/release-notes/1.0.0.md` filed; roadmap *v1.0 criteria* checklist fully ticked; CLAUDE.md *CHANGELOG Format* rewritten to reflect the post-v1.0 frozen posture.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
 > **Scope**: This repo only (`hapi`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, VERSION, LICENSE, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, cyrius.cyml). Per-stdlib-dep docs live in `cyrius/`; cross-repo state lives in [`development/state.md`](development/state.md), not here.
 >
 > **Convention adopted from agnosticos**: pattern mirrors [`cyrius/docs/doc-health.md`](https://github.com/MacCracken/cyrius/blob/main/docs/doc-health.md) (small-repo variant). Per `first-party-documentation.md § Development Docs`, the ledger lives at `docs/` root (not `docs/development/`) because its scope is the whole tree. Hapi's doc tree is ~34 markdown files (vs cyrius's ~105) so the tier structure here is leaner.
@@ -15,13 +15,11 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
 
-## At a glance — 2026-05-23 inventory (v0.9.0 shipped; M7 closed)
+## At a glance — 2026-05-23 inventory (v1.0.0 shipped; contract frozen)
 
-**39 markdown files** across the repo (root + docs tree) — gained
-`docs/guides/upstream-drift.md`, `docs/guides/backup-to.md`,
-`docs/audit/2026-05-23-audit.md`,
-`issues/2026-05-23-cap-check-symlink-escape.md`, and
-`docs/benchmarks.md`.
+**40 markdown files** across the repo (root + docs tree) — v1.0
+adds `docs/development/release-notes/1.0.0.md` to the v0.9.0
+inventory.
 
 | Bucket | Count | What it means |
 |---|---|---|
@@ -70,6 +68,12 @@ Numbers approximate; rolls up from the per-tier tables below.
 
 ---
 
+## Tier 2.7 — Release notes (`docs/development/release-notes/`)
+
+| File | Last touched | Status | Notes |
+|---|---|---|---|
+| `1.0.0.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23.** First release-notes doc — landed at v1.0.0. Documents the three frozen surfaces, the v1.0-criteria checklist, the post-v1.0-deferred list, and the v0.9.0 → v1.0.0 upgrade contract. |
+
 ## Tier 3 — Operational / Development (`docs/development/`)
 
 > **Important framing**: state.md + roadmap.md form the **canonical operational surface**. CLAUDE.md delegates volatile state to state.md; roadmap.md is the milestone-pinning artifact. Both rotate every release; everything else in this tier rotates per-need.
@@ -89,17 +93,17 @@ Numbers approximate; rolls up from the per-tier tables below.
 
 ## Tier 4 — ADRs (`docs/adr/`)
 
-5 ADRs. Re-read pass at v1.0; ADRs document decisions, not status.
+5 ADRs. **All five frozen at v1.0.0 (2026-05-23).**
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-05-20 | ✅ Fresh | Index updated for ADR 0005. |
+| `README.md` | 2026-05-20 | ✅ Fresh | Index covers all 5 ADRs. |
 | `template.md` | (pre-M5) | 🔵 Evergreen | Copy-as-starting-point. |
-| `0001-hapi-cyml-manifest-schema.md` | (M1) | 🔵 Evergreen | Manifest schema; frozen at v1.0 per CLAUDE.md. |
-| `0002-audit-trail-format.md` | 2026-05-23 | ✅ Fresh | Audit-trail format; frozen at v1.0. **Canonical-hash migration landed in Unreleased — `sha1:` → `sha1c:` prefix swap with the canonical re-serialization rules documented in the *Hash* table.** Also gained an *Additive fields shipped after the initial format* subsection registering the Unreleased `backup_path` field. |
-| `0003-symlink-target-shape.md` | (M2) | 🔵 Evergreen | Relative-from-link-parent symlink shape. |
-| `0004-adopt-op-semantics.md` | (M4) | 🔵 Evergreen | Adopt verb design; atomic single-entry audit + three-step conditional rollback. |
-| `0005-capability-bounded-roots.md` | 2026-05-20 | ✅ Fresh | M6 ship; `--root` + `HAPI_ALLOWED_ROOTS` stopgap until kavach lands. |
+| `0001-hapi-cyml-manifest-schema.md` | 2026-05-23 | ✅ Fresh | **Frozen at v1.0.0.** Manifest schema contract. |
+| `0002-audit-trail-format.md` | 2026-05-23 | ✅ Fresh | **Frozen at v1.0.0.** Canonical-hash migration `sha1:` → `sha1c:` documented in the *Hash* table; additive-fields subsection registers `backup_path`. |
+| `0003-symlink-target-shape.md` | 2026-05-23 | ✅ Fresh | **Frozen at v1.0.0.** Relative-from-link-parent default; `--absolute` opt-in reserved post-v1.0. |
+| `0004-adopt-op-semantics.md` | 2026-05-23 | ✅ Fresh | **Frozen at v1.0.0.** Adopt verb design; atomic single-entry audit + three-step conditional rollback. |
+| `0005-capability-bounded-roots.md` | 2026-05-23 | ✅ Fresh | **Frozen at v1.0.0.** `cap_check_root_r(path) -> Result` is the contract; kavach swap is internal. |
 
 ---
 

@@ -1,7 +1,16 @@
 # 0002 — Audit-trail format
 
-**Status**: Accepted
+**Status**: Accepted — **Frozen at v1.0.0 (2026-05-23)**
 **Date**: 2026-05-20 (canonical-hash migration: 2026-05-23)
+
+> Per CLAUDE.md's CHANGELOG Format rule, audit-trail format
+> changes are always `Breaking` — rollback compatibility is
+> part of the contract. v1.0.0 freezes the JSONL shape, the
+> required field set, the `sha1c:` canonical-hash prefix, and
+> the additive-field growth contract (readers MUST tolerate
+> unknown fields). The pre-v1.0 `sha1:` raw-bytes prefix
+> remains tolerated by readers for backward compatibility with
+> trails written by v0.x writers.
 
 ## Context
 
