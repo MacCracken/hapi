@@ -61,7 +61,12 @@ opt-in pre-`--force` snapshot.
   `[[link]]` rows sorted by `target`, no comments, single
   blank line between sections.
 - `src/manifest_write.cyr` — append + remove `[[link]]` rows
-  atomically via `tmp+rename`
+  atomically via `tmp+rename`. Hosts the `HapiSysno` enum
+  (`HAPI_SYS_RENAME` / `HAPI_SYS_FSYNC`) naming the rename/fsync
+  syscall numbers the stdlib does not yet wrap — shared by
+  `adopt` / `rollback`; removed when the cyrius wrapper
+  proposals land (`fs_link.cyr`'s open/close use the stdlib
+  `SYS_OPEN` / `SYS_CLOSE`)
 - `src/audit.cyr` — JSONL audit-trail writer (link / unlink /
   adopt / unadopt / rollback-marker entries; manifest hash via
   `hapi_mf_canonicalize` + sha1 with `sha1c:` prefix as of
@@ -151,11 +156,18 @@ Post-v1.0 implementation work (additive only; tracked in
 - **Readers**: `unlink`, `rollback`, `list`, `status`, `sync`
   — every verb that consults the trail walks via
   `src/audit_reader.cyr`.
+- **Recovery boundary (F-006)**: the trail is ephemeral local
+  state — a wiped `$XDG_STATE_HOME` (e.g. a drive move) leaves it
+  empty even when the relative links survive, and an idempotent
+  re-`sync` does not rebuild it. `status` is the post-recovery
+  source of truth, not `list` / `rollback`. Accepted boundary —
+  [`docs/audit/2026-05-24-audit.md`](../audit/2026-05-24-audit.md),
+  [`issues/2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](issues/2026-05-24-audit-trail-lost-on-state-dir-wipe.md).
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 235 assertions across
-  65 test groups (v1.0.0; unchanged from v0.9.0):
+- `tests/hapi.tcyr` — primary suite. 242 assertions across
+  66 test groups:
   - Manifest (7 groups): minimal, three-link acceptance,
     validation, path traversal, comments, on-disk parse,
     missing file
@@ -181,8 +193,9 @@ Post-v1.0 implementation work (additive only; tracked in
     key in [package], unknown key in [[link]], accepts clean
   - check (1 group): --strict flag does not leak across
     parser invocations
-  - sync (2 groups): clean tree → no audit growth,
-    re-creates a missing link
+  - sync (3 groups): clean tree → no audit growth,
+    re-creates a missing link, recovers after a wiped
+    state dir (drive-move scenario; F-006 boundary)
   - cap (4 groups): path-within matcher (exact / subdir /
     boundary / empty), deny outside $HOME + allowlist,
     allow inside $HOME, allow listed root (+ byte-prefix

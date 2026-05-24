@@ -46,7 +46,13 @@ ordering is driven by upstream readiness + dogfood pressure.
   args can sync every tracked package. Needs either an
   additive trail field (`manifest_path`) or a tree-walk
   heuristic. The signature stays unchanged — no arg becomes
-  legal.
+  legal. **Dogfood pressure (2026-05-24):** a drive-move
+  recovery had to loop over packages by hand, and the wiped
+  trail proved trail-recovery fails closed at bootstrap
+  (zero packages found exactly when recovery matters most) —
+  prefer the tree-walk / root-scan as the *primary* mechanism,
+  trail-recovery only as augmentation. See
+  [`issues/2026-05-24-no-arg-sync-bootstrap-recovery.md`](issues/2026-05-24-no-arg-sync-bootstrap-recovery.md).
 
 ### New flags (additive)
 

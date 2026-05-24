@@ -969,6 +969,44 @@ fn test_cmd_sync_creates_missing_links() {
     return 0;
 }
 
+fn test_cmd_sync_recovery_after_trail_loss() {
+    test_group("sync: recovers after the audit trail is lost (drive-move scenario)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+
+    # Establish the package: symlinks + trail.
+    assert_eq(cmd_link("docs/examples/dotfiles-zsh", 0), 0, "initial link succeeds");
+    assert(_test_file_size(audit_path) > 0, "initial link wrote audit entries");
+
+    # Simulate a drive move that carried $HOME + the package forward
+    # but wiped $XDG_STATE_HOME: the relative symlinks survive, the
+    # trail is gone.
+    sys_unlink(audit_path);
+    assert_eq(_test_file_size(audit_path), 0, "audit trail wiped");
+
+    var zrc = alloc(strlen(scope) + 16);
+    memcpy(zrc, scope, strlen(scope));
+    memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "link survived the wipe");
+
+    # Recovery is just a re-sync: links are already correct, so it's a
+    # clean no-op that disturbs nothing.
+    assert_eq(cmd_sync("docs/examples/dotfiles-zsh"), 0, "recovery sync exits 0");
+    assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "link intact after recovery sync");
+
+    # Documented limitation, issues/2026-05-24-audit-trail-lost-on-state-dir-wipe.md:
+    # an idempotent sync writes no entry, so the wiped trail is NOT
+    # rebuilt to match the live links. `status` is the source of truth
+    # after a state-dir loss, not `list` / `rollback`. If a future
+    # reseed affordance lands, this assertion is the one to revisit.
+    assert_eq(_test_file_size(audit_path), 0, "no-op recovery sync does not rebuild the trail");
+
+    _test_clear_env();
+    return 0;
+}
+
 fn test_strict_mode_rejects_unknown_section() {
     test_group("check --strict: unknown section is rejected");
 
@@ -1869,6 +1907,7 @@ fn main() {
     test_cmd_check_strict_resets_flag();
     test_cmd_sync_idempotent_clean_tree();
     test_cmd_sync_creates_missing_links();
+    test_cmd_sync_recovery_after_trail_loss();
     test_cap_path_within_basics();
     test_cap_check_denies_outside_home_and_allowlist();
     test_cap_check_allows_inside_home();

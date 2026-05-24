@@ -25,6 +25,19 @@ enum HapiMfWriteError {
     HapiMfwRowNotFound = 4;
 }
 
+# Syscall numbers the stdlib does not yet name. The pending cyrius
+# proposals add sys_rename / sys_fsync wrappers; when they land,
+# delete this enum and switch the call sites (here + adopt + rollback)
+# to the named wrappers:
+#   docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md  (rename)
+#   docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md      (fsync)
+# Prefixed HAPI_SYS_ to stay out of the lib/* SYS_ namespace and avoid
+# colliding with the future stdlib SYS_RENAME / SYS_FSYNC.
+enum HapiSysno {
+    HAPI_SYS_FSYNC = 74;
+    HAPI_SYS_RENAME = 82;
+}
+
 # Read the entire file into a freshly-allocated buffer. Returns
 # the buffer; writes the length through *out_len. Returns 0 on
 # any read failure.
@@ -58,10 +71,10 @@ fn _hmw_write_atomic(path, buf, n): i64 {
     if (fd < 0) { return 0 - HapiMfwWriteFailed; }
     var wrc = file_write(fd, buf, n);
     if (wrc != n) { file_close(fd); return 0 - HapiMfwWriteFailed; }
-    syscall(74, fd);                       # fsync(fd)
+    syscall(HAPI_SYS_FSYNC, fd);
     file_close(fd);
 
-    var rrc = syscall(82, tmp, path);      # rename(tmp, path)
+    var rrc = syscall(HAPI_SYS_RENAME, tmp, path);
     if (rrc < 0) { return 0 - HapiMfwRenameFailed; }
     return 0;
 }

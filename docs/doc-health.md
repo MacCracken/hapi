@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — hapi
 
-> **Last refresh**: 2026-05-23 (**post-v1.0 stale-sweep.** README.md rewritten from scaffold-era language to the v1.0 surface. Eleven guides scrubbed of milestone (`M2`/`M5`/`M6`) and version-bound (`v0.4.0`, `v0.7.0`) narrative — replaced with timeless behavior. CLAUDE.md P(-1) recast as a standing process. state.md command-surface table dropped the M-shipped column; "M7 onward fills" rewritten as the post-v1.0 implementation backlog. **roadmap.md fully rewritten** — M0–M8 milestone narrative replaced with a v1.x maintenance bucket + v2.0 Breaking-candidate bucket.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
+> **Last refresh**: 2026-05-24 (**1.0.x-final arc.** Filed two issues (`no-arg-sync-bootstrap-recovery`, `audit-trail-lost-on-state-dir-wipe`). Added `docs/audit/README.md` (audit-arc convention + index) and `docs/audit/2026-05-24-audit.md` (1.0.x-final P(-1) re-walk; F-006 accepted boundary). Refreshed CHANGELOG Unreleased, state.md (242/66 tests, `HapiSysno` enum, F-006 recovery boundary), roadmap (no-arg-sync dogfood note). **Prior — 2026-05-23 post-v1.0 stale-sweep:** README.md rewritten from scaffold-era language to the v1.0 surface. Eleven guides scrubbed of milestone (`M2`/`M5`/`M6`) and version-bound (`v0.4.0`, `v0.7.0`) narrative — replaced with timeless behavior. CLAUDE.md P(-1) recast as a standing process. state.md command-surface table dropped the M-shipped column; "M7 onward fills" rewritten as the post-v1.0 implementation backlog. **roadmap.md fully rewritten** — M0–M8 milestone narrative replaced with a v1.x maintenance bucket + v2.0 Breaking-candidate bucket.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
 > **Scope**: This repo only (`hapi`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, VERSION, LICENSE, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, cyrius.cyml). Per-stdlib-dep docs live in `cyrius/`; cross-repo state lives in [`development/state.md`](development/state.md), not here.
 >
 > **Convention adopted from agnosticos**: pattern mirrors [`cyrius/docs/doc-health.md`](https://github.com/MacCracken/cyrius/blob/main/docs/doc-health.md) (small-repo variant). Per `first-party-documentation.md § Development Docs`, the ledger lives at `docs/` root (not `docs/development/`) because its scope is the whole tree. Hapi's doc tree is ~34 markdown files (vs cyrius's ~105) so the tier structure here is leaner.
@@ -17,18 +17,18 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ## At a glance — 2026-05-23 inventory (v1.0.0 shipped; contract frozen)
 
-**40 markdown files** across the repo (root + docs tree) — v1.0
-adds `docs/development/release-notes/1.0.0.md` to the v0.9.0
-inventory.
+**44 markdown files** across the repo (root + docs tree) — the
+2026-05-24 1.0.x-final arc adds two issues, `docs/audit/README.md`,
+and `docs/audit/2026-05-24-audit.md` to the v1.0 inventory.
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh / touched in current cycle** | ~34 | M5 / M6 / M7 touched; state.md / roadmap.md / CHANGELOG / 5 ADRs (ADR 0002 gained the canonical-hash + additive-field updates) / **15 guides** / 2 example files / architecture README / adr README / issues README / **audit/ tier (1 file)** / **benchmarks.md (NEW)**. |
+| ✅ **Fresh / touched in current cycle** | ~38 | state.md / roadmap.md / CHANGELOG / 5 ADRs / **15 guides** / 2 example files / architecture README / adr README / issues README / **audit/ tier: README + 2026-05-23 + 2026-05-24 passes** / **2 new issues (2026-05-24)** / benchmarks.md. |
 | 🟡 **Stale — refresh in place** | 0 | None flagged. |
 | 🟠 **Read-through outstanding** | 0 | None flagged. |
 | 🔵 **Probably evergreen** | ~3 | LICENSE / SECURITY.md / CODE_OF_CONDUCT.md — load-bearing root files; re-read pass at v1.0, not per-release. |
 | 📦 **Archive — frozen by design** | 3 | Three M7-resolved issues moved to `issues/archived/` (status-exit-1, upstream-drift, no-backup-to). |
-| ❓ **Open strategic question** | 0 | None — open issues (`sync-prune`, `cap-check-symlink-escape`) are both scoped and deferred to post-v1.0 / kavach. |
+| ❓ **Open strategic question** | 0 | None — four open issues (`sync-prune`, `cap-check-symlink-escape`, `no-arg-sync-bootstrap-recovery`, `audit-trail-lost-on-state-dir-wipe`) are all scoped + deferred (post-v1.0 / kavach / accepted-boundary). |
 
 Numbers approximate; rolls up from the per-tier tables below.
 

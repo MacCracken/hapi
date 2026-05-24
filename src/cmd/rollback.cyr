@@ -147,7 +147,7 @@ fn _hrb_reverse_adopt(entry): i64 {
     var urc = sys_unlink(abs_tgt);
     if (urc < 0) { return 0 - 1; }
 
-    var rrc = syscall(82, abs_src, abs_tgt);   # sys_rename
+    var rrc = syscall(HAPI_SYS_RENAME, abs_src, abs_tgt);
     if (rrc < 0) {
         # Re-attach what we just broke so the world is at least
         # consistent with the trail again.

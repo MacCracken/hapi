@@ -57,11 +57,11 @@ fn link_probe(path): i64 {
         # Path exists, not a symlink. Distinguish file vs directory
         # via the same trick is_dir uses: open + getdents. ENOTDIR
         # (errno 20) on getdents = regular file.
-        var fd = syscall(2, path, 0, 0);   # sys_open(path, O_RDONLY, 0)
+        var fd = syscall(SYS_OPEN, path, 0, 0);   # O_RDONLY
         if (fd < 0) { return _fsl_probe_new(HAPI_LP_FILE, 0); }
         var dbuf = alloc(32);
         var gd = syscall(SYS_GETDENTS64, fd, dbuf, 32);
-        syscall(3, fd);                    # sys_close
+        syscall(SYS_CLOSE, fd);
         if (gd >= 0) { return _fsl_probe_new(HAPI_LP_DIRECTORY, 0); }
         return _fsl_probe_new(HAPI_LP_FILE, 0);
     }

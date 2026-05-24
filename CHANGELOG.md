@@ -4,6 +4,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Syscall sites named (internal; no behavior change).** The bare
+  `syscall(2/3, …)` probe calls in `src/fs_link.cyr` now use the
+  stdlib `SYS_OPEN` / `SYS_CLOSE` constants, matching the existing
+  `SYS_GETDENTS64` / `SYS_GETCWD` usage in the same file. The
+  scattered `syscall(82, …)` rename calls (`manifest_write` /
+  `adopt` / `rollback`) and the `syscall(74, …)` fsync call now
+  resolve through one `HapiSysno` enum (`HAPI_SYS_RENAME` /
+  `HAPI_SYS_FSYNC`) in `src/manifest_write.cyr`, marked for
+  coordinated removal when the stdlib `sys_rename` / `sys_fsync`
+  wrappers land (cyrius proposals 2026-05-17 / 2026-05-20).
+  Codegen-identical — the constants resolve to the same numbers.
+
+### Added
+- Test: `sync: recovers after the audit trail is lost (drive-move
+  scenario)` — locks the recovery semantics surfaced 2026-05-24
+  (relative links survive a wiped `$XDG_STATE_HOME`, re-sync is a
+  clean no-op, and the no-op sync does not rebuild the trail).
+  Suite now **242 assertions / 66 groups**.
+- `docs/audit/2026-05-24-audit.md` — the 1.0.x-final P(-1) re-walk
+  pass; `docs/audit/README.md` establishes the audit-arc convention
+  + index. New finding F-006 (audit trail lost on state-dir wipe)
+  accepted as a boundary.
+- Issues filed: `2026-05-24-no-arg-sync-bootstrap-recovery.md`
+  (dogfood pressure on no-arg `sync` + the root-scan-over-trail
+  design correction) and `2026-05-24-audit-trail-lost-on-state-dir-wipe.md`.
+
 ## [1.0.0]
 
 ### Breaking
