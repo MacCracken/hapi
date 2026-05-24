@@ -5,6 +5,14 @@
 
 ## Version
 
+**1.0.1** — 1.0.x-final hardening patch (2026-05-24). Closes the
+1.0.x line: internal syscall naming (`HapiSysno` enum +
+stdlib `SYS_OPEN`/`SYS_CLOSE`), a trail-loss recovery regression
+test (suite now 242 / 66), and the 1.0.x-final P(-1) audit pass
+([`../audit/2026-05-24-audit.md`](../audit/2026-05-24-audit.md);
+new F-006 accepted boundary). No surface change — the v1.0
+contract stays frozen.
+
 **1.0.0** — M8 / v1.0 freeze shipped 2026-05-23. Contract
 locked: command surface (ten verbs + five global flags),
 `hapi.cyml` manifest schema (ADR 0001), audit-trail format

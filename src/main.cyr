@@ -42,7 +42,7 @@ include "lib/args.cyr"
 # project root. CLAUDE.md's work loop calls out "version sync"
 # explicitly — bump this string in the same commit as VERSION.
 fn hapi_print_version(): i64 {
-    println("hapi 1.0.0");
+    println("hapi 1.0.1");
     return 0;
 }
 

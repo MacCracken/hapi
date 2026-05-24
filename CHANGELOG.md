@@ -4,6 +4,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-05-24
+
+> 1.0.x-final hardening patch — closes the 1.0.x patch line. No
+> caller-visible surface change; the v1.0 contract (command
+> surface, ADR 0001 manifest schema, ADR 0002 audit-trail format)
+> stays frozen. Internal syscall naming, one regression test, and
+> the 1.0.x-final P(-1) audit pass.
+
 ### Changed
 - **Syscall sites named (internal; no behavior change).** The bare
   `syscall(2/3, …)` probe calls in `src/fs_link.cyr` now use the
