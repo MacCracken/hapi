@@ -36,11 +36,13 @@ ordering is driven by upstream readiness + dogfood pressure.
   security audit — symlink-aware per-component resolution
   replaces the v1.0 lexical-only normalization. Tracked at
   [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md).
-- **stdlib syscall wrappers** — replace the in-source magic-
+- ~~**stdlib syscall wrappers** — replace the in-source magic-
   number `syscall(N, ...)` calls (`sys_rename` in
   `adopt` / `manifest_write`, `sys_fsync` / `sys_fdatasync` in
-  `_hmw_write_atomic`) with named wrappers once cyrius lands
-  the proposals. Quality-of-life patch; no behavior change.
+  `_hmw_write_atomic`) with named wrappers~~ **— shipped in
+  1.0.2.** Wrappers landed in cyrius 6.2.x; the `HapiSysno`
+  stand-in enum is gone. No behavior change on x86_64;
+  arch-correct on aarch64 (raw `82`/`74` were x86_64-only).
 - **Manifest discovery for no-arg `hapi sync`** — recover
   pkg_dir from a live audit entry so `hapi sync` without
   args can sync every tracked package. Needs either an
@@ -105,11 +107,12 @@ ordering is driven by upstream readiness + dogfood pressure.
 Items hapi needs from siblings; QoL patches when they land,
 not blockers.
 
-- **`sys_rename` / `sys_fsync` / `sys_fdatasync` stdlib wrappers**
-  — proposed in
+- ~~**`sys_rename` / `sys_fsync` / `sys_fdatasync` stdlib wrappers**~~
+  **— landed in cyrius 6.2.x, consumed as of hapi 1.0.2.** (Was
+  proposed in
   [`cyrius/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md)
   and
-  [`cyrius/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md).
+  [`cyrius/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md).)
 - **kavach capability API** — the stable surface for the
   internal `src/cap.cyr` swap.
 - **cyriusly starship-install non-clobbering fix** — filed at

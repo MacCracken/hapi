@@ -80,12 +80,13 @@ opt-in pre-`--force` snapshot.
   `[[link]]` rows sorted by `target`, no comments, single
   blank line between sections.
 - `src/manifest_write.cyr` — append + remove `[[link]]` rows
-  atomically via `tmp+rename`. Hosts the `HapiSysno` enum
-  (`HAPI_SYS_RENAME` / `HAPI_SYS_FSYNC`) naming the rename/fsync
-  syscall numbers the stdlib does not yet wrap — shared by
-  `adopt` / `rollback`; removed when the cyrius wrapper
-  proposals land (`fs_link.cyr`'s open/close use the stdlib
-  `SYS_OPEN` / `SYS_CLOSE`)
+  atomically via `tmp+rename`. Uses the stdlib `sys_rename` /
+  `sys_fsync` wrappers (landed in cyrius 6.2.x) — shared by
+  `adopt` / `rollback`. The 1.0.1-era `HapiSysno` enum
+  (`HAPI_SYS_RENAME` / `HAPI_SYS_FSYNC`, x86_64-only literal
+  numbers) was retired in 1.0.2; the wrappers are arch-correct.
+  `fs_link.cyr`'s open/close already use the stdlib `SYS_OPEN` /
+  `SYS_CLOSE`.
 - `src/audit.cyr` — JSONL audit-trail writer (link / unlink /
   adopt / unadopt / rollback-marker entries; manifest hash via
   `hapi_mf_canonicalize` + sha1 with `sha1c:` prefix as of
@@ -151,10 +152,10 @@ Post-v1.0 implementation work (additive only; tracked in
   finding from
   [`docs/audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md);
   `cap_check_root_r(path) -> Result` signature unchanged.
-- stdlib syscall wrappers (`sys_rename` / `sys_fsync` /
-  `sys_fdatasync`) — replace the in-source magic-number
-  `syscall(N, ...)` calls when cyrius lands the proposals.
-  QoL only.
+
+_(Done in 1.0.2: the stdlib `sys_rename` / `sys_fsync` /
+`sys_fdatasync` wrappers landed in cyrius 6.2.x and replaced the
+in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Audit trail
 
@@ -248,11 +249,12 @@ Direct (declared in `cyrius.cyml`):
   (`bayan` supplies `cyml`; the standalone `toml` / `cyml`
   modules were folded into it in the v6.1.25 stdlib carve)
 
-Pending upstream stdlib work tracked in proposals:
-- `cyrius/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md`
-  (`sys_rename` lives there)
-- `cyrius/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md`
-  (`sys_fsync` + `sys_fdatasync`)
+Previously-pending stdlib syscall wrappers **landed in cyrius
+6.2.x** and are now consumed directly (1.0.2): `sys_rename`
+(proposal `2026-05-17-syscalls-at-family-stdlib.md`) and
+`sys_fsync` / `sys_fdatasync`
+(`2026-05-20-syscalls-fsync-stdlib.md`). The hand-rolled
+`HapiSysno` enum that stood in for them is retired.
 
 v1.0 ships the env-var allowlist stopgap (`HAPI_ALLOWED_ROOTS`)
 for non-`$HOME` roots; the kavach capability service replaces
@@ -284,9 +286,11 @@ Candidate post-v1.0 work (ordered loosely by maturity):
   when the kavach capability service ships. Closes F-002
   (`issues/2026-05-23-cap-check-symlink-escape.md`) without
   touching the `cap_check_root_r` API.
-- **stdlib syscall wrappers** — `sys_rename` / `sys_fsync` /
-  `sys_fdatasync` once the cyrius proposals land. Quality-of-
-  life patch; no behavior change.
+- ~~**stdlib syscall wrappers** — `sys_rename` / `sys_fsync` /
+  `sys_fdatasync`~~ **(done, 1.0.2)** — landed in cyrius 6.2.x;
+  the in-source `syscall(N, ...)` calls and the `HapiSysno`
+  stand-in enum were replaced with the named wrappers. No
+  behavior change on x86_64; arch-correct on aarch64.
 - **`hapi sync --prune`** — re-evaluate if the
   full-rotation workaround keeps biting in dogfood. Tracked
   at `issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md`.

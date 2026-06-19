@@ -33,6 +33,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`cyrius.cyml` `[deps].stdlib`** — dropped `toml` + `cyml`
   (no longer stdlib modules), added `bayan`.
 
+### Removed
+- **`HapiSysno` enum + raw `syscall(N, …)` rename/fsync calls.**
+  The stdlib `sys_rename` / `sys_fsync` / `sys_fdatasync` wrappers
+  landed in cyrius 6.2.x (the coordinated removal flagged in
+  [1.0.1]), so `src/manifest_write.cyr`, `src/cmd/adopt.cyr`, and
+  `src/cmd/rollback.cyr` now call the named wrappers instead of
+  the hand-rolled `HAPI_SYS_RENAME` (82) / `HAPI_SYS_FSYNC` (74)
+  constants. Behaviour is unchanged on x86_64 (identical numbers)
+  and now **arch-correct on aarch64** — the raw `82`/`74` literals
+  were x86_64-only, whereas the wrappers route through the
+  per-arch `renameat` / `fsync` syscalls. No caller-visible change.
+
 ## [1.0.1] - 2026-05-24
 
 > 1.0.x-final hardening patch — closes the 1.0.x patch line. No
