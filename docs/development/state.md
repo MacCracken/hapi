@@ -5,6 +5,17 @@
 
 ## Version
 
+**1.0.2** — toolchain + vendored-stdlib refresh (2026-06-19).
+Cyrius pin `6.0.1` → `6.2.24`; `lib/` resynced to the 6.2.24
+snapshot. Tracks the upstream stdlib carves — `cyml` (with
+`toml` / `json` / `base64` / `csv` / `bigint` / `u128`) folded
+into the bundled **`bayan`** module, `matrix` / `linalg` /
+`math_advanced` into **`ganita`** (v6.1.25 carve). hapi's only
+moved-module dependency is `cyml`; `src/manifest.cyr` now
+includes `lib/bayan.cyr` and the three `cyml_*` call sites ride
+`bayan`'s `_compat` shims unchanged. Suite still 242 / 66, all
+passing. No surface change — the v1.0 contract stays frozen.
+
 **1.0.1** — 1.0.x-final hardening patch (2026-05-24). Closes the
 1.0.x line: internal syscall naming (`HapiSysno` enum +
 stdlib `SYS_OPEN`/`SYS_CLOSE`), a trail-loss recovery regression
@@ -30,7 +41,7 @@ v0.6.0 (M5), v0.5.0 (M4), v0.4.0 (M3), v0.3.0 (M2), v0.2.0
 
 ## Toolchain
 
-- **Cyrius pin**: `6.0.1` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.2.24` (in `cyrius.cyml [package].cyrius`)
 
 ## Shape
 
@@ -233,7 +244,9 @@ Post-v1.0 implementation work (additive only; tracked in
 Direct (declared in `cyrius.cyml`):
 
 - stdlib — string, fmt, alloc, io, vec, str, slice, syscalls,
-  assert, bench, args, fs, result, toml, cyml, sha1, chrono
+  assert, bench, args, fs, result, bayan, sha1, chrono
+  (`bayan` supplies `cyml`; the standalone `toml` / `cyml`
+  modules were folded into it in the v6.1.25 stdlib carve)
 
 Pending upstream stdlib work tracked in proposals:
 - `cyrius/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md`

@@ -4,6 +4,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-06-19
+
+> Toolchain + vendored-stdlib refresh. No caller-visible surface
+> change; the v1.0 contract (command surface, ADR 0001 manifest
+> schema, ADR 0002 audit-trail format) stays frozen. Suite still
+> **242 assertions / 66 groups**, all passing.
+
+### Changed
+- **Toolchain pin `6.0.1` → `6.2.24`** (`cyrius.cyml`
+  `[package].cyrius`). The wrapper had already drifted to 6.2.24;
+  this aligns the manifest pin with it.
+- **Vendored `lib/` resynced to the 6.2.24 snapshot**
+  (`cyrius lib sync`). Tracks the upstream stdlib carves: the
+  former standalone `base64` / `csv` / `u128` / `bigint` / `toml` /
+  `cyml` / `json` modules are now folded into the bundled **`bayan`**
+  data-format module, and `matrix` / `linalg` / `math_advanced`
+  into **`ganita`** (v6.1.25 carve). The nine now-folded standalone
+  `lib/*.cyr` files were removed; `lib/bayan.cyr` + `lib/ganita.cyr`
+  (and the new platform/tls split-outs) were added.
+- **`src/manifest.cyr` include `lib/cyml.cyr` → `lib/bayan.cyr`.**
+  The three `cyml_*` call sites (`cyml_parse_file_r`,
+  `cyml_doc_header`, `cyml_doc_header_len`) are unchanged —
+  `bayan`'s `_compat` section re-exports the old `cyml_*` names as
+  thin shims over `bayan_cyml_*`, so the parser is byte-for-byte
+  behaviourally identical. Release builds (`CYRIUS_DCE=1`) strip
+  the unused `bayan` format bundles.
+- **`cyrius.cyml` `[deps].stdlib`** — dropped `toml` + `cyml`
+  (no longer stdlib modules), added `bayan`.
+
 ## [1.0.1] - 2026-05-24
 
 > 1.0.x-final hardening patch — closes the 1.0.x patch line. No

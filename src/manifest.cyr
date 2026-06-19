@@ -6,10 +6,15 @@
 # but unparsed.
 #
 # We hand-roll the section dispatch instead of leaning on
-# lib/toml.cyr because that parser treats `[package]` as a no-op
-# (only `[[name]]` triggers a new section there). The ADR locks
-# `[package]` / `[[link]]` as the user-facing shape, so the
-# parser bends to the schema, not the other way around.
+# bayan's generic toml parser. That parser is shape-faithful but
+# schema-blind: it happily accepts any `[section]` / `[[section]]`
+# and key (single-bracket headers parse fine since v6.0.62 — the
+# old "`[package]` is a no-op" limitation is gone). hapi instead
+# enforces the ADR-locked `[package]` / `[[link]]` schema directly
+# — strict-mode rejection of unknown sections/keys
+# (`hapi check --strict`), required-key validation, duplicate-
+# target and `../`-traversal detection. That domain logic is the
+# reason the dispatch lives here, not the bracket counting.
 #
 # Filesystem checks (source paths exist, target paths writable,
 # capability scope) are deferred to M2 `link` — this parser
@@ -17,7 +22,7 @@
 # manifest without touching the scoped root.
 
 include "lib/result.cyr"
-include "lib/cyml.cyr"
+include "lib/bayan.cyr"   # cyml folded into bayan in the v6.1.25 stdlib carve; cyml_* call sites preserved via bayan _compat shims
 include "lib/str.cyr"
 include "lib/vec.cyr"
 include "lib/alloc.cyr"
