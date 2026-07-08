@@ -23,6 +23,7 @@
 #   2  bad usage (unknown verb, unknown / misplaced flag,
 #      missing argument)
 
+include "src/agnos_compat.cyr"
 include "src/cmd/inspect.cyr"
 include "src/cmd/link.cyr"
 include "src/cmd/unlink.cyr"
@@ -42,7 +43,7 @@ include "lib/args.cyr"
 # project root. CLAUDE.md's work loop calls out "version sync"
 # explicitly — bump this string in the same commit as VERSION.
 fn hapi_print_version(): i64 {
-    println("hapi 1.0.2");
+    println("hapi 1.0.3");
     return 0;
 }
 

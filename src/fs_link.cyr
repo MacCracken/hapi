@@ -43,6 +43,33 @@ fn link_probe_target(p): i64 { return load64(p + 8); }
 # (open + getdents) to split FILE vs DIRECTORY, because --force
 # treats those differently.
 fn link_probe(path): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    # agnos exposes no readlink and no lstat to ring-3, so the Linux
+    # readlink discriminator is unavailable. Classify via stat (#33): the
+    # STAT_MODE top nibble is 0x8000=file / 0x4000=dir / 0xA000=symlink,
+    # and stat returns -1 for a missing path (agnos signals errors as -1,
+    # not -errno, so the Linux err==2/err==22 ladder does not apply).
+    #
+    # AGNOS KERNEL LIMITATION (verified in kernel/core/ext2.cyr): agnos
+    # stat FOLLOWS symlinks, including the final path component
+    # (ext2_path_lookup resolves a trailing symlink unconditionally, and
+    # there is no non-following lstat). So a symlink to an existing target
+    # reports as that target's type (0x8000/0x4000), and a symlink to a
+    # missing target makes the lookup fail → HAPI_LP_ABSENT. In practice
+    # the 0xA000 arm below therefore cannot fire on agnos today; it is
+    # retained for forward-compat with a future lstat/readlink surface.
+    # Net effect: link/unlink/adopt on agnos classify file/dir/absent
+    # reliably, but hapi cannot yet SEE an existing symlink or read its
+    # target for the status/reconcile compare — an agnos-side follow-on
+    # (needs an lstat #NN or readlink #NN exposed to ring-3).
+    var st = alloc(STAT_BUFSZ);
+    var rc = sys_stat(path, strlen(path), st);
+    if (rc < 0) { return _fsl_probe_new(HAPI_LP_ABSENT, 0); }
+    var typ = load64(st + STAT_MODE) & 0xF000;
+    if (typ == 0xA000) { return _fsl_probe_new(HAPI_LP_SYMLINK, 0); }
+    if (typ == 0x4000) { return _fsl_probe_new(HAPI_LP_DIRECTORY, 0); }
+    return _fsl_probe_new(HAPI_LP_FILE, 0);
+#else
     var buf = alloc(4096);
     var n = sys_readlink(path, buf, 4096);
     if (n > 0) {
@@ -66,6 +93,7 @@ fn link_probe(path): i64 {
         return _fsl_probe_new(HAPI_LP_FILE, 0);
     }
     return _fsl_probe_new(HAPI_LP_ERROR, 0);
+#endif
 }
 
 # Heap-copy a Str's bytes into a null-terminated cstring.
@@ -124,6 +152,14 @@ fn _fsl_path_dirname(path): i64 {
 # Used as the base for resolving the package-dir argument
 # when the user passes a relative path.
 fn _fsl_getcwd(): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    # agnos has no getcwd syscall (no per-process cwd concept in the
+    # userland ABI). Return "." so relative package-dir args resolve
+    # against the invocation directory the caller already knows.
+    var dot = alloc(2);
+    store8(dot, 46); store8(dot + 1, 0);
+    return dot;
+#else
     var buf = alloc(4096);
     var n = syscall(SYS_GETCWD, buf, 4096);
     if (n < 0) {
@@ -139,6 +175,7 @@ fn _fsl_getcwd(): i64 {
     memcpy(out, buf, len);
     store8(out + len, 0);
     return out;
+#endif
 }
 
 # Resolve `path` (cstring) to an absolute cstring. If already
@@ -347,7 +384,7 @@ fn fsl_mkdir_parents(file_path): i64 {
     while (j <= last_slash) {
         if (load8(tmp + j) == 47) {
             store8(tmp + j, 0);
-            var rc = sys_mkdir(tmp, 0x1C0);
+            var rc = hapi_mkdir(tmp, 0x1C0);
             if (rc < 0) {
                 var err = 0 - rc;
                 if (err != 17) { return rc; }
@@ -357,7 +394,7 @@ fn fsl_mkdir_parents(file_path): i64 {
         j = j + 1;
     }
     store8(tmp + last_slash, 0);
-    var rc = sys_mkdir(tmp, 0x1C0);
+    var rc = hapi_mkdir(tmp, 0x1C0);
     if (rc < 0) {
         var err = 0 - rc;
         if (err != 17) { return rc; }
@@ -371,5 +408,5 @@ fn fsl_mkdir_parents(file_path): i64 {
 fn link_create(target, linkpath): i64 {
     var mkrc = fsl_mkdir_parents(linkpath);
     if (mkrc < 0) { return mkrc; }
-    return sys_symlink(target, linkpath);
+    return hapi_symlink(target, linkpath);
 }

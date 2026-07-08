@@ -58,10 +58,10 @@ fn _hmw_write_atomic(path, buf, n): i64 {
     if (fd < 0) { return 0 - HapiMfwWriteFailed; }
     var wrc = file_write(fd, buf, n);
     if (wrc != n) { file_close(fd); return 0 - HapiMfwWriteFailed; }
-    sys_fsync(fd);
+    hapi_fsync(fd);
     file_close(fd);
 
-    var rrc = sys_rename(tmp, path);
+    var rrc = hapi_rename(tmp, path);
     if (rrc < 0) { return 0 - HapiMfwRenameFailed; }
     return 0;
 }

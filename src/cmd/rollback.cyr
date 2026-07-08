@@ -71,7 +71,7 @@ fn _hrb_reverse_link(entry): i64 {
     if (_hrb_cstr_eq(link_probe_target(probe), expected) == 0) { return 0; }
 
     if (hapi_dry_run() == 1) { return 1; }
-    var urc = sys_unlink(abs_tgt);
+    var urc = hapi_unlink(abs_tgt);
     if (urc < 0) { return 0 - 1; }
     var ar = audit_append_unlink_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
@@ -144,10 +144,10 @@ fn _hrb_reverse_adopt(entry): i64 {
     # back out partial work (the audit trail is the recovery path).
 
     if (hapi_dry_run() == 1) { return 1; }
-    var urc = sys_unlink(abs_tgt);
+    var urc = hapi_unlink(abs_tgt);
     if (urc < 0) { return 0 - 1; }
 
-    var rrc = sys_rename(abs_src, abs_tgt);
+    var rrc = hapi_rename(abs_src, abs_tgt);
     if (rrc < 0) {
         # Re-attach what we just broke so the world is at least
         # consistent with the trail again.

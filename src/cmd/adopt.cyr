@@ -246,7 +246,7 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     }
 
     # 1. Move the file into the package (sys_rename).
-    var rrc = sys_rename(abs_target, abs_source);
+    var rrc = hapi_rename(abs_target, abs_source);
     if (rrc < 0) {
         _hap_eputs("hapi: rename failed (");
         _hap_eputs(abs_target);
@@ -260,7 +260,7 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     var crc = link_create(rel, abs_target);
     if (crc < 0) {
         # Rollback the move on failure.
-        sys_rename(abs_source, abs_target);
+        hapi_rename(abs_source, abs_target);
         _hap_eputs("hapi: symlink failed at ");
         _hap_eputs(abs_target);
         _hap_eputs(" (file restored)\n");
@@ -271,8 +271,8 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     var mwrc = manifest_append_link_row(manifest_path, source_cstr, target_cstr);
     if (mwrc < 0) {
         # Undo symlink + move on failure to keep the world consistent.
-        sys_unlink(abs_target);
-        sys_rename(abs_source, abs_target);
+        hapi_unlink(abs_target);
+        hapi_rename(abs_source, abs_target);
         _hap_eputs("hapi: manifest edit failed; filesystem restored\n");
         return 1;
     }

@@ -104,7 +104,7 @@ fn _audit_mkdir_parents(file_path): i64 {
     while (j <= last_slash) {
         if (load8(tmp + j) == 47) {
             store8(tmp + j, 0);
-            var rc = sys_mkdir(tmp, 0x1C0);   # 0700
+            var rc = hapi_mkdir(tmp, 0x1C0);   # 0700
             if (rc < 0) {
                 # EEXIST = 17. Anything else is fatal.
                 var err = 0 - rc;
@@ -116,7 +116,7 @@ fn _audit_mkdir_parents(file_path): i64 {
     }
     # Final mkdir for the parent itself (everything up to last_slash).
     store8(tmp + last_slash, 0);
-    var rc = sys_mkdir(tmp, 0x1C0);
+    var rc = hapi_mkdir(tmp, 0x1C0);
     if (rc < 0) {
         var err = 0 - rc;
         if (err != 17) { return rc; }

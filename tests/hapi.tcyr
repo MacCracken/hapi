@@ -1,6 +1,7 @@
 # hapi test suite
 # Stdlib auto-included via cyrius.cyml
 
+include "src/agnos_compat.cyr"
 include "src/manifest.cyr"
 include "src/audit.cyr"
 include "src/audit_reader.cyr"

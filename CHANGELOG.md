@@ -4,6 +4,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-07-08
+
+> agnos target support + toolchain/vendored-stdlib refresh
+> (cyrius `6.2.24` → `6.4.22`). hapi now compiles `--agnos` and runs
+> under mirshi (>= 1.10.2), unblocking it in the agnos-dev docker
+> image. No caller-visible surface change; the v1.0 contract (command
+> surface, ADR 0001 manifest schema, ADR 0002 audit-trail format)
+> stays frozen. Suite still **242 assertions / 66 groups**, all passing.
+
+### Added
+- **agnos target support** (`cyrius build --agnos src/main.cyr`).
+  New `src/agnos_compat.cyr` centralizes the syscall-ABI divergences
+  behind thin wrappers
+  (`hapi_unlink`/`hapi_rename`/`hapi_fsync`/`hapi_symlink`/`hapi_mkdir`)
+  that forward verbatim on Linux/macOS. `link_probe` classifies via
+  `stat` (#33) on agnos; `hapi_symlink` uses the native agnos
+  `sys_symlink` (#63); `hapi_fsync` maps to `sync` (#12); `hapi_mkdir`
+  bridges the `(path, mode)` → `(path, pathlen)` ABI and treats an
+  existing directory as success.
+
+### Changed
+- **Toolchain pin `6.2.24` → `6.4.22`** (`cyrius.cyml`
+  `[package].cyrius`) and **vendored `lib/` resynced to the 6.4.22
+  snapshot** (`cyrius lib sync --full`, 98 files). The refresh brings
+  the agnos peer's native `sys_symlink` — so `hapi_symlink` calls it
+  directly rather than a locally-defined syscall number — and an
+  agnos-aware `file_append_locked` (LOCK_EX hold + explicit `SEEK_END`,
+  since the agnos kernel does not honor `AO_APPEND` yet), so hapi no
+  longer ships its own agnos append shim.
+- **`src/fs_link.cyr` — per-target syscall paths.** `link_probe` uses
+  `stat` (#33) mode-nibble classification on agnos (agnos has no
+  `readlink`); the Linux `readlink` + `getdents64` path is unchanged
+  behind `#else`. `_fsl_getcwd` returns `"."` on agnos (no `getcwd`
+  syscall). `SYS_GETDENTS64` / `SYS_GETCWD` references are now
+  Linux-gated so the agnos build resolves.
+
+### Known limitations (agnos)
+- **Symlink introspection is unavailable on agnos.** agnos exposes no
+  `lstat` and no `readlink` to ring-3, and its `stat` follows the final
+  symlink component (kernel `ext2_path_lookup`). So on agnos hapi cannot
+  yet SEE an existing symlink or read its target: a symlink to an
+  existing target classifies as that target's type, and its target
+  cannot be compared in `status`/reconcile. Symlink *creation* (#63)
+  works. Lifting this needs an agnos-side `lstat`/`readlink` surface.
+
 ## [1.0.2] - 2026-06-19
 
 > Toolchain + vendored-stdlib refresh. No caller-visible surface

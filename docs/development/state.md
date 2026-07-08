@@ -5,6 +5,21 @@
 
 ## Version
 
+**1.0.3** — agnos target + toolchain/vendored-stdlib refresh
+(2026-07-08). Cyrius pin `6.2.24` → `6.4.22`; `lib/` resynced to the
+6.4.22 snapshot (98 files). hapi now builds `--agnos` and runs under
+mirshi (>= 1.10.2), unblocking it in the agnos-dev docker image. New
+`src/agnos_compat.cyr` shims the syscall-ABI divergences
+(`hapi_unlink`/`hapi_rename`/`hapi_fsync`/`hapi_symlink`/`hapi_mkdir`,
+Linux-verbatim on non-agnos); `fs_link.cyr` `link_probe` classifies
+via `stat` (#33) on agnos and `_fsl_getcwd` returns `"."`. The
+refresh brought the peer's native `sys_symlink` (#63, now called
+directly) and an agnos-aware `file_append_locked` (LOCK_EX +
+SEEK_END). Known gap: agnos exposes no `lstat`/`readlink` to ring-3
+and its `stat` follows symlinks, so hapi can create but not yet
+introspect symlinks there (agnos-side follow-on). Suite still 242 /
+66, all passing. No surface change — the v1.0 contract stays frozen.
+
 **1.0.2** — toolchain + vendored-stdlib refresh (2026-06-19).
 Cyrius pin `6.0.1` → `6.2.24`; `lib/` resynced to the 6.2.24
 snapshot. Tracks the upstream stdlib carves — `cyml` (with

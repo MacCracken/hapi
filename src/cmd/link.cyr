@@ -294,7 +294,7 @@ fn cmd_link(pkg_arg, force): i64 {
                 }
             }
             if (hapi_dry_run() == 0) {
-                var urc = sys_unlink(abs_tgt);
+                var urc = hapi_unlink(abs_tgt);
                 if (urc < 0) {
                     _hlnk_eputs("hapi: could not remove existing ");
                     eprint(abs_tgt, strlen(abs_tgt));

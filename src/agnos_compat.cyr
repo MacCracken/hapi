@@ -1,0 +1,90 @@
+# agnos_compat.cyr — target-portability shims for the agnos userland.
+#
+# hapi's syscall surface was written against Linux (with macOS/Windows
+# peers). A handful of filesystem operations diverge on agnos
+# (CYRIUS_TARGET_AGNOS): the same operation takes different syscall
+# arities/argument-semantics, or names a syscall agnos lacks entirely.
+# These thin wrappers centralize the divergence so the call sites in cmd/*,
+# manifest_write, fs_link and audit stay target-clean. On every non-agnos
+# target each wrapper forwards verbatim to the original Linux/mac call, so
+# behavior there is unchanged (the compiler folds the indirection away).
+#
+# The agnos syscall ABI referenced below is documented in the agnos repo's
+# docs/development/agnos-userland-abi.md.
+
+include "lib/syscalls.cyr"
+include "lib/string.cyr"
+include "lib/io.cyr"
+
+# unlink(path). Linux: unlink(path). agnos: unlink(path, pathlen) — the
+# path length is an explicit argument (no NUL-scan in the kernel).
+fn hapi_unlink(path): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    return sys_unlink(path, strlen(path));
+#else
+    return sys_unlink(path);
+#endif
+}
+
+# rename(old -> new). Linux: rename(old, new). agnos: rename(old, oldlen,
+# new, newlen) — 4-arg, a4 in r10.
+fn hapi_rename(old, new): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    return sys_rename(old, strlen(old), new, strlen(new));
+#else
+    return sys_rename(old, new);
+#endif
+}
+
+# fsync(fd). agnos has no per-fd fsync; SYS_SYNC (#12) flushes globally,
+# which still guarantees the just-written manifest/audit bytes reach disk
+# before the subsequent rename durability point. Linux keeps precise
+# per-fd fsync.
+fn hapi_fsync(fd): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    return sys_sync();
+#else
+    return sys_fsync(fd);
+#endif
+}
+
+# symlink(target, linkpath). Linux: symlink(target, linkpath). agnos:
+# symlink(target, targetlen, linkpath, linkpathlen) — the native peer
+# wrapper (agnos syscall #63, landed agnos 1.51.0 / cyrius 6.4.x stdlib).
+fn hapi_symlink(target, linkpath): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    return sys_symlink(target, strlen(target), linkpath, strlen(linkpath));
+#else
+    return sys_symlink(target, linkpath);
+#endif
+}
+
+# mkdir(path, mode). Linux: mkdir(path, mode). agnos: mkdir(path, pathlen)
+# — SAME ARITY as Linux but the 2nd arg is the path length, not the mode,
+# so this needs a real branch (a bare call miscompiles silently, no warning).
+# agnos has no mode arg; permissions are fixed by the kernel.
+#
+# EEXIST handling: fsl_mkdir_parents / audit treat Linux EEXIST (errno 17)
+# as success, but agnos signals every error as -1 with no errno, so that
+# `err != 17` guard cannot fire on agnos. Real agnos ext2 mkdir is
+# idempotent (existing dir → success), but under mirshi mkdir maps to the
+# host FS where an existing dir returns -1. So on a failure, confirm via
+# stat that the path is already a directory and report success — matching
+# the Linux idempotent-parents behavior on both real agnos and mirshi.
+fn hapi_mkdir(path, mode): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    var rc = sys_mkdir(path, strlen(path));
+    if (rc >= 0) { return 0; }
+    var st = alloc(STAT_BUFSZ);
+    if (sys_stat(path, strlen(path), st) < 0) { return rc; }
+    if ((load64(st + STAT_MODE) & 0xF000) == 0x4000) { return 0; }
+    return rc;
+#else
+    return sys_mkdir(path, mode);
+#endif
+}
+
+# NOTE: `file_append_locked` is NOT shimmed here. As of the cyrius 6.4.x
+# stdlib, lib/io.cyr provides an agnos-aware implementation (LOCK_EX hold +
+# explicit SEEK_END, since the agnos kernel does not honor AO_APPEND yet) —
+# more correct than an append-flag open. Defining one here would shadow it.
