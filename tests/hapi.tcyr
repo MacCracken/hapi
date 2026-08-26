@@ -64,7 +64,24 @@ fn test_minimal_manifest() {
 fn test_three_links() {
     test_group("manifest: 3-link package (M1 acceptance)");
 
-    var src = "[package]\nname = \"dotfiles-zsh\"\nversion = \"1.0.0\"\ndescription = \"zsh\"\nignore = [\"*.bak\", \".DS_Store\"]\n\n[[link]]\nsource = \"zshrc\"\ntarget = \".zshrc\"\n\n[[link]]\nsource = \"zshenv\"\ntarget = \".zshenv\"\n\n[[link]]\nsource = \"config/zsh\"\ntarget = \".config/zsh\"\n";
+    var src = "[package]
+name = \"dotfiles-zsh\"
+version = \"1.0.0\"
+description = \"zsh\"
+ignore = [\"*.bak\", \".DS_Store\"]
+
+[[link]]
+source = \"zshrc\"
+target = \".zshrc\"
+
+[[link]]
+source = \"zshenv\"
+target = \".zshenv\"
+
+[[link]]
+source = \"config/zsh\"
+target = \".config/zsh\"
+";
     var r = hapi_mf_parse_header_r(src, strlen(src));
     assert_eq(is_ok(r), 1, "parses cleanly");
     var m = load64(r + 8);
@@ -112,7 +129,16 @@ fn test_validation_errors() {
         HapiMfMissingTarget);
 
     _expect_err("duplicate target",
-        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \".same\"\n[[link]]\nsource = \"b\"\ntarget = \".same\"\n",
+        "[package]
+name = \"x\"
+version = \"1.0\"
+[[link]]
+source = \"a\"
+target = \".same\"
+[[link]]
+source = \"b\"
+target = \".same\"
+",
         HapiMfDuplicateTarget);
     return 0;
 }
@@ -145,7 +171,14 @@ fn test_path_traversal() {
 fn test_comments_and_blanks() {
     test_group("manifest: comments and blank lines");
 
-    var src = "# a comment\n\n[package]   # inline comment-ish, ignored\nname = \"x\"\n\n# another comment\nversion = \"1.0\"\n";
+    var src = "# a comment
+
+[package]   # inline comment-ish, ignored
+name = \"x\"
+
+# another comment
+version = \"1.0\"
+";
     var r = hapi_mf_parse_header_r(src, strlen(src));
     assert_eq(is_ok(r), 1, "comments do not break parsing");
     return 0;
@@ -1139,7 +1172,14 @@ fn test_strict_mode_rejects_unknown_key() {
 fn test_strict_mode_rejects_unknown_link_key() {
     test_group("check --strict: unknown key in [[link]] is rejected");
 
-    var src = "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \".a\"\nmode = \"copy\"\n";
+    var src = "[package]
+name = \"x\"
+version = \"1.0\"
+[[link]]
+source = \"a\"
+target = \".a\"
+mode = \"copy\"
+";
 
     var r1 = hapi_mf_parse_header_r(src, strlen(src));
     assert_eq(is_ok(r1), 1, "lenient parser tolerates `mode`");
@@ -1155,7 +1195,15 @@ fn test_strict_mode_rejects_unknown_link_key() {
 fn test_strict_mode_accepts_clean_manifest() {
     test_group("check --strict: well-formed manifest still parses");
 
-    var src = "[package]\nname = \"x\"\nversion = \"1.0\"\ndescription = \"d\"\nignore = [\"*.bak\"]\n[[link]]\nsource = \"a\"\ntarget = \".a\"\n";
+    var src = "[package]
+name = \"x\"
+version = \"1.0\"
+description = \"d\"
+ignore = [\"*.bak\"]
+[[link]]
+source = \"a\"
+target = \".a\"
+";
 
     hapi_mf_set_strict(1);
     var r = hapi_mf_parse_header_r(src, strlen(src));
@@ -1780,7 +1828,6 @@ fn test_backup_disambiguates_colliding_basenames() {
     return 0;
 }
 
-
 # F-014: hapi_mf_canonicalize accepted `cap` and never read it, so a
 # manifest whose canonical form outgrew the caller's buffer overflowed
 # the bump heap into the live `sorted` vec and took link / sync / adopt
@@ -1930,7 +1977,12 @@ fn test_canonical_hash_ignores_comments_and_whitespace() {
     test_group("canonical: cosmetic edits collide");
 
     var a = "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"s\"\ntarget = \".t\"\n";
-    var b = "# a leading comment\n\n[package]\n   # inline   \nname    =    \"x\"\nversion = \"1.0\"\n\n\n[[link]]\nsource = \"s\"\ntarget = \".t\"\n\n";
+    # Kept as an escaped one-liner on purpose: this fixture's whole job is
+    # to carry cosmetic noise — trailing whitespace after `# inline`, and a
+    # two-blank-line run — and a real multi-line literal cannot hold either
+    # without tripping the very lint rules the fixture exists to be immune
+    # to.
+    var b = "# a leading comment\n\n[package]\n   # inline   \nname    =    \"x\"\nversion = \"1.0\"\n\n\n[[link]]\nsource = \"s\"\ntarget = \".t\"\n\n";   #skip-lint
     var ha = _test_canonical_hash_of(a);
     var hb = _test_canonical_hash_of(b);
     assert(ha != 0, "a hashes");
@@ -1942,8 +1994,26 @@ fn test_canonical_hash_ignores_comments_and_whitespace() {
 fn test_canonical_hash_row_reorder_collides() {
     test_group("canonical: row order does not affect hash");
 
-    var a = "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \".a\"\n[[link]]\nsource = \"b\"\ntarget = \".b\"\n";
-    var b = "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"b\"\ntarget = \".b\"\n[[link]]\nsource = \"a\"\ntarget = \".a\"\n";
+    var a = "[package]
+name = \"x\"
+version = \"1.0\"
+[[link]]
+source = \"a\"
+target = \".a\"
+[[link]]
+source = \"b\"
+target = \".b\"
+";
+    var b = "[package]
+name = \"x\"
+version = \"1.0\"
+[[link]]
+source = \"b\"
+target = \".b\"
+[[link]]
+source = \"a\"
+target = \".a\"
+";
     var ha = _test_canonical_hash_of(a);
     var hb = _test_canonical_hash_of(b);
     assert_eq(_test_cstr_eq(ha, hb), 1, "rows reordered yield identical hash");

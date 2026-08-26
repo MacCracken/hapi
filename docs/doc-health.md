@@ -19,7 +19,7 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ## At a glance — 2026-08-25 inventory (1.0.4; v1.0 contract frozen)
 
-**45 markdown files** across the repo (root + docs tree), counted
+**49 markdown files** across the repo (root + docs tree), counted
 2026-08-25 (`find . -name '*.md' -not -path './.git/*' -not -path
 './lib/*'`) — the standing figure had read `44` and was one short.
 The 2026-05-24 1.0.x-final arc added two issues,
@@ -29,11 +29,12 @@ v1.0 inventory; the 2026-08-25 1.0.4 pass adds no new doc files.
 | Bucket | Count | What it means |
 |---|---|---|
 | ✅ **Fresh / touched in current cycle** | ~38 | state.md / roadmap.md / CHANGELOG / 5 ADRs / **15 guides** / 2 example files / architecture README / adr README / issues README / **audit/ tier: README + 2026-05-23 + 2026-05-24 passes** / **2 new issues (2026-05-24)** / benchmarks.md. |
-| 🟡 **Stale — refresh in place** | 0 | None flagged. |
-| 🟠 **Read-through outstanding** | 1 | The twenty open findings in `audit/2026-08-25-audit.md`. They are documented, severity-ranked and scoped to the next arc — but they are live in the shipped 1.0.5, and this ledger should not read as though the tree is clean. |
+| 🟡 **Stale — refresh in place** | 0 | None flagged. `roadmap.md`'s kavach bullet was the last known-false entry and was withdrawn 2026-08-25 (the dependency is a sandbox-execution framework with no capability API). |
+| 🟠 **Read-through outstanding** | 0 | Cleared 2026-08-25: the twenty open findings were bubbled out of the audit doc into tracked arc work — a **1.0.x hardening arc** in `development/roadmap.md` bucketed by blast radius, three new issue files for the Tier 1 and Tier 2 clusters, and a pointer from `state.md`. They remain live in the shipped 1.0.5; they are no longer only recorded in an audit appendix. |
 | 🔵 **Probably evergreen** | ~3 | LICENSE / SECURITY.md / CODE_OF_CONDUCT.md — load-bearing root files; re-read pass at v1.0, not per-release. |
 | 📦 **Archive — frozen by design** | 3 | Three M7-resolved issues moved to `issues/archived/` (status-exit-1, upstream-drift, no-backup-to). |
-| ❓ **Open strategic question** | 0 | None — four open issues (`sync-prune`, `cap-check-symlink-escape`, `no-arg-sync-bootstrap-recovery`, `audit-trail-lost-on-state-dir-wipe`) are all scoped + deferred (post-v1.0 / kavach / accepted-boundary). |
+| ❓ **Open strategic question** | 1 | **Does the additive v1.x bucket stay frozen until the 1.0.x hardening arc closes?** roadmap.md and state.md now both say yes — growth does not resume while a Tier 1 finding (silent data loss or a wrong destructive action) is open. That is a maintainer call worth revisiting if the arc runs long. |
+| ❓ _(prior)_ | 0 | None — four open issues (`sync-prune`, `cap-check-symlink-escape`, `no-arg-sync-bootstrap-recovery`, `audit-trail-lost-on-state-dir-wipe`) are all scoped + deferred (post-v1.0 / kavach / accepted-boundary). |
 
 Numbers approximate; rolls up from the per-tier tables below.
 
@@ -88,11 +89,14 @@ Numbers approximate; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `state.md` | 2026-08-25 | ✅ Fresh | **Rotates every release.** 1.0.4 pass: new Version paragraph (pin `6.5.35`, 108-file `lib/`, the agnos `readlink` closure, the rollback fix, `CYRIUS_PKG_VERSION`); Toolchain section gained a vendored-`lib/` line; `src/agnos_compat.cyr` added to the Source list; Dependencies gained the agnos-syscall-peer arc. Tests anchored at **246 / 71** — the group figure had read a stale `66` since 1.0.1 while the per-tier breakdown summed to the real count; both now agree. Also corrected the 1.0.2 "arch-correct on aarch64" claim, which was not true until 1.0.4. |
-| `roadmap.md` | 2026-05-23 | ✅ Fresh | **Fully rewritten 2026-05-23 post-v1.0 sweep.** M0–M8 milestone narrative dropped; restructured as v1.x maintenance / additive-growth bucket + v2.0 Breaking-candidate bucket + permanent out-of-scope list + a brief v1.0-sign-off pointer at the release-notes doc. Each v2 candidate carries the rationale that earns it a major bump. |
+| `roadmap.md` | 2026-08-25 | ✅ Fresh | Gained the **1.0.x hardening arc** (2026-08-25) ahead of the additive bucket: twenty open findings from the P(-1) sweep, bucketed Tier 1 / Tier 2 / Tier 3 / target-conditional, with exit criteria. The kavach migration bullet was withdrawn as factually void. Prior: | **Fully rewritten 2026-05-23 post-v1.0 sweep.** M0–M8 milestone narrative dropped; restructured as v1.x maintenance / additive-growth bucket + v2.0 Breaking-candidate bucket + permanent out-of-scope list + a brief v1.0-sign-off pointer at the release-notes doc. Each v2 candidate carries the rationale that earns it a major bump. |
 | `issues/README.md` | 2026-05-20 | ✅ Fresh | Filing conventions for hapi-side dogfood papercuts; severity guide; triage + archival lifecycle; cross-repo upstream-issue pointer. |
 | `issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md` | 2026-05-20 | 🟡 Open | Low severity; M7 dogfood papercut. Deferred to post-v1.0 per existing roadmap entry. |
 | `issues/2026-05-23-cap-check-symlink-escape.md` | 2026-05-23 | 🟡 Open | **New 2026-05-23.** Medium severity; F-002 from the P(-1) audit. `--root` cap-check is lexical-only; symlinked path components escape. Deferred to the kavach migration per ADR 0005. Note: 1.0.4 gives hapi a working cross-target `readlink` shim — the primitive a per-component resolver needs — but the sanctioned fix is still kavach. |
 | `issues/2026-05-24-no-arg-sync-bootstrap-recovery.md` | 2026-05-24 | 🟡 Open | Low severity; dogfood papercut from a drive-move recovery. Needs manifest discovery; post-v1.0 additive work. |
+| `issues/2026-08-25-trail-reader-head-cap.md` | 2026-08-25 | 🟡 Open | **New 2026-08-25.** High. F-007 + F-016 + F-017, all in `audit_read`: the 256 KB head cap makes `rollback` reverse the oldest still-live links at exit 0 once the trail outgrows it. Tier 1 of the 1.0.x hardening arc. |
+| `issues/2026-08-25-manifest-write-integrity.md` | 2026-08-25 | 🟡 Open | **New 2026-08-25.** High. F-012 + F-021 + F-028: the unlocked manifest read-modify-write commits every filesystem mutation and drops the row that records it. Needs a shell harness to regression-test (`.tcyr` cannot fork). Tier 1. |
+| `issues/2026-08-25-reporting-and-idempotency.md` | 2026-08-25 | 🟡 Open | **New 2026-08-25.** Medium. F-022/F-023/F-024/F-026/F-025 — `status`, `list` and `sync` reporting a world that is not on disk, incl. the dangling-link blind spot in the verb F-006 designates as the post-recovery source of truth. Tier 2. |
 | `issues/2026-05-24-audit-trail-lost-on-state-dir-wipe.md` | 2026-05-24 | 🟡 Open | Medium severity; F-006 accepted boundary. `status` is the post-recovery source of truth, not `list` / `rollback`. Not a bug awaiting a fix — a documented design edge. |
 | `issues/archived/2026-05-20-status-exit-1-short-circuits-script-chains.md` | 2026-05-23 | 📦 Archived | Resolved in Unreleased via Tier-1 guide-doc note (`docs/guides/status.md` *Exit-1 is an assertion, not a predicate* section). |
 | `issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md` | 2026-05-23 | 📦 Archived | Resolved in Unreleased via Tier-1 new guide `docs/guides/upstream-drift.md`. Tier-2/3 remain post-v1.0 candidates. |

@@ -83,18 +83,20 @@ fn link_probe(path): i64 {
         # Path exists, not a symlink. Distinguish file vs directory
         # via the same trick is_dir uses: open + getdents. ENOTDIR
         # (errno 20) on getdents = regular file.
-        # sys_open, not a bare syscall(SYS_OPEN, ...): aarch64 Linux has
-        # no open(2), so lib/syscalls_aarch64_linux.cyr defines no
-        # SYS_OPEN at all (56 there is `openat`, and 56 on x86_64 is
-        # `io_setup` — a bare number would be worse than undefined). The
-        # named wrapper routes through SYS_OPENAT + AT_FDCWD there and
-        # SYS_OPEN here. This arm is the non-agnos `#else`, so agnos's
-        # differently-shaped sys_open(name, namelen, flags) is out of reach.
-        var fd = sys_open(path, 0, 0);            # O_RDONLY
+        # io.cyr's portable wrappers, not raw syscalls. Every target
+        # spells these differently — aarch64 Linux has no open(2) at all
+        # (56 there is `openat`, while 56 on x86_64 is `io_setup`, so a
+        # bare number is worse than an undefined one), and agnos's
+        # sys_open is (name, namelen, flags) with a 3-arg getdents. A
+        # bare `syscall(SYS_OPEN, ...)` here is exactly what kept
+        # `--aarch64` from building between 1.0.2 and 1.0.4, so this
+        # block stays on the wrappers even though it sits in the
+        # non-agnos `#else` arm.
+        var fd = file_open(path, O_RDONLY, 0);
         if (fd < 0) { return _fsl_probe_new(HAPI_LP_FILE, 0); }
         var dbuf = alloc(32);
-        var gd = syscall(SYS_GETDENTS64, fd, dbuf, 32);
-        syscall(SYS_CLOSE, fd);
+        var gd = xgetdents(fd, dbuf, 32);
+        file_close(fd);
         if (gd >= 0) { return _fsl_probe_new(HAPI_LP_DIRECTORY, 0); }
         return _fsl_probe_new(HAPI_LP_FILE, 0);
     }

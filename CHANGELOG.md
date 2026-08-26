@@ -101,24 +101,49 @@ _Nothing yet._
   because CI built one target. That matters more now that cyrius 6.5.1 makes
   a wrong argument count a hard error rather than a warning, so an unbuilt
   target can break on drift the x86_64 build accepts.
-- **`cyrius lint` is clean tree-wide** — six untracked deferrals and two
-  over-long lines cleared. Two of the deferrals were the linter matching
-  `XXX` inside the `\uXXXX` escape notation and are marked
-  `#skip-lint`; two were real deferrals now carrying their tracking
+- **`cyrius lint` is clean across `src/` AND `tests/`** — 0 deferrals,
+  0 warnings, 0 notes. Six untracked deferrals cleared: two were the
+  linter matching `XXX` inside the `\uXXXX` escape notation
+  (`#skip-lint`), two were real deferrals that now carry their tracking
   cross-reference (`cap.cyr` → F-002, `cmd/sync.cyr` → the sync-prune
-  issue); two were stale prose describing milestones that shipped long
-  ago. No behaviour change.
+  issue), two were stale prose describing milestones that shipped long
+  ago. Ten over-long lines and a stray blank-line run cleared: seven of
+  them were manifest fixtures in `tests/hapi.tcyr` written as one long
+  escaped string, now **real multi-line literals** — the fixture reads
+  like the manifest it is, at a third the line length. The one fixture
+  that stays escaped is the cosmetic-insensitivity case, whose whole job
+  is to carry trailing whitespace and a two-blank-line run; it is
+  `#skip-lint` with the reason written next to it.
+- **`link_probe`'s directory discrimination moved onto `io.cyr`'s
+  portable wrappers** — `file_open` / `xgetdents` / `file_close` instead
+  of `sys_open` + two raw `syscall(...)` numbers. Clears the last two
+  lint notes and, more to the point, retires the last instance of the
+  exact pattern that kept `--aarch64` from building between 1.0.2 and
+  1.0.4. Behaviour is unchanged on every target; the block still sits in
+  the non-agnos `#else` arm.
+- **The sweep's open findings are tracked as arc work, not an audit
+  appendix.** `docs/development/roadmap.md` gained a **1.0.x hardening
+  arc** ahead of the additive v1.x bucket, bucketing all twenty by blast
+  radius (Tier 1 silent data loss / Tier 2 wrong reporting / Tier 3
+  hardening / target-conditional) with explicit exit criteria: additive
+  growth does not resume while a Tier 1 finding is open. Three new issue
+  files carry the Tier 1 and Tier 2 clusters, and `state.md` points at
+  them. The roadmap's kavach migration bullet — the dep gate the audit
+  found void — is withdrawn in place with the reason.
 
 ### Known limitations
 - **Twenty audit findings from this sweep remain open in the shipped
-  1.0.5** and are listed in
-  [`docs/audit/2026-08-25-audit.md`](docs/audit/2026-08-25-audit.md).
-  The three that most deserve the next arc: **F-007**, the trail
-  reader's 256 KB head cap, which makes `rollback` reverse the wrong
-  window once the trail outgrows it; **F-012**, the unlocked manifest
-  read-modify-write, under which concurrent `adopt` drops rows; and
-  **F-015**, a symlinked intermediate component in a manifest target
-  escaping `$HOME` with no `--root`.
+  1.0.5.** They are recorded in
+  [`docs/audit/2026-08-25-audit.md`](docs/audit/2026-08-25-audit.md) and
+  scheduled as the **1.0.x hardening arc** in
+  [`docs/development/roadmap.md`](docs/development/roadmap.md). Tier 1,
+  where the failure is silent data loss or a wrong destructive action:
+  **F-007**, the trail reader's 256 KB head cap, which makes `rollback`
+  reverse the *oldest still-live* links once the trail outgrows it;
+  **F-012**, the unlocked manifest read-modify-write, under which
+  concurrent `adopt` commits every filesystem mutation and drops the row
+  recording it; and **F-015**, a symlinked intermediate component in a
+  manifest target escaping `$HOME` with no `--root` at all.
 - **F-002's dependency gate is void.** ADR 0005 parks the symlink-escape
   fix on kavach exposing a stable `cap_check(scope, action)` API.
   kavach is at 3.12.3 and is a *sandbox execution* framework — ten

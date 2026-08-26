@@ -203,8 +203,11 @@ opt-in pre-`--force` snapshot.
   against `HAPI_ALLOWED_ROOTS` (path-component boundary,
   not byte boundary; each entry also lex-normalized). Test
   hooks `cap_set_home` and `cap_set_allowlist` for unit tests.
-  Symlink-aware resolution deferred per F-002 to the kavach
-  migration.
+  Symlink-aware resolution is still open as F-002 — hapi-owned
+  work as of the 2026-08-25 audit, not a kavach dep gate. Also
+  owns `cap_within_scope(path, scope_root)`, the containment
+  predicate for a path hapi is about to WRITE (added 1.0.5 for
+  F-011; `adopt`'s `<file>` argument is a write target).
 - `src/cli.cyr` — owns the process-wide `_hapi_dry_run`
   flag. Setter `hapi_set_dry_run(0|1)` and getter
   `hapi_dry_run()`. Every mutating cmd checks the flag
@@ -224,12 +227,14 @@ Post-v1.0 implementation work (additive only; tracked in
   needs a way to recover pkg_dir from a live audit entry
   (additive trail field, or a tree-walk heuristic). Internal;
   no signature change to `cmd_sync`.
-- kavach swap inside `src/cap.cyr` — once kavach exposes a
-  stable capability API, the env-var allowlist gives way to
-  per-component symlink-aware resolution. Closes the F-002
-  finding from
-  [`docs/audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md);
-  `cap_check_root_r(path) -> Result` signature unchanged.
+- per-component symlink-aware resolution inside `src/cap.cyr`,
+  replacing the lexical-only normalization. Closes F-002 and
+  F-015. **No longer a kavach dep gate** — kavach 3.12.3 is a
+  sandbox-execution framework with no capability API, so this is
+  hapi's own work; the primitive it needs (`hapi_readlink`) is
+  portable across all three targets as of 1.0.4.
+  `cap_check_root_r(path) -> Result` signature unchanged. See
+  [`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md).
 
 _(Done in 1.0.2: the stdlib `sys_rename` / `sys_fsync` /
 `sys_fdatasync` wrappers landed in cyrius 6.2.x and replaced the
@@ -361,10 +366,12 @@ absent on agnos and not needed: `lstat` (readlink no-follows the
 final component) and `getcwd` (`_fsl_getcwd` returns `"."`).
 
 v1.0 ships the env-var allowlist stopgap (`HAPI_ALLOWED_ROOTS`)
-for non-`$HOME` roots; the kavach capability service replaces
-it inside `src/cap.cyr` once kavach exposes a stable API.
-Internal-only swap — `cap_check_root_r(path) -> Result` is
-frozen.
+for non-`$HOME` roots. It was to be replaced by "the kavach
+capability service"; the 2026-08-25 audit established there is no
+such service to wait for, so the replacement — per-component
+symlink-aware resolution — is hapi's own work in the 1.0.x
+hardening arc. Internal-only swap either way:
+`cap_check_root_r(path) -> Result` is frozen.
 
 ## Consumers
 
@@ -378,18 +385,39 @@ means downstream packagers (zugot recipes) and user manifests.
 
 ## Next
 
-**v1.0.0 has shipped.** The contract (command surface, manifest
-schema, audit-trail format) is frozen. The roadmap from here
-forward is the **post-v1.0 / v1.x** backlog — additive growth
-only, with each item tracked to either an open issue, an ADR
-deferral, or a roadmap *Deferred* entry.
+⚠ **The 1.0.x hardening arc is open, and it comes first.** The
+2026-08-25 P(-1) sweep fixed six HIGH defects in 1.0.5 and left
+**twenty findings live in the shipped tree**. They are enumerated
+in [`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md),
+bucketed by blast radius in
+[`roadmap.md`](roadmap.md#v10x--hardening-arc-open-from-the-2026-08-25-p-1-sweep),
+and the Tier 1 items carry their own issue files:
+
+- [`issues/2026-08-25-trail-reader-head-cap.md`](issues/2026-08-25-trail-reader-head-cap.md)
+  — F-007 / F-016 / F-017: `rollback` reverses the wrong window
+  once the trail passes 256 KB.
+- [`issues/2026-08-25-manifest-write-integrity.md`](issues/2026-08-25-manifest-write-integrity.md)
+  — F-012 / F-021 / F-028: the unlocked manifest read-modify-write.
+- [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md)
+  — F-002 / F-015, re-scoped: per-component symlink resolution, now
+  hapi-owned since the kavach dep gate turned out to be void.
+- [`issues/2026-08-25-reporting-and-idempotency.md`](issues/2026-08-25-reporting-and-idempotency.md)
+  — Tier 2: `status` / `list` / `sync` reporting a world that is not
+  on disk.
+
+**v1.0.0 has shipped** and the contract (command surface, manifest
+schema, audit-trail format) is frozen. The additive **v1.x** backlog
+below is on hold behind the arc's exit criteria — growth does not
+resume while a Tier 1 finding is open.
 
 Candidate post-v1.0 work (ordered loosely by maturity):
 
-- **kavach migration** — internal swap inside `src/cap.cyr`
-  when the kavach capability service ships. Closes F-002
-  (`issues/2026-05-23-cap-check-symlink-escape.md`) without
-  touching the `cap_check_root_r` API.
+- **per-component symlink resolution** — internal swap inside
+  `src/cap.cyr`, closing F-002 and F-015 without touching the
+  `cap_check_root_r` API. Was filed as the "kavach migration";
+  the dep gate is void (see the 2026-08-25 audit), so this is
+  Tier 1 of the 1.0.x hardening arc.
+  (`issues/2026-05-23-cap-check-symlink-escape.md`)
 - ~~**stdlib syscall wrappers** — `sys_rename` / `sys_fsync` /
   `sys_fdatasync`~~ **(done, 1.0.2)** — landed in cyrius 6.2.x;
   the in-source `syscall(N, ...)` calls and the `HapiSysno`

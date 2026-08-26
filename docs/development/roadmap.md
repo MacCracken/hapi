@@ -16,9 +16,111 @@
 - **v2.0** — candidates that *must* earn a major bump because
   they break a frozen surface. None scheduled.
 
+⚠ **The 1.0.x hardening arc is open** (below, ahead of the v1.x
+bucket). The 2026-08-25 P(-1) sweep fixed six HIGH defects in 1.0.5 and
+left **twenty findings live in the shipped tree** — three of them Tier 1,
+where the failure is silent data loss or a wrong destructive action.
+Additive v1.x work is on hold behind that arc's exit criteria: growth
+does not resume while `rollback` can still reverse the wrong window.
+
 The M0 → M8 milestone arc is closed. Future work is sized in
 terms of *what bucket it belongs to*, not which sprint it
 runs in.
+
+## v1.0.x — hardening arc (open from the 2026-08-25 P(-1) sweep)
+
+> **This bucket is repairs, not growth.** The 1.0.5 sweep
+> ([`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md))
+> fixed six HIGH defects and left **twenty findings open in the shipped
+> tree**. They are all contract-safe — none needs a major bump — so they
+> belong to the 1.0.x patch line, ahead of anything in the additive
+> v1.x bucket below. Ordering is by blast radius, not by effort.
+
+### Tier 1 — silent data loss or a wrong destructive action
+
+- **F-007 · the trail reader's 256 KB head cap** — `audit_read` reads
+  the first 256 KB of the trail, so once it outgrows that, `rollback`
+  cannot see the most recent checkpoint marker, falls back to
+  `start=0`, and reverses the *oldest still-live* links — destroying
+  settled dotfiles — while exiting 0. Roughly 590–900 entries on a
+  realistic `$HOME`. Fix with a size-derived read; land **F-016** (an
+  interior malformed line must refuse, not be silently skipped) and
+  **F-017** (an unreadable trail is an error, not "empty") in the same
+  function while it is open.
+  → [`issues/2026-08-25-trail-reader-head-cap.md`](issues/2026-08-25-trail-reader-head-cap.md)
+- **F-012 · the unlocked manifest read-modify-write** — concurrent
+  `hapi adopt` commits the renames, the symlinks and the audit entries
+  while silently dropping manifest rows, so hapi's declarative state
+  stops describing the filesystem and `status` cannot see the orphans.
+  Needs `flock` plus a pid-unique `O_EXCL` tmp name. **F-021** (no TOML
+  escaping on the written row) and **F-028** (a SIGKILL mid-`adopt`
+  leaves the file outside `$HOME` with nothing recording it) are the
+  same write path.
+  → [`issues/2026-08-25-manifest-write-integrity.md`](issues/2026-08-25-manifest-write-integrity.md)
+- **F-015 / F-002 · per-component symlink resolution** — a symlinked
+  *intermediate* component of an ordinary `$HOME` target escapes the
+  scope on a plain `hapi link`, no flag involved, and `--force` then
+  deletes the file outside `$HOME`. Now hapi-owned work: the kavach dep
+  gate is void (see below), and `hapi_readlink` — the primitive it needs
+  — is portable across all three targets as of 1.0.4. The constraint
+  that makes this an arc rather than a patch: four verbs prove ownership
+  by recomputing `fsl_compute_relative` and byte-comparing, so changing
+  the resolver changes what all four compare.
+  → [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md)
+
+### Tier 2 — hapi reports a world that is not there
+
+- **F-022** — `link` creates dangling symlinks without probing the
+  source, and `status` (the designated post-recovery source of truth)
+  calls them OK. GNU stow probes; hapi does not.
+- **F-023** — `hapi list` overcounts live links after a `--force`
+  takeover, claiming two packages own one symlink.
+- **F-024** — an unnormalized package-dir argument breaks idempotency:
+  `hapi link .` writes a `./`-bearing symlink that every later canonical
+  run calls a conflict, and `sync` — whose contract *is* idempotence —
+  then refuses with exit 1.
+- **F-026** — `hapi sync --backup-to` is a no-op the guides and `--help`
+  both advertise; the snapshot branch cannot fire on `sync`.
+- **F-025** — `package.ignore` is parsed, printed back by `inspect` and
+  folded into the hash, but never applied. Honouring it is a **v2.0**
+  change (it alters what a directory row materializes); 1.0.x ships the
+  documentation and a strict-mode warning.
+  → [`issues/2026-08-25-reporting-and-idempotency.md`](issues/2026-08-25-reporting-and-idempotency.md)
+
+### Tier 3 — hardening, small and self-contained
+
+- **F-018** — the audit entry is written *after* the mutation and never
+  fsynced, so a failed append leaves an orphan symlink no recovery verb
+  can see.
+- **F-019** — `--root` / `--backup-to` swallow the next argv token even
+  when it is a flag, so `--root --dry-run pkg` consumes the flag as the
+  value.
+- **F-020** — an unvalidated `[package].name` is interpolated into the
+  `--backup-to` destination, so a hostile *package* — not the user —
+  picks where the bytes land.
+- **F-029** — created parent directories use a hardcoded 0700 that
+  ignores umask, and are never removed on unlink/rollback.
+- **F-032** — a manifest target ending in `/` fails the symlink but
+  leaves the directory hapi created behind.
+- **F-033** — `hapi inspect` parses no flags, so any flag on it exits 1
+  rather than the 2 ADR 0005 specifies.
+
+### Target-conditional — blocked on infrastructure
+
+- **F-027** (`_fsl_getcwd` returns `"."` on agnos, so a relative
+  package-dir argument yields a non-absolute `abs_source` in the trail)
+  and **F-031** (`O_NOFOLLOW` is dropped by the agnos `file_open`
+  bridge, so F-003's TOCTOU defence does not exist there) cannot be
+  reproduced or regression-tested without an **agnos/mirshi CI runner**.
+  Until one exists the audit trail must read *unverified on agnos*
+  rather than *clean*. The runner is the blocking item, not the fixes.
+
+### Arc exit criteria
+
+The 1.0.x hardening arc closes when Tier 1 is empty, Tier 2 is either
+fixed or documented as intended behaviour, and a P(-1) re-walk over the
+repaired write paths finds nothing new. Only then does the additive
+v1.x bucket below reopen.
 
 ## v1.x — maintenance & additive growth
 
@@ -28,14 +130,19 @@ ordering is driven by upstream readiness + dogfood pressure.
 
 ### Internal improvements (no API change)
 
-- **kavach migration** — swap the env-var allowlist inside
-  `src/cap.cyr` for the kavach capability service when its
-  stable API ships. `cap_check_root_r(path) -> Result`
-  signature stays identical. **Closes
-  [F-002](../audit/2026-05-23-audit.md)** from the v0.9.0
-  security audit — symlink-aware per-component resolution
-  replaces the v1.0 lexical-only normalization. Tracked at
-  [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md).
+- ~~**kavach migration** — swap the env-var allowlist inside
+  `src/cap.cyr` for the kavach capability service when its stable API
+  ships~~ **— withdrawn 2026-08-25; the dependency does not exist.**
+  kavach is at 3.12.3, long past stable, and is a *sandbox execution*
+  framework: ten backends, strength scoring, an externalization scanner
+  pipeline, a credential proxy, an HMAC audit chain. Its entire public
+  path-facing surface is `kavach_path_exists` — there is no
+  `cap_check(scope, action)`, none is planned, and adopting a
+  process-sandboxing framework would collide with CLAUDE.md's
+  no-process-spawning rule. **F-002 is hapi-owned work** and has moved
+  to the 1.0.x hardening arc above, re-scoped from *the `--root` value*
+  to *every path hapi derives from the scope root*. See the addendum on
+  [ADR 0005](../adr/0005-capability-bounded-roots.md).
 - ~~**stdlib syscall wrappers** — replace the in-source magic-
   number `syscall(N, ...)` calls (`sys_rename` in
   `adopt` / `manifest_write`, `sys_fsync` / `sys_fdatasync` in
@@ -113,8 +220,12 @@ not blockers.
   [`cyrius/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/proposals/2026-05-17-syscalls-at-family-stdlib.md)
   and
   [`cyrius/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/proposals/2026-05-20-syscalls-fsync-stdlib.md).)
-- **kavach capability API** — the stable surface for the
-  internal `src/cap.cyr` swap.
+- ~~**kavach capability API** — the stable surface for the
+  internal `src/cap.cyr` swap.~~ **— removed 2026-08-25. Not pending:
+  not coming.** kavach 3.12.3 is a sandbox *execution* framework, not a
+  capability service; there is nothing upstream to wait for. The work
+  moved to the 1.0.x hardening arc as hapi-owned. See the
+  [ADR 0005 addendum](../adr/0005-capability-bounded-roots.md).
 - **cyriusly starship-install non-clobbering fix** — filed at
   [`cyrius/docs/development/issues/2026-05-20-cyriusly-cmdtools-install-clobbers-existing-starship-config.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-20-cyriusly-cmdtools-install-clobbers-existing-starship-config.md).
   Once landed, the caveat-comment in `dotfiles/starship` and
