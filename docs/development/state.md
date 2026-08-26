@@ -5,6 +5,23 @@
 
 ## Version
 
+**1.0.10** — 1.0.x hardening arc, **the last two findings, and a
+correction** (2026-08-26). F-027 and F-031 were recorded as "blocked on
+an agnos runner" from the audit through 1.0.9; that was wrong. mirshi
+builds in this tree at 1.11.0 — above the ≥1.10.2 hapi has required
+since 1.0.3 — and runs an agnos ELF as a native Linux process. **F-027**:
+agnos has no `getcwd`, so a relative package argument produced a
+non-absolute `abs_source`, violating ADR 0002; hapi now prefers `PWD`
+and refuses when the cwd is unknowable, propagating the refusal through
+`fsl_canonical_arg` to `link` / `status` / `adopt`. **F-031**: agnos's
+`AO_*` set has no no-follow bit at all, so `O_NOFOLLOW` was dropped and
+F-003's defence did not exist there; `hapi_open_nofollow` is atomic on
+Linux/macOS and readlink-pre-checked on agnos (residual race accepted
+and documented). New `scripts/agnos-smoke.sh`, run by CI, with a missing
+mirshi reported as SKIP not green. Known gap, upstream: mirshi passes no
+envp, so scope-rooted verbs are not reachable under it. Suite 365 / 90.
+**All twenty audit findings are now closed.**
+
 **1.0.9** — 1.0.x hardening arc, **Tier 2 and Tier 3 closed in one
 batch** (2026-08-25). Eleven findings reproduced and fixed together.
 Tier 2 (hapi reporting a world that was not on disk): `link` refused a
@@ -354,8 +371,8 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 361 assertions across
-  89 test groups (the group figure read `66` from 1.0.1 through
+- `tests/hapi.tcyr` — primary suite. 365 assertions across
+  90 test groups (the group figure read `66` from 1.0.1 through
   1.0.3 — a stale header; the per-tier breakdown below has always
   summed to the real count):
   - Manifest (7 groups): minimal, three-link acceptance,

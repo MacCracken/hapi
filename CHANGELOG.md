@@ -6,6 +6,71 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.0.10] - 2026-08-26
+
+> **The 1.0.x hardening arc's last two findings — and a correction.**
+> F-027 and F-031 were recorded as "blocked on an agnos runner" from the
+> 2026-08-25 audit through 1.0.9. **That was wrong.** mirshi — the
+> AGNOS→Linux syscall-translation supervisor — builds in this tree at
+> 1.11.0, above the ≥1.10.2 hapi has required since 1.0.3, and runs an
+> agnos-compiled ELF as a native Linux process. There was no missing
+> runner; nobody had wired it up. Both findings were reproducible the
+> whole time. Suite **365 assertions / 90 groups**, plus an agnos harness.
+
+### Fixed
+- **A relative package argument produced a non-absolute `abs_source` on
+  agnos (F-027).** agnos has no `getcwd` — no per-process cwd in the
+  userland ABI — so `_fsl_getcwd` returned `"."`, `fsl_to_absolute` handed
+  back a still-relative path, and it flowed into the trail's
+  `abs_source`, which ADR 0002 requires to be absolute. The failure was
+  self-consistent, so `status` recomputed the same wrong value and
+  reported OK: nothing ever flagged it.
+
+  hapi now prefers `PWD` (agnos's kernel stages it into the init envp at
+  exec) and, when the cwd genuinely cannot be determined, **refuses**
+  rather than writing an entry that violates the format. The refusal
+  propagates through `fsl_canonical_arg` — the single choke point 1.0.9
+  introduced for user-supplied path arguments — to `link`, `status` and
+  `adopt`, each of which now reports it and exits 1 instead of
+  dereferencing a null manifest path.
+- **`O_NOFOLLOW` was silently dropped on agnos, so F-003's defence did
+  not exist there (F-031).** Not a bug in the bridge: agnos's entire
+  `AO_*` open-flag set is RDONLY/WRONLY/RDWR/CREAT/TRUNC/APPEND/DIRECTORY
+  and has **no no-follow bit to map to**. An attacker who swapped the
+  regular file for a symlink between the probe and the copy got the
+  symlink's target content written into the "snapshot", and
+  `hapi_backup_copy` returned 0 as though it had worked.
+
+  New `hapi_open_nofollow` centralizes the difference: atomic
+  `O_NOFOLLOW` on Linux/macOS, and on agnos a `readlink` pre-check —
+  using the `readlink`#70 peer hapi gained in 1.0.4 — that refuses with
+  ELOOP when the path is a symlink.
+  ⚠ **This narrows the window; it does not close it.** Between the
+  readlink and the open, agnos offers no way to prove the two saw the
+  same inode. The residual race is an accepted agnos boundary until the
+  kernel grows a no-follow open flag — and it is strictly better than
+  following the link unconditionally.
+
+### Added
+- **`scripts/agnos-smoke.sh`** — runs the `--agnos` build under mirshi,
+  and CI runs it. Four checks: the binary loads and the agnos arg reader
+  delivers argv (a scheme that has broken twice upstream), the
+  environment gap is asserted rather than assumed, a relative package
+  argument is refused rather than silently mis-resolved (F-027, verified
+  **on the agnos target**), and the exit-code contract holds there too.
+  A missing mirshi exits **2 = SKIP** and CI surfaces it as a warning,
+  never as green — so an absent runner can never quietly read as "agnos
+  is fine".
+
+### Known limitations
+- **mirshi passes no envp to the child**, so `getenv` returns null for
+  everything and hapi cannot resolve a scope root under it. Real agnos
+  stages `HOME=/ PWD=/` at exec, so this is a supervisor gap rather than
+  a hapi defect — but it bounds what the harness can exercise: verbs
+  that need a scope root are not reachable under mirshi yet. Asserted
+  explicitly in the harness so it is noticed if it changes. It belongs
+  upstream in the mirshi repo, not in hapi's issue tracker.
+
 ## [1.0.9] - 2026-08-25
 
 > **The rest of the 1.0.x hardening arc, in one release.** Eleven

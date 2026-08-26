@@ -214,8 +214,9 @@ fn hapi_backup_copy(src, dst): i64 {
     # being world-readable. Do NOT "finish" F-029 by widening this.
     var mkrc = fsl_mkdir_parents(dst);
     if (mkrc < 0) { return mkrc; }
-    # O_NOFOLLOW = 0x20000 on Linux x86_64.
-    var rfd = file_open(src, O_RDONLY | 131072, 0);
+    # Via the shim: Linux/macOS get atomic O_NOFOLLOW, agnos gets a
+    # readlink pre-check because it has no no-follow flag at all (F-031).
+    var rfd = hapi_open_nofollow(src, O_RDONLY);
     if (rfd < 0) { return rfd; }
     # O_EXCL, not O_TRUNC: the destination name is
     # <ts>-<pkg>-<basename>, so two manifest rows whose targets share a

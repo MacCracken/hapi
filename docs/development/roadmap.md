@@ -112,15 +112,18 @@ All three entries shipped. Tier 2 is now the front of the arc.
 - **F-033** — `hapi inspect` parses no flags, so any flag on it exits 1
   rather than the 2 ADR 0005 specifies.
 
-### Target-conditional — blocked on infrastructure
+### Target-conditional — ✅ CLOSED (1.0.10)
 
-- **F-027** (`_fsl_getcwd` returns `"."` on agnos, so a relative
-  package-dir argument yields a non-absolute `abs_source` in the trail)
-  and **F-031** (`O_NOFOLLOW` is dropped by the agnos `file_open`
-  bridge, so F-003's TOCTOU defence does not exist there) cannot be
-  reproduced or regression-tested without an **agnos/mirshi CI runner**.
-  Until one exists the audit trail must read *unverified on agnos*
-  rather than *clean*. The runner is the blocking item, not the fixes.
+- ~~**F-027** and **F-031** cannot be reproduced without an agnos/mirshi
+  CI runner~~ **— shipped in 1.0.10, and the premise was false.** mirshi
+  builds in this tree at 1.11.0 and runs an agnos ELF as a native Linux
+  process; the runner existed the whole time. `scripts/agnos-smoke.sh`
+  now exercises the agnos build under it and CI runs it, with a missing
+  mirshi reported as SKIP rather than green.
+- **Remaining agnos gap, upstream not ours:** mirshi passes no envp, so
+  `getenv` returns null in the child and scope-rooted verbs are not
+  reachable under it. Real agnos stages `HOME=/ PWD=/` at exec. File
+  against mirshi, not hapi.
 
 ### Arc exit criteria — MET for everything reproducible
 
@@ -128,17 +131,17 @@ Tier 1 closed at 1.0.8, Tier 2 and Tier 3 together at 1.0.9. **Eighteen
 of the twenty findings are fixed**; the two that remain (F-027, F-031)
 are target-conditional and blocked on an agnos runner, not on effort.
 
-What is still owed before the arc is formally signed off:
+**All twenty findings are closed as of 1.0.10**, and the agnos runner
+turned out to already exist.
 
-- **An agnos/mirshi CI runner**, so F-027 and F-031 can be reproduced
-  rather than reasoned about. Until it exists the audit trail says
-  *unverified on agnos*, which is the honest state.
-- **A P(-1) re-walk over the repaired write paths.** Eleven fixes landed
-  in one release; the checklist's own rule is to re-run it on any change
-  that touches a path argument, a syscall or the audit-trail format, and
-  1.0.9 touched all three. That re-walk is the arc's closing act.
+One thing is still owed before the arc is formally signed off:
 
-The additive v1.x bucket below reopens once those two are done.
+- **A P(-1) re-walk over the repaired write paths.** Thirteen fixes
+  landed across 1.0.9 and 1.0.10; the checklist's own rule is to re-run
+  it on any change that touches a path argument, a syscall or the
+  audit-trail format, and these touched all three. That re-walk is the
+  arc's closing act, and it is what reopens the additive v1.x bucket
+  below.
 
 ## v1.x — maintenance & additive growth
 

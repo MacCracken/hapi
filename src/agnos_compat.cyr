@@ -74,6 +74,40 @@ fn hapi_readlink(path, buf, buflen): i64 {
 #endif
 }
 
+# Open `path` WITHOUT following a final-component symlink.
+#
+# Linux/macOS get the real thing: `O_NOFOLLOW` (0x20000) is atomic — the
+# kernel refuses with ELOOP inside the open itself, so no race exists.
+#
+# agnos has no equivalent. Its AO_* set is RDONLY/WRONLY/RDWR/CREAT/
+# TRUNC/APPEND/DIRECTORY and nothing else, so `lib/io.cyr`'s bridge
+# silently DROPS the O_NOFOLLOW bit — there is nothing to map it to.
+# That meant F-003's backup-copy TOCTOU defence did not exist on agnos:
+# an attacker who swapped the regular file for a symlink got the
+# symlink's target content written into the "snapshot", and
+# `hapi_backup_copy` returned 0 as though it had worked (F-031).
+#
+# What hapi can do there is check first, with the `readlink`#70 peer it
+# gained in 1.0.4: if the path IS a symlink, refuse. That closes the
+# realistic case — a symlink already sitting at the path — and turns
+# silent wrong-content into an explicit ELOOP.
+#
+# ⚠ It does NOT close the race, and cannot: between the readlink and the
+# open, agnos offers no way to prove the two saw the same inode. The
+# residual window is an accepted agnos boundary until the kernel grows a
+# no-follow open flag; it is narrower than, and strictly better than,
+# following the link unconditionally.
+fn hapi_open_nofollow(path, flags): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    var probe = alloc(64);
+    var n = hapi_readlink(path, probe, 64);
+    if (n > 0) { return 0 - 40; }          # ELOOP — it is a symlink
+    return file_open(path, flags, 0);
+#else
+    return file_open(path, flags | 131072, 0);   # O_NOFOLLOW
+#endif
+}
+
 # mkdir(path, mode). Linux: mkdir(path, mode). agnos: mkdir(path, pathlen)
 # — SAME ARITY as Linux but the 2nd arg is the path length, not the mode,
 # so this needs a real branch (a bare call miscompiles silently, no warning).

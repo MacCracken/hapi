@@ -38,6 +38,10 @@ fn _hst_resolve_manifest(arg): i64 {
         }
     }
     var abs_arg = fsl_canonical_arg(arg);
+    # 0 = a relative argument with no determinable cwd (agnos without a
+    # usable PWD). Refuse rather than build a trail entry whose
+    # `abs_source` is not absolute (F-027).
+    if (abs_arg == 0) { return 0; }
     return _fsl_path_join(abs_arg, "hapi.cyml");
 }
 
@@ -56,6 +60,17 @@ fn cmd_status(pkg_arg): i64 {
     }
 
     var manifest_path = _hst_resolve_manifest(pkg_arg);
+    # 0 = a relative package argument with no determinable cwd (agnos
+    # without a usable PWD). Refuse loudly: continuing would put a
+    # non-absolute path into the trail's `abs_source`, which ADR 0002
+    # requires to be absolute, and the symlink body would resolve
+    # against the wrong directory (F-027).
+    if (manifest_path == 0) {
+        _hst_eputs("hapi: cannot resolve a relative package path — the working\n");
+        _hst_eputs("  directory is not knowable on this target. Pass an absolute\n");
+        _hst_eputs("  path, or set PWD.\n");
+        return 1;
+    }
     var pkg_dir_abs = _fsl_path_dirname(manifest_path);
 
     var mr = hapi_mf_parse_file_r(manifest_path);

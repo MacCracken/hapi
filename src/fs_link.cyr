@@ -180,11 +180,22 @@ fn _fsl_path_dirname(path): i64 {
 fn _fsl_getcwd(): i64 {
 #ifdef CYRIUS_TARGET_AGNOS
     # agnos has no getcwd syscall (no per-process cwd concept in the
-    # userland ABI). Return "." so relative package-dir args resolve
-    # against the invocation directory the caller already knows.
-    var dot = alloc(2);
-    store8(dot, 46); store8(dot + 1, 0);
-    return dot;
+    # userland ABI). Its kernel does stage `PWD` into the init envp at
+    # exec, so prefer that when it is absolute — it is the only source
+    # of truth available (F-027).
+    var pwd = getenv("PWD");
+    if (pwd != 0 && strlen(pwd) > 0 && load8(pwd) == 47) {
+        var pl = strlen(pwd);
+        var pc = alloc(pl + 1);
+        memcpy(pc, pwd, pl);
+        store8(pc + pl, 0);
+        return pc;
+    }
+    # No usable PWD (a supervisor that passes no envp, for one). Return
+    # 0 rather than "." — "." made `fsl_to_absolute` hand back a
+    # RELATIVE path that flowed into the trail's `abs_source`, which
+    # ADR 0002 requires to be absolute. The caller must refuse instead.
+    return 0;
 #else
     var buf = alloc(4096);
     var n = syscall(SYS_GETCWD, buf, 4096);
@@ -214,14 +225,23 @@ fn fsl_to_absolute(path): i64 {
     var n = strlen(path);
     if (n > 0 && load8(path) == 47) { return _fsl_cstr_dup(path); }
     var cwd = _fsl_getcwd();
+    if (cwd == 0) { return 0; }        # cwd unknowable — see F-027
     return _fsl_path_join(cwd, path);
 }
 
 # Canonicalize a user-supplied path ARGUMENT: absolutize, then
 # collapse `.` / `..` / `//` lexically (F-024). Same treatment
 # `--root` already gets in cap_check_root_r.
+# Returns 0 when the argument is relative AND the cwd cannot be
+# determined — on agnos with no usable `PWD`. Every caller must treat 0
+# as a refusal: continuing would put a non-absolute path into the
+# trail's `abs_source`, which ADR 0002 requires to be absolute, and the
+# resulting symlink body resolves against the wrong directory (F-027).
 fn fsl_canonical_arg(path): i64 {
-    return fsl_lexical_normalize(fsl_to_absolute(path));
+    var abs = fsl_to_absolute(path);
+    if (abs == 0) { return 0; }
+    if (load8(abs) != 47) { return 0; }
+    return fsl_lexical_normalize(abs);
 }
 
 # Lexical path canonicalization: collapse `.` and `..` segments

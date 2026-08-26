@@ -88,6 +88,21 @@ jobs:
         # rather than under `cyrius test`.
         run: sh scripts/concurrency-test.sh build/${{ github.event.repository.name }}
 
+      - name: agnos smoke (under mirshi)
+        # F-027 and F-031 are properties of the agnos syscall ABI and
+        # cannot be observed from a Linux build. The 2026-08-25 audit
+        # recorded them as "blocked on an agnos runner"; that was wrong —
+        # mirshi runs an agnos ELF as a native Linux process, and nobody
+        # had wired it up. Exit 2 from the harness is a SKIP (no mirshi
+        # on this runner) and is surfaced as a warning, never as green.
+        run: |
+          sh scripts/agnos-smoke.sh /usr/local/bin/mirshi build/${{ github.event.repository.name }}-agnos && rc=0 || rc=$?
+          if [ "$rc" = "2" ]; then
+            echo "::warning::agnos smoke SKIPPED — no mirshi on this runner; F-027/F-031 unverified here"
+          elif [ "$rc" != "0" ]; then
+            exit "$rc"
+          fi
+
       - name: Test
         # v5.6.28: bare `cyrius test` picks up the [build].test entry
         # AND auto-discovers tests/*.tcyr — avoids the previous

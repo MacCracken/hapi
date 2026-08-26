@@ -1822,6 +1822,48 @@ fn test_backup_copy_refuses_symlink_source() {
 }
 
 # ============================================================
+# 1.0.10 — the agnos-conditional pair (F-027, F-031)
+# ============================================================
+
+# F-031: agnos's AO_* open-flag set has no no-follow bit at all, so
+# `lib/io.cyr`'s bridge silently DROPPED O_NOFOLLOW and F-003's
+# backup-copy TOCTOU defence did not exist there — an attacker who
+# swapped the file for a symlink got the symlink's target content
+# written into the "snapshot", returning 0 as though it worked.
+# `hapi_open_nofollow` centralizes it: atomic O_NOFOLLOW on Linux/macOS,
+# a readlink pre-check on agnos. This asserts the Linux arm; the agnos
+# arm is covered by scripts/agnos-smoke.sh under mirshi.
+fn test_open_nofollow_refuses_symlink() {
+    test_group("agnos_compat: no-follow open refuses a symlink");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    var real = _fsl_path_join(scope, "real");
+    var fd = file_open(real, 0x241, 0x1A4);
+    file_write(fd, "bytes", 5);
+    file_close(fd);
+
+    # A regular file opens.
+    var ok = hapi_open_nofollow(real, O_RDONLY);
+    assert(ok >= 0, "a regular file opens");
+    file_close(ok);
+
+    # A symlink to it does NOT — that is the whole defence.
+    var lnk = _fsl_path_join(scope, "lnk");
+    assert_eq(hapi_symlink(real, lnk), 0, "symlink created");
+    assert(hapi_open_nofollow(lnk, O_RDONLY) < 0, "a symlink is refused");
+
+    # And the backup copy, which rides it, still refuses a symlink source
+    # (F-003's standing guarantee, now routed through the shim).
+    assert(hapi_backup_copy(lnk, _fsl_path_join(scope, "snap")) < 0,
+           "backup_copy refuses a symlink source");
+
+    _test_clear_env();
+    return 0;
+}
+
+# ============================================================
 # 1.0.9 — Tier 2 / Tier 3 batch
 # ============================================================
 
@@ -2758,6 +2800,7 @@ fn main() {
     test_cmd_rollback_stops_at_marker();
     test_rollback_replay_entry_has_no_backup_path();
     test_manifest_write_preserves_large_body();
+    test_open_nofollow_refuses_symlink();
     test_backup_tag_is_sanitized();
     test_canonical_arg_normalizes();
     test_link_create_refuses_trailing_slash();
