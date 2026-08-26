@@ -340,6 +340,76 @@ fn audit_format_rollback_marker(out, cap): i64 {
 
 # Append a formatted entry to the audit trail. Shared core
 # used by the link / unlink / rollback-marker callers.
+# Durable append. `lib/io.cyr`'s `file_append_locked` does
+# open/lock/write/unlock/close with no fsync and no close-return check,
+# and lib/ is a pinned snapshot we do not edit — so hapi appends the
+# trail itself, out of the same public primitives, portable across all
+# three targets with no raw syscall.
+#
+# Two properties `file_append_locked` does not give us (F-018):
+#   - **fsync before the lock is dropped.** The symlink metadata op is
+#     journalled within ~5 s on ext4 while a dirty trail page can sit up
+#     to `dirty_expire_centisecs` (30 s), so a power loss in that window
+#     left a link on disk that no recovery verb could see.
+#   - **a torn-tail guard.** If the last byte of the trail is not `\n`,
+#     a previous write was interrupted; appending onto it would splice
+#     two entries into one line and the reader would drop BOTH. Refuse
+#     instead, and let the caller say so.
+# The close return is checked too: a write error that surfaces only at
+# close must not read as success.
+fn _audit_append_durable(path, buf, n): i64 {
+    var flags = O_RDWR | O_CREAT;
+#ifndef CYRIUS_TARGET_AGNOS
+    flags = flags | O_APPEND;
+#endif
+    var fd = file_open(path, flags, 0x1A4);
+    if (fd < 0) { return fd; }
+    file_lock(fd);
+
+    var end = xlseek(fd, 0, 2);                 # SEEK_END
+    if (end > 0) {
+        var probe = alloc(1);
+        xlseek(fd, end - 1, 0);                 # SEEK_SET
+        var r = file_read(fd, probe, 1);
+        xlseek(fd, 0, 2);
+        if (r != 1 || load8(probe) != 10) {
+            file_unlock(fd);
+            file_close(fd);
+            return 0 - 5;                       # torn tail — refuse
+        }
+    }
+
+    if (n == 0) {                               # pre-flight probe only
+        file_unlock(fd);
+        var crc0 = file_close(fd);
+        if (crc0 < 0) { return crc0; }
+        return 0;
+    }
+
+    var w = file_write(fd, buf, n);
+    var frc = 0;
+    if (w == n) { frc = xfsync(fd); }
+    file_unlock(fd);
+    var crc = file_close(fd);
+    if (w < 0) { return w; }
+    if (w != n) { return 0 - 5; }
+    if (frc < 0) { return frc; }
+    if (crc < 0) { return crc; }
+    return w;
+}
+
+# Can the trail be appended to at all? Opens, locks, runs the torn-tail
+# guard, writes nothing. Lets a mutating verb refuse BEFORE it touches
+# the filesystem, instead of discovering the trail is unwritable after
+# the symlink is already on disk.
+fn audit_preflight_r(): Result {
+    var mkrc = audit_ensure_dir();
+    if (mkrc < 0) { return Err(HapiAuditMkdirFailed); }
+    var rc = _audit_append_durable(audit_trail_path(), "", 0);
+    if (rc < 0) { return Err(HapiAuditWriteFailed); }
+    return Ok(0);
+}
+
 fn _audit_append_bytes(buf, n): Result {
     # A composer that overflowed its buffer returns -1. Refuse the
     # write rather than handing a negative length to the writer: a
@@ -349,7 +419,7 @@ fn _audit_append_bytes(buf, n): Result {
     var mkrc = audit_ensure_dir();
     if (mkrc < 0) { return Err(HapiAuditMkdirFailed); }
     var path = audit_trail_path();
-    var wrc = file_append_locked(path, buf, n);
+    var wrc = _audit_append_durable(path, buf, n);
     if (wrc < 0) { return Err(HapiAuditWriteFailed); }
     if (wrc != n) { return Err(HapiAuditWriteFailed); }
     return Ok(n);

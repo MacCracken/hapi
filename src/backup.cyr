@@ -81,12 +81,57 @@ fn _hbk_basename(path): i64 {
 #   <dir>/<ts>-<pkg>-<basename(src_path)>
 # Inserts a `/` between <dir> and the tail only if <dir> doesn't
 # already end in one. Returns a heap cstring.
+# Reduce a manifest-supplied [package].name to ONE filename-safe path
+# component. `[package].name` is validated only for non-emptiness, so it
+# is PACKAGE-chosen input to a path hapi is about to write: a name of
+# `../../../../pwned` put the snapshot of the user's file above the
+# directory the user named with --backup-to (F-020).
+#
+# This is NOT a capability check — `--backup-to`'s destination is
+# deliberately uncapped (the USER typed it, and pointing it at /tmp or
+# an external drive is legitimate). What is restored here is that the
+# directory the user named is the one that receives the bytes.
+#
+# Sanitize rather than refuse: `hapi_backup_compose_path` has no error
+# channel, and both callers read 0 as "no backup requested" — so
+# refusing would SILENTLY SKIP the snapshot at exactly the moment the
+# original is about to be deleted.
+fn _hbk_safe_tag(pkg): i64 {
+    var n = 0;
+    if (pkg != 0) { n = strlen(pkg); }
+    if (n == 0) {
+        var d = alloc(4);
+        memcpy(d, "pkg", 3);
+        store8(d + 3, 0);
+        return d;
+    }
+    var out = alloc(n + 1);
+    var i = 0;
+    while (i < n) {
+        var c = load8(pkg + i);
+        var ok = 0;
+        if (c >= 97 && c <= 122) { ok = 1; }            # a-z
+        if (c >= 65 && c <= 90)  { ok = 1; }            # A-Z
+        if (c >= 48 && c <= 57)  { ok = 1; }            # 0-9
+        if (c == 46 || c == 95 || c == 45) { ok = 1; }  # . _ -
+        if (ok == 1) { store8(out + i, c); }
+        else { store8(out + i, 95); }                   # _
+        i = i + 1;
+    }
+    store8(out + n, 0);
+    # A leading '.' would hide the snapshot, and is the only way a
+    # sanitized tag could still read as "." or "..".
+    if (load8(out) == 46) { store8(out, 95); }
+    return out;
+}
+
 fn _hbk_compose_base(dir, pkg, src_path): i64 {
     var ts = _hbk_ts();
     var bn = _hbk_basename(src_path);
+    var tag = _hbk_safe_tag(pkg);
     var dl = strlen(dir);
     var tl = strlen(ts);
-    var pl = strlen(pkg);
+    var pl = strlen(tag);
     var bl = strlen(bn);
     var sep = 1;
     if (dl > 0 && load8(dir + dl - 1) == 47) { sep = 0; }
@@ -97,7 +142,7 @@ fn _hbk_compose_base(dir, pkg, src_path): i64 {
     if (sep == 1) { store8(out + pos, 47); pos = pos + 1; }
     memcpy(out + pos, ts, tl); pos = pos + tl;
     store8(out + pos, 45); pos = pos + 1;   # -
-    memcpy(out + pos, pkg, pl); pos = pos + pl;
+    memcpy(out + pos, tag, pl); pos = pos + pl;
     store8(out + pos, 45); pos = pos + 1;   # -
     memcpy(out + pos, bn, bl); pos = pos + bl;
     store8(out + pos, 0);
@@ -164,6 +209,9 @@ fn hapi_backup_compose_path(dir, pkg, src_path): i64 {
 # verified the path is a regular file; O_NOFOLLOW makes the
 # property survive the race window.
 fn hapi_backup_copy(src, dst): i64 {
+    # Private (0700) parents on purpose: snapshots are written 0644, so
+    # the directory is the only thing keeping a --backup-to tree from
+    # being world-readable. Do NOT "finish" F-029 by widening this.
     var mkrc = fsl_mkdir_parents(dst);
     if (mkrc < 0) { return mkrc; }
     # O_NOFOLLOW = 0x20000 on Linux x86_64.

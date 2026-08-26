@@ -104,6 +104,24 @@ fn link_probe(path): i64 {
 #endif
 }
 
+# Is a manifest row's `source` actually there? GNU stow probes the source
+# before it links; hapi did not, so a row naming a file that is not in the
+# package produced a symlink pointing at nothing (F-022).
+#
+# Present means FILE, DIRECTORY or SYMLINK. Everything else is refused,
+# ABSENT and ERROR alike: ERROR covers ENOTDIR (the row source traverses a
+# regular file — `zshrc/sub` where `zshrc` is a file) as well as an
+# unsearchable parent, and hapi's standing posture for a state it cannot
+# prove is to refuse, never to assume (see fsl_resolve_path's hop cap).
+# `link` and `status` share this predicate so they cannot disagree.
+fn fsl_source_present(path): i64 {
+    var k = link_probe_kind(link_probe(path));
+    if (k == HAPI_LP_FILE) { return 1; }
+    if (k == HAPI_LP_DIRECTORY) { return 1; }
+    if (k == HAPI_LP_SYMLINK) { return 1; }
+    return 0;
+}
+
 # Heap-copy a Str's bytes into a null-terminated cstring.
 fn _fsl_str_to_cstr(s: Str): i64 {
     var len = str_len(s);
@@ -197,6 +215,13 @@ fn fsl_to_absolute(path): i64 {
     if (n > 0 && load8(path) == 47) { return _fsl_cstr_dup(path); }
     var cwd = _fsl_getcwd();
     return _fsl_path_join(cwd, path);
+}
+
+# Canonicalize a user-supplied path ARGUMENT: absolutize, then
+# collapse `.` / `..` / `//` lexically (F-024). Same treatment
+# `--root` already gets in cap_check_root_r.
+fn fsl_canonical_arg(path): i64 {
+    return fsl_lexical_normalize(fsl_to_absolute(path));
 }
 
 # Lexical path canonicalization: collapse `.` and `..` segments
@@ -487,7 +512,19 @@ fn fsl_compute_relative(from_dir, to_file): i64 {
 
 # mkdir -p `path`'s parent. Treats EEXIST as success. Mode 0700.
 # Returns 0 on success, negative on first non-EEXIST failure.
-fn fsl_mkdir_parents(file_path): i64 {
+# Mode-carrying form. `mode` is the mkdir(2) mode, which the kernel then
+# filters through the process umask.
+#
+# Two callers want opposite things (F-029). A directory hapi creates in
+# the user's $HOME on their behalf should look like one they made
+# themselves — 0777 through their umask. A directory holding hapi's own
+# state must stay private regardless of umask: the audit trail records
+# every path the user links, and `--backup-to` snapshots are written
+# 0644, so the directory is the only thing holding the line. Through
+# 1.0.8 both got a hardcoded 0700, which made the second correct and the
+# first wrong — a `--root` deployment produced config directories the
+# consuming service could not traverse.
+fn fsl_mkdir_parents_mode(file_path, mode): i64 {
     var n = strlen(file_path);
     var last_slash = 0 - 1;
     var i = 0;
@@ -505,7 +542,7 @@ fn fsl_mkdir_parents(file_path): i64 {
     while (j <= last_slash) {
         if (load8(tmp + j) == 47) {
             store8(tmp + j, 0);
-            var rc = hapi_mkdir(tmp, 0x1C0);
+            var rc = hapi_mkdir(tmp, mode);
             if (rc < 0) {
                 var err = 0 - rc;
                 if (err != 17) { return rc; }
@@ -515,7 +552,7 @@ fn fsl_mkdir_parents(file_path): i64 {
         j = j + 1;
     }
     store8(tmp + last_slash, 0);
-    var rc = hapi_mkdir(tmp, 0x1C0);
+    var rc = hapi_mkdir(tmp, mode);
     if (rc < 0) {
         var err = 0 - rc;
         if (err != 17) { return rc; }
@@ -526,8 +563,22 @@ fn fsl_mkdir_parents(file_path): i64 {
 # Create a symlink at `linkpath` pointing at `target`. Creates
 # the parent directory of `linkpath` on demand. Returns the
 # raw kernel return code (0 on success, -errno on failure).
+# Back-compat name: private (0700) parents. Kept so the state-dir and
+# backup-destination callers, which WANT 0700, need no change.
+fn fsl_mkdir_parents(file_path): i64 {
+    return fsl_mkdir_parents_mode(file_path, 0x1C0);
+}
+
 fn link_create(target, linkpath): i64 {
-    var mkrc = fsl_mkdir_parents(linkpath);
+    # symlink(2) can never create a path spelled with a trailing '/'
+    # (EEXIST/ENOENT either way), so refuse BEFORE mkdir_parents
+    # materializes the directory we would then fail to link over (F-032).
+    var lpn = strlen(linkpath);
+    if (lpn == 0 || load8(linkpath + lpn - 1) == 47) { return 0 - 22; }
+    # 0777-through-umask: these land in the user's scope and should look
+    # like directories they created themselves (F-029). hapi's own state
+    # directories keep the private 0700 default of `fsl_mkdir_parents`.
+    var mkrc = fsl_mkdir_parents_mode(linkpath, 0x1FF);
     if (mkrc < 0) { return mkrc; }
     return hapi_symlink(target, linkpath);
 }

@@ -2,6 +2,8 @@
 name = "dotfiles-zsh"
 version = "1.0.0"
 description = "zsh configuration files"
+# NOTE: `ignore` is RESERVED and not yet honoured (see ADR 0001).
+# It is kept here only to exercise the parser; it excludes nothing.
 ignore = ["*.bak", ".DS_Store", "*.swp"]
 
 [[link]]

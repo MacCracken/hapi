@@ -6,6 +6,130 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.0.9] - 2026-08-25
+
+> **The rest of the 1.0.x hardening arc, in one release.** Eleven
+> findings — all of Tier 2 and all of Tier 3 — reproduced, fixed and
+> regression-tested together. That empties the arc except for two
+> agnos-target-conditional items that cannot be verified without a
+> runner. No caller-visible surface change; the v1.0 contract stays
+> frozen. Suite **361 assertions / 89 groups**.
+
+### Fixed — hapi reported a world that was not on disk (Tier 2)
+- **`link` created dangling symlinks, and `status` called them OK
+  (F-022).** A row whose source is missing produced a symlink pointing
+  at nothing, exit 0 — and `status`, which F-006 designates the
+  *post-recovery source of truth*, reported `2 / 2 OK`. `link` now
+  refuses (`--force` does not override it: the link would still dangle),
+  and `status` classifies it `BROKEN`. One shared predicate,
+  `fsl_source_present`, so the two verbs cannot drift apart. It also
+  covers a case the finding did not name: a source that traverses a
+  regular file returns ENOTDIR, not ENOENT, which an
+  absence-only check would have missed. `hapi check` already caught the
+  plain case since 1.0.7 — link and status were inconsistent with a
+  shipped verb.
+- **`hapi list` overcounted after a `--force` takeover (F-023).** The
+  live-set was built from each package's *own* entries, so nothing could
+  retire a claim when another package took the same target: two packages
+  each reported owning the one symlink on disk. It is now a global
+  per-target owner map — a create displaces the previous owner, and a
+  remove only clears when the remover *is* the owner.
+  ⚠ The obvious fix is a **41× slowdown**: building that map inside the
+  per-package loop measures 0.665 s against 0.016 s on a benchmark-shaped
+  trail, which would have blown the >2× gate wide open. The build is
+  hoisted and indexed by a hashmap — 1.0× — and the `vec_set` cleanup it
+  needed deletes ~34 lines of rebuild loops justified by a comment that
+  was simply false (`lib/vec.cyr` has exposed `vec_set` all along).
+- **`hapi link .` broke `sync`'s idempotency contract (F-024).** An
+  unnormalized package-dir argument produced a `./`-bearing symlink body;
+  every later canonical run recomputed the clean form, byte-compared, saw
+  a mismatch and called it a conflict — so `sync`, whose contract *is*
+  idempotence, refused with exit 1 and advised `--force`, which on a
+  package with a real file conflict destroys that file. Arguments are now
+  canonicalized at the three resolvers that derive an absolute path.
+  ⚠ `fsl_compute_relative` and the four ownership-proof call sites are
+  deliberately untouched — those verbs prove ownership by recomputing and
+  byte-comparing, so changing the computation changes what they compare.
+- **`package.ignore` is documented as reserved (F-025).** It is parsed,
+  echoed by `inspect` and folded into the manifest hash, but no verb
+  applies it — a user who lists `secrets.env` sees it confirmed and then
+  linked live. Honouring it changes what a directory row materializes and
+  how many audit entries a row writes, both frozen at v1.0, so it is a
+  **v2.0** item. 1.0.9 ships the honesty: ADR 0001 marks it
+  reserved-not-honoured, and the shipped example stops demonstrating a
+  no-op silently.
+- **`hapi sync --backup-to` was an advertised no-op (F-026).** The guide
+  claimed *"`sync` inherits `--force`, and with it `--backup-to`"*. It
+  does not — `sync` has no `--force`, so there is no destructive step to
+  snapshot. Corrected in `guides/sync.md`, `guides/backup-to.md`,
+  `state.md`, the module headers and `hapi --help`. The flag stays
+  *accepted* on `sync` (the command surface is frozen) and is documented
+  as inert.
+
+### Fixed — write-path and argument hardening (Tier 3)
+- **The audit entry was written after the mutation and never fsynced
+  (F-018).** A failed append — a full state partition, a permissions
+  change — left a symlink on disk that no recovery verb could see. hapi
+  now **pre-flights** the trail before touching the filesystem, so the
+  common failures refuse cleanly with nothing changed; appends through a
+  local durable writer that fsyncs before dropping the lock and checks
+  the close return; and refuses a **torn tail** (a trail whose last byte
+  is not `\n` — appending onto it splices two entries into one line and
+  the reader drops *both*). If an append still fails, exactly the one
+  link it belonged to is undone — never the earlier ones in the run,
+  which are recorded and reversible, and unwinding them would need
+  further appends that are failing by construction.
+- **`--root` and `--backup-to` swallowed a following flag (F-019).**
+  `hapi link --root --dry-run pkg` consumed `--dry-run` as the root
+  value; because the capability check passes whenever cwd is under
+  `$HOME`, a run the user asked to be a no-op created a directory
+  literally named `--dry-run`, planted a symlink and appended to the
+  trail, at exit 0. A value that is itself flag-shaped is now rejected
+  with exit 2 across all eight sites. (The two hand-counted `eprint`
+  lengths this replaced were each one byte short and wrote a stray NUL
+  to stderr.)
+- **A package could steer where `--backup-to` wrote (F-020).**
+  `[package].name` is validated only for non-emptiness and was
+  interpolated raw into the destination, so a manifest naming itself
+  `../../../pwned` put the snapshot of the user's file *above* the
+  directory the user named. The name is now reduced to one filename-safe
+  component. Sanitized rather than refused on purpose: the composer has
+  no error channel and both callers read 0 as "no backup requested", so
+  refusing would **silently skip the snapshot** at the exact moment the
+  original is about to be deleted. This is not a capability check —
+  `--backup-to`'s destination stays deliberately uncapped, per the
+  audit's accepted boundary; what is restored is that the user's
+  directory receives the bytes.
+- **Created parent directories ignored umask (F-029).** A hardcoded 0700
+  meant a `--root` deployment produced config directories the consuming
+  service could not traverse. `fsl_mkdir_parents_mode` now lets the
+  caller choose: `link_create` asks for 0777-through-umask, while hapi's
+  own state directory and the `--backup-to` destination keep 0700
+  deliberately — snapshots are written 0644, so the directory is the
+  only thing holding that line.
+  ⚠ **Leftover directories are NOT auto-pruned, and that is deliberate.**
+  The trail records the symlink, not which directories hapi created, so
+  any unlink-time prune is an *inference*. `rmdir` cannot remove a
+  non-empty directory, but it can still remove one the user made on
+  purpose, or drop a mode the user set — on `~/.ssh` that is a security
+  regression hapi would have caused while claiming to reverse itself.
+  hapi's rule is that it removes only what it created, *with proof*. The
+  real fix is an additive `created_dirs` trail field; it is on the
+  roadmap.
+- **A trailing-slash target left a stray directory (F-032).**
+  `symlink(2)` can never create a path spelled with a trailing `/`, but
+  `mkdir_parents` had already materialized the directory — so a
+  correctly-refused run still left residue. Refused before the mkdir.
+- **`hapi inspect` returned the wrong exit code for a flag (F-033).** It
+  parsed no flags at all, so any flag fell through to exit 1 ("bad
+  manifest") instead of the exit 2 ADR 0005 specifies for bad usage.
+
+### Still open
+- **F-027 and F-031 are agnos-target-conditional** and are the only arc
+  items left. Neither can be reproduced or regression-tested without an
+  agnos/mirshi runner, so they are not guessed at; the audit continues to
+  say *unverified on agnos*. The runner is the blocking item.
+
 ## [1.0.8] - 2026-08-25
 
 > **The 1.0.x hardening arc's Tier 1 is closed.** F-015 — and with it

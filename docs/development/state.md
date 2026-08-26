@@ -5,6 +5,28 @@
 
 ## Version
 
+**1.0.9** — 1.0.x hardening arc, **Tier 2 and Tier 3 closed in one
+batch** (2026-08-25). Eleven findings reproduced and fixed together.
+Tier 2 (hapi reporting a world that was not on disk): `link` refused a
+missing source and `status` now reports BROKEN instead of OK (**F-022**,
+one shared predicate so the two cannot drift); `list` uses a global
+per-target owner map so a `--force` takeover retires the previous claim
+(**F-023** — the naive build measured **41x** and was rejected for a
+hashmap index at 1.0x); package-dir arguments are canonicalized so
+`link .` no longer breaks `sync`'s idempotency contract (**F-024**, with
+the four ownership-proof sites deliberately untouched); `ignore` is
+documented reserved-not-honoured and `sync --backup-to` documented inert
+(**F-025**, **F-026**, both with v2.0 successors recorded). Tier 3
+(write-path and argument hardening): the trail is pre-flighted before
+any mutation, appended durably with an fsync and a torn-tail guard, and
+a failed append undoes exactly its own link (**F-018**); a flag-shaped
+value for `--root` / `--backup-to` is rejected (**F-019**); a package
+can no longer steer the `--backup-to` destination (**F-020**); created
+parents follow umask while hapi's own state stays 0700 (**F-029**); a
+trailing-slash target leaves no residue (**F-032**); `inspect` returns 2
+for a flag (**F-033**). Suite 361 / 89. **Two findings remain**, F-027
+and F-031, both agnos-target-conditional and blocked on a runner.
+
 **1.0.8** — 1.0.x hardening arc, **Tier 1 closed** (2026-08-25). Fixes
 **F-015**, and with it **F-002**, open since the 2026-05-23 audit:
 hapi's capability boundary now decides on a target's *physical*
@@ -175,7 +197,9 @@ Binary (`hapi`). Argv dispatcher. Ten real verbs frozen at v1.0.0;
 Three global flags plug into per-verb arg parsers:
 `--root <path>` (link / adopt / sync / status / list),
 `--dry-run` (link / unlink / adopt / sync / rollback /
-checkpoint), and `--backup-to <dir>` (link / sync / adopt) —
+checkpoint), and `--backup-to <dir>` (parsed on link / sync / adopt; effective
+on `link --force` / `adopt` only — `sync` has no `--force`, so it
+is inert there) —
 opt-in pre-`--force` snapshot.
 
 ### Current command surface (frozen at v1.0)
@@ -330,8 +354,8 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 323 assertions across
-  84 test groups (the group figure read `66` from 1.0.1 through
+- `tests/hapi.tcyr` — primary suite. 361 assertions across
+  89 test groups (the group figure read `66` from 1.0.1 through
   1.0.3 — a stale header; the per-tier breakdown below has always
   summed to the real count):
   - Manifest (7 groups): minimal, three-link acceptance,

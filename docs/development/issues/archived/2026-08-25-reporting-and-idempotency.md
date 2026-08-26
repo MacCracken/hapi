@@ -1,3 +1,18 @@
+> ## ✅ RESOLVED in 1.0.9 (2026-08-25)
+>
+> All five closed, as one batch. F-022 (`link` refuses a missing source;
+> `status` reports BROKEN — via one shared predicate so the two verbs
+> cannot drift, and covering the ENOTDIR case an absence-only check would
+> have missed), F-023 (a global per-target owner map; the naive build was
+> measured at **41x** and rejected in favour of a hashmap index at 1.0x),
+> F-024 (arguments canonicalized at the three resolvers that derive an
+> absolute path — the four ownership-proof sites deliberately untouched),
+> F-026 and F-025 (documentation: `sync --backup-to` is inert, `ignore`
+> is reserved-not-honoured, both with their v2.0 successors recorded).
+>
+> The constraint this issue flagged held: nothing here changed what the
+> four byte-comparing verbs compare.
+
 # `status`, `list` and `sync` report a world that is not on disk
 
 **Discovered:** 2026-08-25, P(-1) hardening sweep (F-022, F-023, F-024, F-026, F-025)

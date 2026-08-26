@@ -1822,6 +1822,140 @@ fn test_backup_copy_refuses_symlink_source() {
 }
 
 # ============================================================
+# 1.0.9 — Tier 2 / Tier 3 batch
+# ============================================================
+
+# F-020: `[package].name` is validated only for non-emptiness, so it is
+# PACKAGE-chosen input to the --backup-to destination path. A name of
+# `../../../pwned` put the snapshot ABOVE the directory the user named.
+fn test_backup_tag_is_sanitized() {
+    test_group("backup: package name cannot steer the destination");
+
+    var evil = _hbk_safe_tag("../../../pwned");
+    assert(evil != 0, "tag produced");
+    var i = 0;
+    var seps = 0;
+    while (i < strlen(evil)) {
+        if (load8(evil + i) == 47) { seps = seps + 1; }
+        i = i + 1;
+    }
+    assert_eq(seps, 0, "no path separator survives");
+    assert(load8(evil) != 46, "cannot begin with a dot");
+    assert_eq(_har_cstr_eq(_hbk_safe_tag("plain-pkg_1.0"), "plain-pkg_1.0"), 1,
+              "an ordinary name is untouched");
+    assert_eq(_har_cstr_eq(_hbk_safe_tag(0), "pkg"), 1, "a null name falls back");
+
+    # End to end: the composed path stays under the user's directory.
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var bk = _fsl_path_join(scope, "bk");
+    var composed = hapi_backup_compose_path(bk, "../../../pwned",
+                                            _fsl_path_join(scope, ".f"));
+    assert_eq(_fsl_within(composed, bk), 1, "snapshot stays inside the named directory");
+    _test_clear_env();
+    return 0;
+}
+
+# F-024: an unnormalized package-dir argument produced a `./`-bearing
+# symlink body, which every later canonical run called a conflict — so
+# `sync`, whose contract IS idempotence, refused with exit 1.
+fn test_canonical_arg_normalizes() {
+    test_group("cap: a package-dir argument is canonicalized");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var messy = _fsl_path_join(scope, "./a/../b//c");
+    var clean = fsl_canonical_arg(messy);
+    assert_eq(_har_cstr_eq(clean, _fsl_path_join(scope, "b/c")), 1,
+              "`.`, `..` and `//` all collapse");
+    assert_eq(_har_cstr_eq(fsl_canonical_arg(scope), scope), 1,
+              "an already-clean path is unchanged");
+    _test_clear_env();
+    return 0;
+}
+
+# F-032: a manifest target ending in `/` can never be created by
+# symlink(2), but mkdir_parents had already materialized the directory —
+# so a correctly-refused run still left residue behind.
+fn test_link_create_refuses_trailing_slash() {
+    test_group("fs_link: a trailing-slash target leaves no residue");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var bad = _fsl_path_join(scope, "resid/");
+    assert(link_create("../src", bad) < 0, "trailing slash refused");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, "resid"))),
+              HAPI_LP_ABSENT, "no directory was created");
+    _test_clear_env();
+    return 0;
+}
+
+# F-029: parent directories hapi creates in the user's scope should look
+# like ones the user made — 0777 through their umask. hapi's own state
+# directories must stay private regardless.
+fn test_mkdir_parents_mode_split() {
+    test_group("fs_link: created-parent mode is caller-chosen");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    # A reference directory made at 0777 shows what this umask yields.
+    var ref = _fsl_path_join(scope, "ref");
+    hapi_mkdir(ref, 0x1FF);
+    var st = alloc(STAT_BUFSZ);
+    assert(xstat(ref, st) >= 0, "reference stat");
+    var ref_mode = load64(st + STAT_MODE) & 0xFFF;
+
+    var umaskd = _fsl_path_join(scope, "u/deep/f");
+    assert_eq(fsl_mkdir_parents_mode(umaskd, 0x1FF), 0, "0777 parents created");
+    assert(xstat(_fsl_path_join(scope, "u"), st) >= 0, "stat umask dir");
+    assert_eq(load64(st + STAT_MODE) & 0xFFF, ref_mode, "matches 0777-through-umask");
+
+    var privd = _fsl_path_join(scope, "p/deep/f");
+    assert_eq(fsl_mkdir_parents(privd), 0, "private parents created");
+    assert(xstat(_fsl_path_join(scope, "p"), st) >= 0, "stat private dir");
+    assert_eq(load64(st + STAT_MODE) & 0xFFF, 0x1C0, "stays 0700 regardless of umask");
+
+    # And `link_create` — the user-facing path — must actually ASK for
+    # the umask mode. Asserting the primitive alone leaves the call site
+    # free to keep passing 0700, which is exactly what F-029 was.
+    var viacreate = _fsl_path_join(scope, "viacreate/deep/lnk");
+    assert_eq(link_create("../../../ref", viacreate), 0, "link_create makes parents");
+    assert(xstat(_fsl_path_join(scope, "viacreate"), st) >= 0, "stat link_create dir");
+    assert_eq(load64(st + STAT_MODE) & 0xFFF, ref_mode,
+              "link_create parents follow umask, not a hardcoded 0700");
+    _test_clear_env();
+    return 0;
+}
+
+# F-018: the trail was appended without fsync and with no torn-tail
+# guard, and the append happened AFTER the filesystem mutation — so a
+# failed append left a symlink no recovery verb could see.
+fn test_audit_durable_append_and_preflight() {
+    test_group("audit: durable append refuses a torn tail");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+    audit_ensure_dir();
+
+    # A healthy trail pre-flights clean and appends.
+    assert_eq(is_err_result(audit_preflight_r()), 0, "empty trail pre-flights");
+    assert_eq(is_err_result(audit_append_rollback_marker_r()), 0, "marker appends");
+
+    # A trail whose last byte is not `\n` is a torn write: appending onto
+    # it would splice two entries into one line and the reader would drop
+    # BOTH. Refuse instead.
+    var fd = file_open(audit_path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    file_write(fd, "{\"op\":\"link\",\"pkg\":\"a\"}\n{\"op\":\"link\",\"pkg\":\"tor", 45);
+    file_close(fd);
+    assert_eq(is_err_result(audit_preflight_r()), 1, "torn tail fails pre-flight");
+    assert_eq(is_err_result(audit_append_rollback_marker_r()), 1, "and refuses the append");
+
+    _test_clear_env();
+    return 0;
+}
+
+# ============================================================
 # 1.0.8 — the resolved capability boundary (F-015 / F-002)
 # ============================================================
 
@@ -2506,6 +2640,95 @@ fn test_backup_to_adopt_snapshots_before_rename() {
     return 0;
 }
 
+# ============================================================
+# 1.0.9 — F-022: dangling-source linking
+# ============================================================
+
+# `link` never probed the source, so a row naming a file that is not in
+# the package produced a symlink pointing at nothing, exit 0. GNU stow
+# probes; hapi did not.
+fn test_link_refuses_missing_source() {
+    test_group("link: refuses a row whose source is not in the package (F-022)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+
+    var pkg = _test_make_package("zshrc", ".zshrc");
+    # Delete the source out of the package — a manifest typo, a `git
+    # checkout` of a branch that lacks it, and a deleted file all land here.
+    hapi_unlink(_fsl_path_join(pkg, "zshrc"));
+
+    assert_eq(cmd_link(pkg, 0), 1, "link refuses a row with no source");
+
+    var tgt = _fsl_path_join(scope, ".zshrc");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_ABSENT,
+              "no dangling symlink was created");
+    assert_eq(_test_file_size(audit_path), 0, "no audit entry for a refused row");
+
+    # --force must not override it: the link would still point at nothing.
+    assert_eq(cmd_link(pkg, 1), 1, "--force does not override a missing source");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_ABSENT,
+              "--force created no dangling symlink either");
+
+    # sync is cmd_link without --force, so it inherits the refusal.
+    assert_eq(cmd_sync(pkg), 1, "sync refuses a missing source too");
+
+    _test_clear_env();
+    return 0;
+}
+
+# The other half: a link created while the source existed, whose source
+# later vanished. The symlink still holds exactly the right target text,
+# so `status`'s ownership byte-compare passes — the dangling-ness has to
+# be a SEPARATE probe, not a change to what is compared.
+fn test_status_reports_dangling_link() {
+    test_group("status: a dangling link is drift, not OK (F-022)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    var pkg = _test_make_package("zshrc", ".zshrc");
+    assert_eq(cmd_link(pkg, 0), 0, "healthy package links");
+    assert_eq(cmd_status(pkg), 0, "healthy package reports no drift");
+
+    var tgt = _fsl_path_join(scope, ".zshrc");
+    hapi_unlink(_fsl_path_join(pkg, "zshrc"));
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_SYMLINK,
+              "the symlink itself is still on disk");
+
+    assert_eq(cmd_status(pkg), 1, "a dangling link is drift -> exit 1");
+
+    _test_clear_env();
+    return 0;
+}
+
+# The same harm through a different errno: a row source that traverses a
+# regular file (`zshrc/sub` where `zshrc` IS the file) probes ERROR, not
+# ABSENT — and still produced a dangling link that `status` called OK.
+# The predicate is "provably present", not "not ENOENT".
+fn test_link_refuses_source_through_a_file() {
+    test_group("link: refuses a source that traverses a regular file (F-022)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    var pkg = _test_make_package("zshrc", ".zshrc");
+    var mp = _fsl_path_join(pkg, "hapi.cyml");
+    assert_eq(manifest_append_link_row(mp, "zshrc/sub", ".leaf"), 0, "row appended");
+
+    assert_eq(cmd_link(pkg, 0), 1, "link refuses a source through a file");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, ".leaf"))),
+              HAPI_LP_ABSENT, "no dangling symlink for the ENOTDIR row");
+    # ...and the healthy row in the same package was not written either:
+    # the refusal is a whole-run refusal, like every other conflict.
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, ".zshrc"))),
+              HAPI_LP_ABSENT, "the run refused as a whole");
+
+    _test_clear_env();
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -2535,6 +2758,11 @@ fn main() {
     test_cmd_rollback_stops_at_marker();
     test_rollback_replay_entry_has_no_backup_path();
     test_manifest_write_preserves_large_body();
+    test_backup_tag_is_sanitized();
+    test_canonical_arg_normalizes();
+    test_link_create_refuses_trailing_slash();
+    test_mkdir_parents_mode_split();
+    test_audit_durable_append_and_preflight();
     test_resolve_path_follows_intermediate_symlinks();
     test_cap_target_allowed_resolves();
     test_link_refuses_symlinked_component_escape();
@@ -2591,6 +2819,9 @@ fn main() {
     test_backup_to_skips_symlink_conflict();
     test_backup_to_dry_run_writes_no_backup();
     test_backup_to_adopt_snapshots_before_rename();
+    test_link_refuses_missing_source();
+    test_status_reports_dangling_link();
+    test_link_refuses_source_through_a_file();
     return assert_summary();
 }
 

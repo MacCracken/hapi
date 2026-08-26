@@ -67,19 +67,26 @@ Exactly the one missing link is re-created. The other two
 | 1    | conflict (use `hapi link --force` to override), parse error, or IO failure |
 | 2    | bad usage (no path argument)                                  |
 
-## Preserving bytes during destructive overwrites
+## Overwriting existing files
 
-`hapi sync` inherits `--force` from `cmd_link`, and with it
-`--backup-to <dir>`. When you sync a package whose links would
-overwrite existing regular files, pair the run with
-`--backup-to` to snapshot each file before the destructive step:
+`sync` never overwrites. A row whose target is an existing regular file,
+or a symlink pointing somewhere else, is a conflict and `sync` refuses
+with exit 1.
+
+There is no `--force` on `sync`, so there is no destructive step to
+snapshot and **`--backup-to` has nothing to do on this verb** — it is
+accepted (the command surface is frozen) and inert. Earlier versions of
+this guide claimed `sync` inherited `--force` and with it `--backup-to`;
+that was never true, and the correction is recorded as F-026 in
+[`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md).
+
+To overwrite deliberately, use `link`:
 
 ```sh
-hapi sync --backup-to ~/.local/share/hapi/backups pkg
+hapi link --force --backup-to ~/.local/share/hapi/backups pkg
 ```
 
-See [`backup-to.md`](backup-to.md) for filename layout and
-audit-trail effects.
+See [`link.md`](link.md) and [`backup-to.md`](backup-to.md).
 
 ## See also
 

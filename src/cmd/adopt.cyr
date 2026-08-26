@@ -34,10 +34,10 @@ fn _hap_resolve_manifest(arg): i64 {
         if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
             && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
             && load8(arg + n - 1) == 108) {
-            return fsl_to_absolute(arg);
+            return fsl_canonical_arg(arg);
         }
     }
-    var abs_arg = fsl_to_absolute(arg);
+    var abs_arg = fsl_canonical_arg(arg);
     return _fsl_path_join(abs_arg, "hapi.cyml");
 }
 

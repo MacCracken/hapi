@@ -36,6 +36,7 @@ enum HapiLinkAction {
     LINK_ACT_CONFLICT_DIR = 4;
     LINK_ACT_ERROR = 5;
     LINK_ACT_ESCAPE = 6;
+    LINK_ACT_NO_SOURCE = 7;
 }
 
 # Test/CI override for the scope root. When set, takes
@@ -91,10 +92,10 @@ fn _hlnk_resolve_manifest(arg): i64 {
         if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
             && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
             && load8(arg + n - 1) == 108) {
-            return fsl_to_absolute(arg);
+            return fsl_canonical_arg(arg);
         }
     }
-    var abs_arg = fsl_to_absolute(arg);
+    var abs_arg = fsl_canonical_arg(arg);
     return _fsl_path_join(abs_arg, "hapi.cyml");
 }
 
@@ -124,6 +125,19 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     # scope the state of the target is not our business.
     if (cap_target_allowed(tgt_parent, scope_root_abs) == 0) {
         store64(plan + 32, LINK_ACT_ESCAPE);
+        return plan;
+    }
+
+    # GNU stow probes the source before it links; hapi did not, so a
+    # manifest typo, a file deleted from the package, or a branch that
+    # lacks it produced a symlink pointing at nothing — and `status`,
+    # which F-006 designates the post-recovery source of truth, then
+    # called it OK (F-022). Same idiom `check` already uses at
+    # check.cyr:92. Probed after the scope check (an escaping row is
+    # refused on its own terms) and before the target probe (the state
+    # of the target is irrelevant if we cannot link anything there).
+    if (fsl_source_present(abs_src) == 0) {
+        store64(plan + 32, LINK_ACT_NO_SOURCE);
         return plan;
     }
 
@@ -170,6 +184,11 @@ fn _hlnk_print_conflict(plan): i64 {
         _hlnk_eputs("(existing directory)");
     } elif (action == LINK_ACT_ESCAPE) {
         _hlnk_eputs("(resolves outside the scoped root)");
+    } elif (action == LINK_ACT_NO_SOURCE) {
+        var abs_src = load64(plan + 8);
+        _hlnk_eputs("(source missing: ");
+        eprint(abs_src, strlen(abs_src));
+        _hlnk_eputs(")");
     } else {
         _hlnk_eputs("(probe error)");
     }
@@ -263,6 +282,34 @@ fn cmd_link(pkg_arg, force): i64 {
         return 1;
     }
 
+    # A row whose source is not in the package is refused before the
+    # generic conflict block, because that block advises `--force` and
+    # `--force` cannot help here: the link would still point at nothing
+    # (F-022). Refused on `--dry-run` too — the plan is already built.
+    var no_source = 0;
+    var km = 0;
+    while (km < nlinks) {
+        var plm = vec_get(plans, km);
+        if (load64(plm + 32) == LINK_ACT_NO_SOURCE) {
+            if (no_source == 0) {
+                _hlnk_eputs("hapi: refusing to link `");
+                var pkg_nm = hapi_mf_name(m);
+                eprint(str_data(pkg_nm), str_len(pkg_nm));
+                _hlnk_eputs("` — source missing from the package:\n");
+            }
+            _hlnk_print_conflict(plm);
+            no_source = 1;
+        }
+        km = km + 1;
+    }
+    if (no_source == 1) {
+        _hlnk_eputs("  --force does NOT override this: the symlink would\n");
+        _hlnk_eputs("  dangle. Restore the file or fix the [[link]] source,\n");
+        _hlnk_eputs("  then re-run. `hapi check <package>` lists every row\n");
+        _hlnk_eputs("  whose source is missing.\n");
+        return 1;
+    }
+
     # If any conflicts and --force isn't on, refuse and list them.
     if (conflict_count > 0 && force == 0) {
         _hlnk_eputs("hapi: refusing to link `");
@@ -302,6 +349,32 @@ fn cmd_link(pkg_arg, force): i64 {
         k2 = k2 + 1;
     }
     if (dir_blocked == 1) { return 1; }
+
+    # Every hapi write must be auditable (CLAUDE.md). Prove the trail is
+    # writable BEFORE touching the filesystem, so the common failures —
+    # a full state partition, a permissions change — refuse cleanly
+    # instead of leaving a symlink on disk that no recovery verb can see
+    # (F-018). Skipped when nothing will be written, so a no-op or a
+    # dry-run never materializes an empty trail where none existed.
+    var will_write = 0;
+    var kw = 0;
+    while (kw < nlinks) {
+        var aw = load64(vec_get(plans, kw) + 32);
+        if (aw == LINK_ACT_CREATE) { will_write = will_write + 1; }
+        elif (force == 1 && (aw == LINK_ACT_CONFLICT_SYMLINK || aw == LINK_ACT_CONFLICT_FILE)) {
+            will_write = will_write + 1;
+        }
+        kw = kw + 1;
+    }
+    if (hapi_dry_run() == 0 && will_write > 0) {
+        var pf = audit_preflight_r();
+        if (is_err_result(pf) == 1) {
+            _hlnk_eputs("hapi: audit trail is not writable; refusing to link\n  ");
+            _hlnk_eputs(audit_trail_path());
+            _hlnk_eputs("\n  every hapi write must be auditable; nothing was changed\n");
+            return 1;
+        }
+    }
 
     var pkg_name_cstr = _fsl_str_to_cstr(hapi_mf_name(m));
     var pkg_ver_cstr = _fsl_str_to_cstr(hapi_mf_version(m));
@@ -380,9 +453,29 @@ fn cmd_link(pkg_arg, force): i64 {
                                              abs_src, abs_tgt,
                                              backup_path);
                 if (is_err_result(ar) == 1) {
+                    # Undo exactly THIS link — never the earlier ones in
+                    # the run. Those are in the trail and `unlink` /
+                    # `rollback` can reverse them; unwinding them here
+                    # would need further appends, which are failing by
+                    # construction, and would recreate this very defect
+                    # in mirror image. No rmdir of the parent either
+                    # (see F-029: hapi cannot prove it created it).
+                    var back = hapi_unlink(abs_tgt);
                     _hlnk_eputs("hapi: audit-trail write failed for ");
                     eprint(abs_tgt, strlen(abs_tgt));
-                    _hlnk_eputs("\n");
+                    if (back < 0) {
+                        _hlnk_eputs("\n  the symlink is on disk and NOT recorded; remove it by hand\n");
+                    } else {
+                        _hlnk_eputs("\n  symlink removed; this run left nothing unrecorded\n");
+                    }
+                    if (act == LINK_ACT_CONFLICT_FILE && force == 1) {
+                        _hlnk_eputs("  the file that was here was already deleted by --force and is NOT restored");
+                        if (backup_path != 0) {
+                            _hlnk_eputs("; snapshot: ");
+                            eprint(backup_path, strlen(backup_path));
+                        }
+                        _hlnk_eputs("\n");
+                    }
                     return 1;
                 }
                 written = written + 1;

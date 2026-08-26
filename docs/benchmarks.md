@@ -55,6 +55,8 @@ real HDD or under cgroup-throttled IO.
 
 | 1.0.8   | 100       | 86        | 0 bytes           | 2026-08-25 | F-015: every target's parent is now resolved component-by-component before hapi will write to it, so the capability boundary holds against a symlinked parent directory. ~10% cold / ~13% warm against 1.0.7 — attributable and expected (a `link_probe` per component per row), well inside the >2x gate. Trail byte-identical at 101,150 bytes. |
 
+| 1.0.9   | 106       | 87        | 0 bytes           | 2026-08-25 | Tier 2 + Tier 3 batch. ~6% cold against 1.0.8, from F-018's `fsync` before the trail lock is dropped — the durability the finding was about. Warm is unchanged (a warm sync writes nothing). ⭐ F-023's owner map is the number that matters here: the naive per-package build measured **41x** (0.665 s vs 0.016 s) and was rejected; the shipped hashmap build is 1.0x. Trail byte-identical at 101,150 bytes. |
+
 ⚠ **On the 0.9.0 → 1.0.4 delta.** Three things changed at once between
 the two rows: the compiler (6.0.1 → 6.5.35), the kernel (7.0.9 → 7.1.9),
 and hapi's own `link_probe`. The 0.9.0 row is a single run; the 1.0.4 row

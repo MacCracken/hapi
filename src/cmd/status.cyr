@@ -6,6 +6,8 @@
 #
 # Classifications:
 #   OK          — symlink points where hapi link would write
+#   BROKEN      — symlink text is right, but the source it names is
+#                 gone: the link dangles (F-022)
 #   MISSING     — target absent
 #   WRONG       — symlink points elsewhere (user / other tool wrote)
 #   FILE        — regular file at target (link would refuse)
@@ -32,10 +34,10 @@ fn _hst_resolve_manifest(arg): i64 {
         if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
             && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
             && load8(arg + n - 1) == 108) {
-            return fsl_to_absolute(arg);
+            return fsl_canonical_arg(arg);
         }
     }
-    var abs_arg = fsl_to_absolute(arg);
+    var abs_arg = fsl_canonical_arg(arg);
     return _fsl_path_join(abs_arg, "hapi.cyml");
 }
 
@@ -97,13 +99,23 @@ fn cmd_status(pkg_arg): i64 {
         var status_lit = "ERROR  ";
         var detail = 0;
         var row_ok = 0;
+        var broken = 0;
         if (kind == HAPI_LP_ABSENT) {
             status_lit = "MISSING";
         } elif (kind == HAPI_LP_SYMLINK) {
             var existing = link_probe_target(probe);
             if (_hst_cstr_eq(existing, expected) == 1) {
-                status_lit = "OK     ";
-                row_ok = 1;
+                # Ownership is still proved by the byte-compare above,
+                # unchanged. This is an ADDITIONAL probe: a dangling link
+                # holds exactly the right target text, so the compare
+                # passes while the file it names is gone (F-022).
+                if (fsl_source_present(abs_src) == 0) {
+                    status_lit = "BROKEN ";
+                    broken = 1;
+                } else {
+                    status_lit = "OK     ";
+                    row_ok = 1;
+                }
             } else {
                 status_lit = "WRONG  ";
                 detail = existing;
@@ -118,7 +130,11 @@ fn cmd_status(pkg_arg): i64 {
         _hst_puts(status_lit);
         _hst_puts("  ");
         _hst_puts(abs_tgt);
-        if (kind == HAPI_LP_SYMLINK && row_ok == 0) {
+        if (broken == 1) {
+            _hst_puts("  (source missing: ");
+            _hst_puts(abs_src);
+            _hst_puts(")");
+        } elif (kind == HAPI_LP_SYMLINK && row_ok == 0) {
             _hst_puts("  (-> ");
             _hst_puts(detail);
             _hst_puts("; expected -> ");

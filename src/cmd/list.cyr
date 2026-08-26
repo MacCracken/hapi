@@ -17,6 +17,7 @@
 #   0  trail walked (empty trail is not an error)
 #   1  audit-read or env failure
 
+include "lib/hashmap.cyr"
 include "src/audit.cyr"
 include "src/audit_reader.cyr"
 include "src/cmd/link.cyr"   # _hlnk_scope_root_override
@@ -32,28 +33,32 @@ fn _hls_cstr_eq(a, b): i64 {
     return memeq(a, b, an);
 }
 
-# Count the live links for `pkg_cstr` by walking the trail in
-# order, maintaining a per-target last-op map. link/adopt set
-# the target live; unlink/unadopt clear it.
-fn _hls_live_count(trail, pkg_cstr): i64 {
-    var targets = vec_new();   # parallel cstrings
-    var live    = vec_new();   # parallel i64 (1=live, 0=cleared)
+# Build the per-target CURRENT-OWNER map for the whole trail, in
+# one pass. A target is owned by at most one package at a time:
+# link/adopt claim it for the entry's package, displacing any prior
+# owner — that is what a `--force` takeover (or a re-link over a
+# target another package left behind) records. unlink/unadopt
+# release it, but only when the remover is the package that
+# currently holds the claim, so a stale non-owner remove cannot
+# retire someone else's live link.
+#
+# Returns a 16-byte pair: { targets: vec<cstr>, owner: vec<cstr|0> }.
+# Built ONCE per `list` invocation — the per-package count is then a
+# scan of the parallel vecs, not a re-walk of the trail.
+fn _hls_owner_map(trail): i64 {
+    var targets = vec_new();   # distinct abs_targets, first-seen order
+    var owner   = vec_new();   # parallel: current owner cstr, 0 = released
+    var idx     = map_new();   # abs_target -> slot index in the parallel vecs
 
     var n = vec_len(trail);
     var i = 0;
     while (i < n) {
         var e = vec_get(trail, i);
         var ep = hae_pkg(e);
-        if (_hls_cstr_eq(ep, pkg_cstr) == 1) {
+        if (ep != 0 && strlen(ep) > 0) {
             var op = hae_op(e);
             var tgt = hae_abs_target(e);
             if (tgt != 0) {
-                var found = 0 - 1;
-                var j = 0;
-                while (j < vec_len(targets) && found < 0) {
-                    if (_hls_cstr_eq(vec_get(targets, j), tgt) == 1) { found = j; }
-                    j = j + 1;
-                }
                 var is_create = 0;
                 if (_hls_cstr_eq(op, "link") == 1)  { is_create = 1; }
                 elif (_hls_cstr_eq(op, "adopt") == 1) { is_create = 1; }
@@ -61,46 +66,23 @@ fn _hls_live_count(trail, pkg_cstr): i64 {
                 if (_hls_cstr_eq(op, "unlink") == 1)   { is_remove = 1; }
                 elif (_hls_cstr_eq(op, "unadopt") == 1) { is_remove = 1; }
 
-                if (is_create == 1) {
-                    if (found < 0) {
-                        vec_push(targets, tgt);
-                        vec_push(live, 1);
+                if (is_create == 1 || is_remove == 1) {
+                    var found = 0 - 1;
+                    if (map_has(idx, tgt) == 1) { found = map_get(idx, tgt); }
+                    if (is_create == 1) {
+                        if (found < 0) {
+                            map_set(idx, tgt, vec_len(targets));
+                            vec_push(targets, tgt);
+                            vec_push(owner, ep);
+                        } else {
+                            vec_set(owner, found, ep);
+                        }
                     } else {
-                        # Re-affirm the slot live; vec doesn't expose set
-                        # but we can rebuild this slot only.
-                        var nt = vec_new();
-                        var nl = vec_new();
-                        var k = 0;
-                        while (k < vec_len(targets)) {
-                            if (k == found) {
-                                vec_push(nt, vec_get(targets, k));
-                                vec_push(nl, 1);
-                            } else {
-                                vec_push(nt, vec_get(targets, k));
-                                vec_push(nl, vec_get(live, k));
+                        if (found >= 0) {
+                            if (_hls_cstr_eq(vec_get(owner, found), ep) == 1) {
+                                vec_set(owner, found, 0);
                             }
-                            k = k + 1;
                         }
-                        targets = nt;
-                        live = nl;
-                    }
-                } elif (is_remove == 1) {
-                    if (found >= 0) {
-                        var nt = vec_new();
-                        var nl = vec_new();
-                        var k = 0;
-                        while (k < vec_len(targets)) {
-                            if (k == found) {
-                                vec_push(nt, vec_get(targets, k));
-                                vec_push(nl, 0);
-                            } else {
-                                vec_push(nt, vec_get(targets, k));
-                                vec_push(nl, vec_get(live, k));
-                            }
-                            k = k + 1;
-                        }
-                        targets = nt;
-                        live = nl;
                     }
                 }
             }
@@ -108,13 +90,27 @@ fn _hls_live_count(trail, pkg_cstr): i64 {
         i = i + 1;
     }
 
+    var om = alloc(16);
+    store64(om, targets);
+    store64(om + 8, owner);
+    return om;
+}
+
+# Count the targets `pkg_cstr` currently owns in a prebuilt map.
+fn _hls_count_owned(om, pkg_cstr): i64 {
+    var owner = load64(om + 8);
     var count = 0;
-    var i2 = 0;
-    while (i2 < vec_len(live)) {
-        if (vec_get(live, i2) == 1) { count = count + 1; }
-        i2 = i2 + 1;
+    var i = 0;
+    while (i < vec_len(owner)) {
+        if (_hls_cstr_eq(vec_get(owner, i), pkg_cstr) == 1) { count = count + 1; }
+        i = i + 1;
     }
     return count;
+}
+
+# One-shot convenience: build the map and count in one call.
+fn _hls_live_count(trail, pkg_cstr): i64 {
+    return _hls_count_owned(_hls_owner_map(trail), pkg_cstr);
 }
 
 # Build the vec of unique non-null pkg names that appear in the
@@ -179,10 +175,11 @@ fn cmd_list(): i64 {
         return 0;
     }
 
+    var om = _hls_owner_map(trail);
     var i = 0;
     while (i < npkg) {
         var p = vec_get(pkgs, i);
-        var live = _hls_live_count(trail, p);
+        var live = _hls_count_owned(om, p);
         _hls_puts("  ");
         _hls_puts(p);
         _hls_puts("  ");

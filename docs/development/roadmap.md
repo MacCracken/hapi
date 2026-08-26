@@ -75,7 +75,7 @@ All three entries shipped. Tier 2 is now the front of the arc.
   target and is a different operation.
   → [`issues/archived/2026-05-23-cap-check-symlink-escape.md`](issues/archived/2026-05-23-cap-check-symlink-escape.md)
 
-### Tier 2 — hapi reports a world that is not there
+### Tier 2 — ✅ CLOSED (1.0.9)
 
 - **F-022** — `link` creates dangling symlinks without probing the
   source, and `status` (the designated post-recovery source of truth)
@@ -94,7 +94,7 @@ All three entries shipped. Tier 2 is now the front of the arc.
   documentation and a strict-mode warning.
   → [`issues/2026-08-25-reporting-and-idempotency.md`](issues/2026-08-25-reporting-and-idempotency.md)
 
-### Tier 3 — hardening, small and self-contained
+### Tier 3 — ✅ CLOSED (1.0.9)
 
 - **F-018** — the audit entry is written *after* the mutation and never
   fsynced, so a failed append leaves an orphan symlink no recovery verb
@@ -122,12 +122,23 @@ All three entries shipped. Tier 2 is now the front of the arc.
   Until one exists the audit trail must read *unverified on agnos*
   rather than *clean*. The runner is the blocking item, not the fixes.
 
-### Arc exit criteria
+### Arc exit criteria — MET for everything reproducible
 
-The 1.0.x hardening arc closes when Tier 1 is empty, Tier 2 is either
-fixed or documented as intended behaviour, and a P(-1) re-walk over the
-repaired write paths finds nothing new. Only then does the additive
-v1.x bucket below reopen.
+Tier 1 closed at 1.0.8, Tier 2 and Tier 3 together at 1.0.9. **Eighteen
+of the twenty findings are fixed**; the two that remain (F-027, F-031)
+are target-conditional and blocked on an agnos runner, not on effort.
+
+What is still owed before the arc is formally signed off:
+
+- **An agnos/mirshi CI runner**, so F-027 and F-031 can be reproduced
+  rather than reasoned about. Until it exists the audit trail says
+  *unverified on agnos*, which is the honest state.
+- **A P(-1) re-walk over the repaired write paths.** Eleven fixes landed
+  in one release; the checklist's own rule is to re-run it on any change
+  that touches a path argument, a syscall or the audit-trail format, and
+  1.0.9 touched all three. That re-walk is the arc's closing act.
+
+The additive v1.x bucket below reopens once those two are done.
 
 ## v1.x — maintenance & additive growth
 

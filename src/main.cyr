@@ -10,11 +10,14 @@
 #                    adopt, sync, rollback, checkpoint.
 # M7 added:
 #   --backup-to <dir> — snapshot the existing on-disk file
-#                    before a destructive overwrite (link --force
-#                    / sync / adopt). Audit entry gains an
-#                    additive `backup_path` field per ADR 0002's
-#                    growth contract. Accepted on: link, sync,
-#                    adopt.
+#                    before a destructive overwrite. Audit entry
+#                    gains an additive `backup_path` field per ADR
+#                    0002's growth contract. PARSED on link, sync
+#                    and adopt; EFFECTIVE on `link --force` and
+#                    `adopt` only — `sync` has no `--force`, so it
+#                    has no destructive step and the flag is inert
+#                    there (F-026). Kept accepted on sync rather
+#                    than rejected: the command surface is frozen.
 #
 # The exit-code contract:
 #   0  success
@@ -74,8 +77,8 @@ fn hapi_print_usage(): i64 {
     println("  --dry-run                 print actions; no syscalls or audit writes");
     println("                            (link/unlink/adopt/sync/rollback/checkpoint)");
     println("  --backup-to <dir>         snapshot existing file content to <dir> before");
-    println("                            a destructive overwrite (link --force / sync /");
-    println("                            adopt). Audit entry gains `backup_path`.");
+    println("                            a destructive overwrite (link --force / adopt).");
+    println("                            Audit entry gains `backup_path`.");
     println("");
     println("options:");
     println("  --version, -v             print version and exit");
@@ -99,6 +102,32 @@ fn _hapi_is_flag(arg): i64 {
     if (arg == 0) { return 0; }
     if (strlen(arg) < 1) { return 0; }
     if (load8(arg) == 45) { return 1; }
+    return 0;
+}
+
+# Fetch the value token for a value-taking flag. Returns the argv
+# pointer, or 0 when the next token is absent OR is itself a flag.
+# Through 1.0.8 `--root --dry-run pkg` consumed `--dry-run` as the root
+# value: the cap check passes whenever cwd is under $HOME, so a run the
+# user asked to be a no-op created `$HOME/--dry-run/`, planted a symlink
+# and appended to the trail — at exit 0 (F-019).
+fn _hapi_flag_value(ai, n, flag): i64 {
+    if (ai + 1 >= n) { return 0; }
+    var v = argv(ai + 1);
+    if (_hapi_is_flag(v) == 1) { return 0; }
+    return v;
+}
+
+# strlen-based so the length cannot drift from the literal — the
+# hand-counted eprints this replaces were one byte short and wrote a
+# stray NUL to stderr.
+fn _hapi_missing_value(flag, kind): i64 {
+    eprint("hapi: ", 6);
+    eprint(flag, strlen(flag));
+    eprint(" requires a ", 12);
+    eprint(kind, strlen(kind));
+    var tail = " argument (a value starting with `-` must be spelled `./-name`)\n";
+    eprint(tail, strlen(tail));
     return 0;
 }
 
@@ -167,8 +196,16 @@ fn main(): i64 {
 
     if (_hapi_argeq(verb, "inspect") == 1) {
         var path = 0;
-        if (n >= 3) { path = argv(2); }
-        if (n > 3) { _hapi_extra_arg(verb, argv(3)); return 2; }
+        var ai = 2;
+        while (ai < n) {
+            var a = argv(ai);
+            # ADR 0005: a verb that takes no flags still owes exit 2 for
+            # one, not the exit 1 that means "bad manifest" (F-033).
+            if (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
+            elif (path == 0) { path = a; }
+            else { _hapi_extra_arg(verb, a); return 2; }
+            ai = ai + 1;
+        }
         return cmd_inspect(path);
     }
 
@@ -181,18 +218,16 @@ fn main(): i64 {
             if (_hapi_argeq(a, "--force") == 1) { force = 1; }
             elif (_hapi_argeq(a, "--dry-run") == 1) { hapi_set_dry_run(1); }
             elif (_hapi_argeq(a, "--root") == 1) {
-                var v = 0;
-                if (ai + 1 < n) { v = argv(ai + 1); }
+                var v = _hapi_flag_value(ai, n, "--root");
+                if (v == 0) { _hapi_missing_value("--root", "path"); return 2; }
                 var rc = _hapi_apply_root(v);
                 if (rc != 0) { return rc; }
                 ai = ai + 1;
             }
             elif (_hapi_argeq(a, "--backup-to") == 1) {
-                if (ai + 1 >= n) {
-                    eprint("hapi: --backup-to requires a directory argument\n", 49);
-                    return 2;
-                }
-                hapi_set_backup_dir(argv(ai + 1));
+                var bv = _hapi_flag_value(ai, n, "--backup-to");
+                if (bv == 0) { _hapi_missing_value("--backup-to", "directory"); return 2; }
+                hapi_set_backup_dir(bv);
                 ai = ai + 1;
             }
             elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
@@ -225,18 +260,16 @@ fn main(): i64 {
             var a = argv(ai);
             if (_hapi_argeq(a, "--dry-run") == 1) { hapi_set_dry_run(1); }
             elif (_hapi_argeq(a, "--root") == 1) {
-                var v = 0;
-                if (ai + 1 < n) { v = argv(ai + 1); }
+                var v = _hapi_flag_value(ai, n, "--root");
+                if (v == 0) { _hapi_missing_value("--root", "path"); return 2; }
                 var rc = _hapi_apply_root(v);
                 if (rc != 0) { return rc; }
                 ai = ai + 1;
             }
             elif (_hapi_argeq(a, "--backup-to") == 1) {
-                if (ai + 1 >= n) {
-                    eprint("hapi: --backup-to requires a directory argument\n", 49);
-                    return 2;
-                }
-                hapi_set_backup_dir(argv(ai + 1));
+                var bv = _hapi_flag_value(ai, n, "--backup-to");
+                if (bv == 0) { _hapi_missing_value("--backup-to", "directory"); return 2; }
+                hapi_set_backup_dir(bv);
                 ai = ai + 1;
             }
             elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }
@@ -278,8 +311,8 @@ fn main(): i64 {
         while (ai < n) {
             var a = argv(ai);
             if (_hapi_argeq(a, "--root") == 1) {
-                var v = 0;
-                if (ai + 1 < n) { v = argv(ai + 1); }
+                var v = _hapi_flag_value(ai, n, "--root");
+                if (v == 0) { _hapi_missing_value("--root", "path"); return 2; }
                 var rc = _hapi_apply_root(v);
                 if (rc != 0) { return rc; }
                 ai = ai + 1;
@@ -297,8 +330,8 @@ fn main(): i64 {
         while (ai < n) {
             var a = argv(ai);
             if (_hapi_argeq(a, "--root") == 1) {
-                var v = 0;
-                if (ai + 1 < n) { v = argv(ai + 1); }
+                var v = _hapi_flag_value(ai, n, "--root");
+                if (v == 0) { _hapi_missing_value("--root", "path"); return 2; }
                 var rc = _hapi_apply_root(v);
                 if (rc != 0) { return rc; }
                 ai = ai + 1;
@@ -317,18 +350,16 @@ fn main(): i64 {
             var a = argv(ai);
             if (_hapi_argeq(a, "--dry-run") == 1) { hapi_set_dry_run(1); }
             elif (_hapi_argeq(a, "--root") == 1) {
-                var v = 0;
-                if (ai + 1 < n) { v = argv(ai + 1); }
+                var v = _hapi_flag_value(ai, n, "--root");
+                if (v == 0) { _hapi_missing_value("--root", "path"); return 2; }
                 var rc = _hapi_apply_root(v);
                 if (rc != 0) { return rc; }
                 ai = ai + 1;
             }
             elif (_hapi_argeq(a, "--backup-to") == 1) {
-                if (ai + 1 >= n) {
-                    eprint("hapi: --backup-to requires a directory argument\n", 49);
-                    return 2;
-                }
-                hapi_set_backup_dir(argv(ai + 1));
+                var bv = _hapi_flag_value(ai, n, "--backup-to");
+                if (bv == 0) { _hapi_missing_value("--backup-to", "directory"); return 2; }
+                hapi_set_backup_dir(bv);
                 ai = ai + 1;
             }
             elif (_hapi_is_flag(a) == 1) { _hapi_unexpected_flag(verb, a); return 2; }

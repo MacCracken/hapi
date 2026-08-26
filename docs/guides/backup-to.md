@@ -11,7 +11,7 @@ the snapshot.
 | verb              | --backup-to | what it snapshots                              |
 |-------------------|-------------|------------------------------------------------|
 | `hapi link`       | ✓           | regular files removed by `--force` (not symlinks) |
-| `hapi sync`       | ✓           | same (sync is a link wrapper)                  |
+| `hapi sync` | — | nothing: `sync` has no `--force`, so there is no destructive step to snapshot |
 | `hapi adopt`      | ✓           | the file about to be moved into the package   |
 | every other verb  | —           | exit 2 if passed                              |
 

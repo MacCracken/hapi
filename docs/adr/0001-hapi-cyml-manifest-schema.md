@@ -91,7 +91,16 @@ Field semantics:
     a file or a directory. Required.
   - `target` — path relative to the scoped root (`$HOME` by
     default). Required.
-- **`package.ignore`** — optional array of glob patterns. Files
+- **`package.ignore`** — ⚠ **RESERVED, NOT YET HONOURED.** The key is
+  accepted, validated, echoed by `hapi inspect` and folded into the
+  `sha1c:` manifest hash — but no verb applies it (F-026's sibling
+  F-025, 2026-08-25 audit). Do not rely on it to keep a file out of
+  `$HOME`: a `[[link]]` row that targets a directory materializes as a
+  SINGLE symlink to that whole directory, so every file inside it is
+  live regardless of this list. Honouring it would change what a
+  directory row materializes and how many audit entries a row writes —
+  both frozen at v1.0 — so it is a **v2.0** item, tracked on the
+  roadmap. The intended semantics, once implemented: files
   matching any pattern are excluded from any `[[link]]` row that
   targets a directory. Globs apply to the *source* side only; we
   never filter by target name. Pattern syntax matches POSIX
