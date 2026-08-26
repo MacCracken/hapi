@@ -108,6 +108,23 @@ _Nothing yet._
   (`hapi <X.Y.Z>`), which the release workflow's smoke step already asserts
   against the git tag.
 
+- **CI installs the toolchain with the upstream installer, not a hand-rolled
+  untar.** Both workflows read the `cyrius.cyml` pin and pipe it to
+  `scripts/install.sh` from the cyrius repo, then assert
+  `~/.cyrius/versions/<pin>/lib` exists before going further. The old block
+  untarred the release asset into a flat `$HOME/.cyrius/{bin,lib}` — the
+  pre-6.5 layout — which 6.5.x's `cyrius deps` rejects outright:
+  `error: cyrius.cyml pins version 6.5.35 but it is not installed at
+  ~/.cyrius/versions/6.5.35/lib`. That is what broke CI on this pin bump. The
+  installer lays out `versions/<v>/{bin,lib}` and symlinks `bin/` and `lib/`
+  at it, and additionally does SHA256 + Ed25519 signature verification the
+  old block skipped — which also had `|| true` on every `cp`, so a
+  half-copied toolchain reported success. Same pattern as darshana / patra /
+  libro. Verified end to end against a from-scratch install into a scratch
+  `CYRIUS_HOME`: the snapshot lands with 108 `.cyr` files, `cyrius deps`
+  exits 0 and leaves the vendored `lib/` byte-identical, and build + suite +
+  the release DCE smoke all pass.
+
 ### Known post-upgrade items
 - **`cyrius fmt --check` now fails on six files** — five in `src/`
   (`agnos_compat`, `audit`, `fs_link`, `cmd/adopt`, `cmd/link`) plus
