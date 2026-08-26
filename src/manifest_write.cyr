@@ -25,6 +25,72 @@ enum HapiMfWriteError {
     HapiMfwRowNotFound = 4;
 }
 
+# Directory portion of `path` (no trailing slash), or "." when there is
+# no `/`. Local rather than fs_link.cyr's, to keep this module's include
+# set minimal.
+fn _hmw_dirname(path): i64 {
+    var n = strlen(path);
+    var last = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(path + i) == 47) { last = i; }
+        i = i + 1;
+    }
+    if (last < 0) { return "."; }
+    if (last == 0) { return "/"; }
+    var out = alloc(last + 1);
+    memcpy(out, path, last);
+    store8(out + last, 0);
+    return out;
+}
+
+# Serialize the manifest read-modify-write across processes.
+#
+# The lock is taken on the PACKAGE DIRECTORY, not the manifest. The
+# manifest is replaced by rename, so two writers that flock it by path
+# can end up holding two different inodes and exclude nobody; the
+# directory inode is stable and every writer agrees on it. Locking the
+# directory also avoids leaving a `.lock` artifact in the user's
+# dotfiles repo.
+#
+# LOCK_EX blocks, which is what we want: an adopt that arrives mid-write
+# should wait its turn, not fail. Returns the held fd, or -1.
+fn _hmw_lock(manifest_path): i64 {
+    var dir = _hmw_dirname(manifest_path);
+    var fd = file_open(dir, O_RDONLY, 0);
+    if (fd < 0) { return 0 - 1; }
+    if (xflock(fd, 2) < 0) { file_close(fd); return 0 - 1; }    # LOCK_EX
+    return fd;
+}
+
+fn _hmw_unlock(fd): i64 {
+    if (fd < 0) { return 0; }
+    xflock(fd, 8);                                              # LOCK_UN
+    return file_close(fd);
+}
+
+# Render a non-negative integer as a heap cstring (for the tmp name).
+fn _hmw_itoa(n): i64 {
+    if (n <= 0) { return "0"; }
+    var digits[24];
+    var i = 0;
+    var v = n;
+    while (v > 0) {
+        var d = v - (v / 10) * 10;
+        store8(&digits + i, 48 + d);
+        v = v / 10;
+        i = i + 1;
+    }
+    var out = alloc(i + 1);
+    var j = 0;
+    while (j < i) {
+        store8(out + j, load8(&digits + i - 1 - j));
+        j = j + 1;
+    }
+    store8(out + i, 0);
+    return out;
+}
+
 # Read the entire file into a freshly-allocated buffer. Returns
 # the buffer; writes the length through *out_len. Returns 0 on
 # any read failure, INCLUDING a short read.
@@ -63,22 +129,40 @@ fn _hmw_slurp(path, out_len): i64 {
     return buf;
 }
 
-# Atomic write: write `buf[0..n]` to `path` via path.tmp + rename.
+# Atomic write: write `buf[0..n]` to `path` via `path.<pid>.tmp` +
+# rename.
+#
+# The tmp name carries the pid and is created O_EXCL. Through 1.0.6 it
+# was a fixed `path.tmp` opened O_TRUNC, so two concurrent `hapi adopt`
+# invocations against one package used the SAME staging file and
+# clobbered each other mid-write. Measured on a 3 MB manifest with 16
+# concurrent adopts: **1** manifest row landed, and only 2 of the 16
+# committed at all (F-012). A pid-unique name removes the collision;
+# O_EXCL means a leftover from a crashed run is reported rather than
+# silently reused.
 fn _hmw_write_atomic(path, buf, n): i64 {
     var plen = strlen(path);
-    var tmp = alloc(plen + 5);
-    memcpy(tmp, path, plen);
-    memcpy(tmp + plen, ".tmp\x00", 5);
+    var pid = sys_getpid();
+    var pids = _hmw_itoa(pid);
+    var pl = strlen(pids);
+    # path + "." + pid + ".tmp" + NUL
+    var tmp = alloc(plen + 1 + pl + 5);
+    var pos = 0;
+    memcpy(tmp + pos, path, plen); pos = pos + plen;
+    store8(tmp + pos, 46); pos = pos + 1;              # .
+    memcpy(tmp + pos, pids, pl); pos = pos + pl;
+    memcpy(tmp + pos, ".tmp\x00", 5);
 
-    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0x1A4);
     if (fd < 0) { return 0 - HapiMfwWriteFailed; }
     var wrc = file_write(fd, buf, n);
-    if (wrc != n) { file_close(fd); return 0 - HapiMfwWriteFailed; }
+    if (wrc != n) { file_close(fd); hapi_unlink(tmp); return 0 - HapiMfwWriteFailed; }
     hapi_fsync(fd);
-    file_close(fd);
+    var crc = file_close(fd);
+    if (crc < 0) { hapi_unlink(tmp); return 0 - HapiMfwWriteFailed; }
 
     var rrc = hapi_rename(tmp, path);
-    if (rrc < 0) { return 0 - HapiMfwRenameFailed; }
+    if (rrc < 0) { hapi_unlink(tmp); return 0 - HapiMfwRenameFailed; }
     return 0;
 }
 
@@ -106,7 +190,21 @@ fn _hmw_find_separator(buf, n): i64 {
 # Append a [[link]] row to `manifest_path`. Inserted just before
 # the body separator if one exists, else at EOF (with leading
 # blank-line padding either way for readability).
+# Public entry: hold the package-directory lock across the whole
+# read-modify-write. Without it, two concurrent `hapi adopt` runs each
+# slurped the pre-edit manifest and the last rename won — every
+# filesystem mutation committed while the row recording it vanished.
+# Measured on a 3 MB manifest with 16 concurrent adopts: 16 files moved,
+# 16 symlinks planted, 16 trail entries — and ONE manifest row (F-012).
 fn manifest_append_link_row(manifest_path, source, target): i64 {
+    var lk = _hmw_lock(manifest_path);
+    if (lk < 0) { return 0 - HapiMfwWriteFailed; }
+    var rc = _hmw_append_unlocked(manifest_path, source, target);
+    _hmw_unlock(lk);
+    return rc;
+}
+
+fn _hmw_append_unlocked(manifest_path, source, target): i64 {
     var len = 0;
     var buf = _hmw_slurp(manifest_path, &len);
     if (buf == 0) { return 0 - HapiMfwReadFailed; }
@@ -280,6 +378,14 @@ fn _hmw_find_link_block(buf, end, from): i64 {
 # Trims the preceding blank line(s) along with the block so the
 # manifest doesn't grow blank-line clutter from churn.
 fn manifest_remove_link_row(manifest_path, source, target): i64 {
+    var lk = _hmw_lock(manifest_path);
+    if (lk < 0) { return 0 - HapiMfwWriteFailed; }
+    var rc = _hmw_remove_unlocked(manifest_path, source, target);
+    _hmw_unlock(lk);
+    return rc;
+}
+
+fn _hmw_remove_unlocked(manifest_path, source, target): i64 {
     var len = 0;
     var buf = _hmw_slurp(manifest_path, &len);
     if (buf == 0) { return 0 - HapiMfwReadFailed; }

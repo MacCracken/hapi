@@ -557,8 +557,13 @@ fn test_audit_reader_drops_torn_line() {
     return 0;
 }
 
-fn test_audit_reader_drops_malformed() {
-    test_group("audit_reader: drops malformed lines, keeps good ones");
+# F-016 (1.0.6): an INTERIOR malformed line is corruption, not a torn
+# write, and is refused. Silently skipping it is what let `rollback`
+# report complete success while the link that line recorded stayed on
+# disk, and `list` undercount. A TRAILING partial line is still dropped
+# — that is the writer's atomic-append contract (see the test above).
+fn test_audit_reader_refuses_interior_malformed() {
+    test_group("audit_reader: refuses an interior malformed line");
 
     var env = _test_fresh_env();
     var audit_path = load64(env + 8);
@@ -569,9 +574,88 @@ fn test_audit_reader_drops_malformed() {
     file_write(fd, content, strlen(content));
     file_close(fd);
 
-    var entries = audit_read(audit_path);
-    assert_eq(vec_len(entries), 2, "two valid lines parsed; junk dropped");
+    var r = audit_read_r(audit_path);
+    assert_eq(is_err_result(r), 1, "corrupt trail is an error, not a short read");
+    assert_eq(load64(r + 8), HapiArCorrupt, "reported as HapiArCorrupt");
+    assert_eq(audit_corrupt_line(), 2, "names the offending line");
 
+    # Every destructive consumer must refuse rather than act on a
+    # partial view. `list` too: an undercount is worse than a refusal.
+    assert_eq(cmd_rollback(), 1, "rollback refuses a corrupt trail");
+    assert_eq(cmd_unlink("good"), 1, "unlink refuses a corrupt trail");
+    assert_eq(cmd_list(), 1, "list refuses a corrupt trail");
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-007 (1.0.6): the reader used a fixed 256 KB buffer and stopped at
+# the cap, so once the trail outgrew it `rollback` could not see the
+# most recent checkpoint marker, fell back to start=0, and reversed the
+# OLDEST still-live links — 637 settled links destroyed on an 800-entry
+# trail, exit 0 — while leaving the recent work in place.
+fn test_audit_reader_reads_past_256k() {
+    test_group("audit_reader: reads a trail past the old 256 KB cap");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+    audit_ensure_dir();
+
+    # ~330 bytes/entry x 1000 = ~330 KB, comfortably past 262144.
+    var fd = file_open(audit_path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    assert(fd >= 0, "trail opened for writing");
+    var pad = alloc(257);
+    var k = 0;
+    while (k < 256) { store8(pad + k, 97); k = k + 1; }   # 'a'
+    store8(pad + 256, 0);
+    var i = 0;
+    while (i < 1000) {
+        file_write(fd, "{\"op\":\"link\",\"pkg\":\"p\",\"abs_target\":\"/", 38);
+        file_write(fd, pad, 256);
+        file_write(fd, "\"}\n", 3);
+        i = i + 1;
+    }
+    file_close(fd);
+
+    var before = 0;
+    var raw = _hmw_slurp(audit_path, &before);
+    assert(before > 262144, "fixture really is past the old cap");
+
+    var r = audit_read_r(audit_path);
+    assert_eq(is_err_result(r), 0, "reads without error");
+    assert_eq(vec_len(load64(r + 8)), 1000, "every entry is visible, not just the first 256 KB");
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-017 (1.0.6): an unreadable trail was swallowed as "empty", so
+# `list` / `rollback` / `unlink` exited 0 having done nothing. An
+# ABSENT trail is still Ok(empty) — that is the first-run case.
+fn test_audit_reader_absent_vs_unreadable() {
+    test_group("audit_reader: absent trail is empty, unreadable is an error");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+
+    # Absent: Ok(empty), and the verbs still succeed.
+    var r0 = audit_read_r(audit_path);
+    assert_eq(is_err_result(r0), 0, "absent trail is not an error");
+    assert_eq(vec_len(load64(r0 + 8)), 0, "absent trail reads as empty");
+
+    # Present but unreadable: an error, not empty.
+    audit_ensure_dir();
+    var fd = file_open(audit_path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    file_write(fd, "{\"op\":\"link\",\"pkg\":\"a\",\"abs_target\":\"/x\"}\n", 43);
+    file_close(fd);
+    assert_eq(sys_chmod(audit_path, 0), 0, "trail made unreadable");
+
+    var r1 = audit_read_r(audit_path);
+    assert_eq(is_err_result(r1), 1, "unreadable trail is an error");
+    assert_eq(load64(r1 + 8), HapiArOpenFailed, "reported as HapiArOpenFailed");
+    assert_eq(cmd_rollback(), 1, "rollback refuses an unreadable trail");
+
+    sys_chmod(audit_path, 0x1A4);
     _test_clear_env();
     return 0;
 }
@@ -2226,7 +2310,9 @@ fn main() {
     test_cmd_link_force_refuses_directory();
     test_audit_reader_roundtrip();
     test_audit_reader_drops_torn_line();
-    test_audit_reader_drops_malformed();
+    test_audit_reader_refuses_interior_malformed();
+    test_audit_reader_reads_past_256k();
+    test_audit_reader_absent_vs_unreadable();
     test_cmd_unlink_round_trip();
     test_cmd_unlink_refuses_user_mutation();
     test_cmd_rollback_full();

@@ -187,7 +187,24 @@ fn _hrb_reverse_adopt(entry): i64 {
 fn _fsl_str_to_cstr_helper(c): i64 { return c; }
 
 fn cmd_rollback(): i64 {
-    var trail = audit_read_default();
+    # A trail that exists but will not read, or that has a malformed
+    # interior line, is a conflict with the user's own history — surface
+    # it rather than acting on a partial view. An ABSENT trail is still
+    # Ok(empty): that is the first-run case, not a failure.
+    var tr = audit_read_default_r();
+    if (is_err_result(tr) == 1) {
+        var trc = load64(tr + 8);
+        _hrb_eputs("hapi: ");
+        _hrb_eputs(hapi_ar_err_msg(trc));
+        if (trc == HapiArCorrupt) {
+            _hrb_eputs(" (line ");
+            _hrb_eputs(_har_itoa(audit_corrupt_line()));
+            _hrb_eputs(")");
+        }
+        _hrb_eputs("\n  refusing to act on a partial view of the trail\n");
+        return 1;
+    }
+    var trail = load64(tr + 8);
     var n = vec_len(trail);
     if (n == 0) {
         _hrb_eputs("hapi: audit trail is empty — nothing to roll back\n");

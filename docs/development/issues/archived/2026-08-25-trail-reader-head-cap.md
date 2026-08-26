@@ -1,3 +1,23 @@
+> ## ✅ RESOLVED in 1.0.6 (2026-08-25)
+>
+> All three landed together, as this issue proposed. `audit_read_r`
+> sizes the read from the file (`xlseek` SEEK_END), distinguishes
+> `ENOENT` from every other open failure, and refuses an interior
+> malformed line while still dropping a trailing partial one.
+> `rollback` / `unlink` / `list` consume the `Result` and exit 1 with a
+> diagnostic — naming the line number for a corrupt entry — rather than
+> acting on a partial view.
+>
+> Verified against the reproduction below: an 800-entry / 328,800-byte
+> trail that previously destroyed **637 settled links** while keeping
+> the one the user wanted undone now reverses **`1 / 1 entries`**.
+> Mutation-proven: reverting the three repairs turns the new test group
+> RED with ten distinct failures, including `got 882, expected 1000` as
+> the old 256 KB cap truncates mid-trail.
+>
+> `hapi trail compact` remains open and orthogonal, as the *Not this
+> fix* section below argued — a v2.0 verb, not a substitute.
+
 # `audit_read` caps the trail at 256 KB from the head, so `rollback` reverses the wrong window
 
 **Discovered:** 2026-08-25, P(-1) hardening sweep (F-007, with F-016 and F-017 in the same function)

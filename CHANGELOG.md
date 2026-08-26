@@ -6,6 +6,95 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.0.6] - 2026-08-25
+
+> **1.0.x hardening arc — Tier 1, both open items.** The trail reader
+> (F-007 / F-016 / F-017) and the manifest writer's concurrency
+> (F-012). Every one of them ends the same way: a verb reporting
+> success having done the wrong thing, or nothing at all. No
+> caller-visible surface change; the v1.0 contract stays frozen. Suite
+> **295 assertions / 79 groups**, plus a new shell harness for the
+> defect `cyrius test` structurally cannot express.
+
+### Fixed
+- **`rollback` reversed the wrong window once the trail passed 256 KB
+  (F-007).** `audit_read` read the *first* 256 KB of an append-only
+  file, so past that point it could not see the most recent checkpoint
+  marker, fell back to `start = 0`, and reversed the **oldest still-live
+  links** — settled dotfiles the user had not touched in months — while
+  leaving the recent work in place. Exit 0, reported as success. The
+  user's mental model is "undo what I just did"; the action taken was
+  the exact opposite.
+
+  Measured on a real 800-entry / 328,800-byte trail: a checkpoint, one
+  new package linked, then `hapi rollback` — **637 settled links
+  destroyed, and the one link the user wanted undone left in place.**
+  Post-fix the same fixture reverses `1 / 1 entries`, exactly the link
+  past the marker. The read is now sized from the file (`xlseek`
+  SEEK_END, the same shape 1.0.5 used to fix F-009), with one byte of
+  headroom so a trail that grows mid-read is detected rather than
+  silently truncated.
+- **An interior malformed line was silently skipped (F-016).** A bad
+  sector, a partially-flushed extent after a crash, or an accidental
+  editor save damaged one entry, and every consumer stepped over it:
+  `rollback` claimed complete success while the link that line recorded
+  survived on disk, `unlink` missed it, `list` undercounted. hapi's rule
+  is that conflicts surface explicitly, and a damaged trail is a
+  conflict with the user's own history — it is now refused, naming the
+  line number. A **trailing** partial line is still dropped silently:
+  that is the writer's atomic-append contract, and it keeps its own
+  standing test.
+- **An unreadable trail was swallowed as "empty" (F-017).** A
+  permissions change, a failing disk or fd exhaustion made `list`,
+  `rollback` and `unlink` exit 0 having done nothing, so a script keying
+  on exit status concluded the rollback had succeeded. `ENOENT` is still
+  `Ok(empty)` — that is the legitimate first-run case — but every other
+  open or read failure is now an error.
+
+- **Concurrent `hapi adopt` committed every filesystem mutation and
+  dropped the manifest rows recording them (F-012).** The
+  read-modify-write on `hapi.cyml` was unsynchronized and staged through
+  a fixed `hapi.cyml.tmp`, so two adopts against one package used the
+  same staging file and the last rename won.
+
+  Measured on a 3 MB manifest with 16 concurrent adopts: **16 files
+  moved, 16 symlinks planted, 16 trail entries — and 1 manifest row.**
+  hapi's declarative state stopped describing its own filesystem, and
+  because `status` walks manifest rows it could not see the orphans.
+  Two changes, and the order matters — the first alone made things
+  *worse*: staging is now `hapi.cyml.<pid>.tmp` opened `O_EXCL` (before
+  it, 14 of the 16 adopts failed outright and were at least visible;
+  after it they all "succeeded" and 15 rows vanished silently), and the
+  read-modify-write now holds `LOCK_EX` for its whole duration. The lock
+  is taken on the **package directory**, not the manifest: the manifest
+  is replaced by rename, so writers flocking it by path can hold two
+  different inodes and exclude nobody — and locking the directory leaves
+  no `.lock` artifact in the user's dotfiles repo. Post-fix: 16/16 on
+  every axis across repeated runs.
+
+### Added
+- **`scripts/concurrency-test.sh`** — the regression harness for F-012.
+  The defect needs two hapi *processes*, and `.tcyr` cannot fork while
+  hapi is syscall-only by rule, so there was no honest way to express it
+  inside `cyrius test`. It lives alongside, the way the benchmark
+  harness does, and CI runs it. Mutation-proven: dropping the lock turns
+  it RED with `manifest rows: got 1, expected 16`.
+
+### Changed
+- **`audit_read_r` / `audit_read_default_r`** return a `Result`, and
+  `rollback` / `unlink` / `list` use them: on a trail that exists but
+  cannot be read or parsed, each prints what is wrong (with the line
+  number for a corrupt entry) and exits 1 rather than acting on a
+  partial view. `audit_read` remains as a vec-returning wrapper for call
+  sites that genuinely cannot act on an error.
+- **`tests/hapi.tcyr`'s "drops malformed lines" group is now "refuses an
+  interior malformed line".** That test asserted the behaviour F-016
+  identifies as the defect — it was encoding the bug as the contract, so
+  it changed with the fix. Each of the three repairs is mutation-proven:
+  reverting them turns the new group RED with ten distinct failures,
+  including F-007's `got 882, expected 1000` as the old cap truncates
+  mid-trail.
+
 ## [1.0.5] - 2026-08-25
 
 > P(-1) hardening sweep per CLAUDE.md, and the repairs out of it.

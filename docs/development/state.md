@@ -5,6 +5,33 @@
 
 ## Version
 
+**1.0.6** — 1.0.x hardening arc, Tier 1 item 1 (2026-08-25). Closes
+**F-007**, **F-016** and **F-017**, all in `audit_read`. F-007 was the
+sharpest defect the 2026-08-25 sweep found: the reader took the *first*
+256 KB of an append-only file, so once the trail outgrew that,
+`rollback` could not see the most recent checkpoint marker, fell back to
+`start = 0`, and reversed the **oldest still-live links** while leaving
+the recent work in place — measured at **637 settled links destroyed**
+on an 800-entry trail, exit 0. The read is now sized from the file;
+`ENOENT` is distinguished from every other open failure; an interior
+malformed line is refused (a trailing partial one is still dropped —
+that is the writer's atomic-append contract). `rollback` / `unlink` /
+`list` consume `audit_read_default_r` and exit 1 with a diagnostic
+rather than acting on a partial view.
+
+Also closes **F-012**, the other open Tier 1 item: the manifest
+read-modify-write was unsynchronized and staged through a fixed
+`hapi.cyml.tmp`, so 16 concurrent adopts on a 3 MB manifest committed
+16 renames, 16 symlinks and 16 trail entries while leaving **one**
+manifest row. Now `LOCK_EX` on the package directory (the manifest is
+replaced by rename, so flocking it by path excludes nobody) plus a
+pid-unique `O_EXCL` staging file; 16/16 after. Its regression is
+`scripts/concurrency-test.sh` — the defect needs two processes, which
+`.tcyr` cannot express — and CI runs it.
+
+Suite 295 / 79 plus the shell harness. No surface change — the v1.0
+contract stays frozen.
+
 **1.0.5** — P(-1) hardening sweep + repairs (2026-08-25). **Six
 HIGH-severity defects fixed**: two heap overflows reachable from an
 ordinary manifest (`hapi_mf_canonicalize` and the audit entry
@@ -269,8 +296,8 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 280 assertions across
-  76 test groups (the group figure read `66` from 1.0.1 through
+- `tests/hapi.tcyr` — primary suite. 295 assertions across
+  79 test groups (the group figure read `66` from 1.0.1 through
   1.0.3 — a stale header; the per-tier breakdown below has always
   summed to the real count):
   - Manifest (7 groups): minimal, three-link acceptance,
@@ -286,6 +313,9 @@ in-source magic-number `syscall(N, ...)` calls.)_
   - rollback (5 groups): full reverse, link/unlink/link →
     clean, idempotent, stops at marker, replayed link entry
     carries no `backup_path`
+  - trail reader (3 groups, 1.0.6): refuses an interior malformed
+    line (F-016), reads a trail past the old 256 KB cap (F-007),
+    absent trail is empty vs unreadable is an error (F-017)
   - P(-1) 1.0.5 buffer/capability regressions (5 groups):
     canonicalize refuses rather than overflowing (F-014), audit
     entry composer refuses rather than overflowing (F-008), a
@@ -393,9 +423,6 @@ bucketed by blast radius in
 [`roadmap.md`](roadmap.md#v10x--hardening-arc-open-from-the-2026-08-25-p-1-sweep),
 and the Tier 1 items carry their own issue files:
 
-- [`issues/2026-08-25-trail-reader-head-cap.md`](issues/2026-08-25-trail-reader-head-cap.md)
-  — F-007 / F-016 / F-017: `rollback` reverses the wrong window
-  once the trail passes 256 KB.
 - [`issues/2026-08-25-manifest-write-integrity.md`](issues/2026-08-25-manifest-write-integrity.md)
   — F-012 / F-021 / F-028: the unlocked manifest read-modify-write.
 - [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md)

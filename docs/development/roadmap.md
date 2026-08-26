@@ -38,24 +38,28 @@ runs in.
 
 ### Tier 1 — silent data loss or a wrong destructive action
 
-- **F-007 · the trail reader's 256 KB head cap** — `audit_read` reads
-  the first 256 KB of the trail, so once it outgrows that, `rollback`
-  cannot see the most recent checkpoint marker, falls back to
-  `start=0`, and reverses the *oldest still-live* links — destroying
-  settled dotfiles — while exiting 0. Roughly 590–900 entries on a
-  realistic `$HOME`. Fix with a size-derived read; land **F-016** (an
-  interior malformed line must refuse, not be silently skipped) and
-  **F-017** (an unreadable trail is an error, not "empty") in the same
-  function while it is open.
-  → [`issues/2026-08-25-trail-reader-head-cap.md`](issues/2026-08-25-trail-reader-head-cap.md)
-- **F-012 · the unlocked manifest read-modify-write** — concurrent
-  `hapi adopt` commits the renames, the symlinks and the audit entries
-  while silently dropping manifest rows, so hapi's declarative state
-  stops describing the filesystem and `status` cannot see the orphans.
-  Needs `flock` plus a pid-unique `O_EXCL` tmp name. **F-021** (no TOML
-  escaping on the written row) and **F-028** (a SIGKILL mid-`adopt`
-  leaves the file outside `$HOME` with nothing recording it) are the
-  same write path.
+- ~~**F-007 · the trail reader's 256 KB head cap**, with **F-016**
+  (interior malformed line) and **F-017** (unreadable trail read as
+  empty)~~ **— shipped in 1.0.6.** Measured before the fix: an
+  800-entry trail, a checkpoint, one new link, `hapi rollback` → **637
+  settled links destroyed and the recent link kept**. After: `1 / 1
+  entries`. The read is sized from the file, `ENOENT` is distinguished
+  from every other open failure, an interior malformed line is refused
+  with its line number, and the three consuming verbs exit 1 rather than
+  acting on a partial view. Mutation-proven.
+  → [`issues/archived/2026-08-25-trail-reader-head-cap.md`](issues/archived/2026-08-25-trail-reader-head-cap.md)
+- ~~**F-012 · the unlocked manifest read-modify-write**~~ **— shipped in
+  1.0.6.** Measured before: 16 concurrent adopts on a 3 MB manifest →
+  16 files moved, 16 symlinks, 16 trail entries, **1 manifest row**.
+  After: 16/16 on every axis. `LOCK_EX` on the package directory (not
+  the manifest — it is replaced by rename, so path-flocking writers can
+  hold different inodes) plus a pid-unique `O_EXCL` staging file. Its
+  regression lives in `scripts/concurrency-test.sh`, which CI runs,
+  because the defect needs two processes and `.tcyr` cannot fork.
+  **Still open on the same write path: F-021** (no TOML escaping on the
+  written row) and **F-028** (a SIGKILL mid-`adopt` leaves the file
+  outside `$HOME` with nothing recording it — detection via `hapi check`
+  is the 1.0.x half; true crash-atomicity is an ADR 0004 revision).
   → [`issues/2026-08-25-manifest-write-integrity.md`](issues/2026-08-25-manifest-write-integrity.md)
 - **F-015 / F-002 · per-component symlink resolution** — a symlinked
   *intermediate* component of an ordinary `$HOME` target escapes the

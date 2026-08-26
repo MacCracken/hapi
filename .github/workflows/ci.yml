@@ -80,6 +80,14 @@ jobs:
         # needs mirshi, which is not on the runner.
         run: cyrius build --agnos src/main.cyr build/${{ github.event.repository.name }}-agnos
 
+      - name: Concurrency harness
+        # scripts/concurrency-test.sh covers F-012 — the unlocked
+        # manifest read-modify-write. It needs two hapi PROCESSES
+        # racing, which the .tcyr harness cannot express (it cannot
+        # fork, and hapi is syscall-only by rule), so it runs here
+        # rather than under `cyrius test`.
+        run: sh scripts/concurrency-test.sh build/${{ github.event.repository.name }}
+
       - name: Test
         # v5.6.28: bare `cyrius test` picks up the [build].test entry
         # AND auto-discovers tests/*.tcyr — avoids the previous

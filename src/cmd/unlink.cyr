@@ -172,7 +172,24 @@ fn cmd_unlink(pkg_arg): i64 {
         return 2;
     }
 
-    var trail = audit_read_default();
+    # A trail that exists but will not read, or that has a malformed
+    # interior line, is a conflict with the user's own history — surface
+    # it rather than acting on a partial view. An ABSENT trail is still
+    # Ok(empty): that is the first-run case, not a failure.
+    var tr = audit_read_default_r();
+    if (is_err_result(tr) == 1) {
+        var trc = load64(tr + 8);
+        _hul_eputs("hapi: ");
+        _hul_eputs(hapi_ar_err_msg(trc));
+        if (trc == HapiArCorrupt) {
+            _hul_eputs(" (line ");
+            _hul_eputs(_har_itoa(audit_corrupt_line()));
+            _hul_eputs(")");
+        }
+        _hul_eputs("\n  refusing to act on a partial view of the trail\n");
+        return 1;
+    }
+    var trail = load64(tr + 8);
     if (vec_len(trail) == 0) {
         _hul_eputs("hapi: audit trail is empty — nothing to unlink\n");
         return 0;

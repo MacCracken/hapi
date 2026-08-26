@@ -1,3 +1,23 @@
+> ## ◐ PARTIALLY RESOLVED in 1.0.6 (2026-08-25)
+>
+> **F-012 is fixed.** Both halves landed, and the order mattered: the
+> pid-unique `O_EXCL` staging name alone made things *worse* (before it,
+> 14 of 16 concurrent adopts failed visibly; after it, all 16 "succeeded"
+> and 15 rows vanished silently), so the `LOCK_EX` hold is the actual
+> fix. The lock is on the **package directory**, not the manifest —
+> the manifest is replaced by rename, so writers flocking it by path can
+> hold two different inodes and exclude nobody, and locking the
+> directory leaves no `.lock` artifact in the user's dotfiles repo.
+> Measured: 16 concurrent adopts on a 3 MB manifest went from
+> `1 manifest row` to `16/16` on every axis, across repeated runs.
+>
+> **The test home this issue called for now exists**:
+> `scripts/concurrency-test.sh`, run by CI. Mutation-proven — dropping
+> the lock turns it RED with `manifest rows: got 1, expected 16`.
+>
+> **Still open on this write path: F-021 and F-028.** Escaping on write,
+> and the crash window. This issue stays here until both close.
+
 # The manifest read-modify-write has no lock, no escaping, and no crash breadcrumb
 
 **Discovered:** 2026-08-25, P(-1) hardening sweep (F-012, with F-021 and F-028 on the same write path)
