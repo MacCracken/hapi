@@ -1,4 +1,4 @@
-> ## ◐ PARTIALLY RESOLVED in 1.0.6 (2026-08-25)
+> ## ✅ RESOLVED — F-012 in 1.0.6, F-021 and F-028 in 1.0.7 (2026-08-25)
 >
 > **F-012 is fixed.** Both halves landed, and the order mattered: the
 > pid-unique `O_EXCL` staging name alone made things *worse* (before it,
@@ -15,8 +15,26 @@
 > `scripts/concurrency-test.sh`, run by CI. Mutation-proven — dropping
 > the lock turns it RED with `manifest rows: got 1, expected 16`.
 >
-> **Still open on this write path: F-021 and F-028.** Escaping on write,
-> and the crash window. This issue stays here until both close.
+> **F-021 closed in 1.0.7 — but not as this issue proposed.** "Escape on
+> write, mirroring the parser's contract" turned out to be impossible:
+> the parser has no un-escape half. Its `\`-skips-the-next-byte rule
+> stops a quote from *terminating* the value but never strips the
+> backslash, so a written `ev\"il` parses back as six characters, not
+> the filename. Adding an un-escape would change how every existing
+> manifest parses (ADR 0001 → v2.0). hapi now **refuses** to write a row
+> it cannot faithfully represent, and `adopt` checks before the rename
+> so nothing is moved.
+>
+> **F-028's detection half closed in 1.0.7.** `hapi check` walks the
+> package directory and reports divergence both ways — a row whose
+> source is missing, and a file no row claims (the crash orphan).
+> Staging leftovers are not flagged. It uses `lib/fs.cyr`'s `dir_list`
+> rather than a hand-rolled dirent parser, which also retires `fs` from
+> the audit's dead-dependency list.
+>
+> **The prevention half is deliberately NOT here.** True crash-atomicity
+> means an intent record written before the rename — an **ADR 0004
+> revision**, tracked on the roadmap as a v2.0 candidate.
 
 # The manifest read-modify-write has no lock, no escaping, and no crash breadcrumb
 

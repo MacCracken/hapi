@@ -5,6 +5,21 @@
 
 ## Version
 
+**1.0.7** — 1.0.x hardening arc, the rest of the manifest write path
+(2026-08-25). Closes **F-021** and **F-028**, and with them the
+write-path issue 1.0.6 opened. F-021: the writer emitted `source` /
+`target` raw, so adopting `.ev"il` wrote `source = "ev"il"` and
+`inspect` read it back as `ev` — declared state describing a file that
+does not exist, exit 0. Escaping cannot fix it (the parser has no
+un-escape half: `ev\"il` parses back as six characters), and adding one
+is an ADR 0001 change, so hapi **refuses** to write a row it cannot
+faithfully represent, checking before the rename so nothing moves.
+F-028 (detection half): `hapi check` now compares the manifest against
+the package directory both ways — a row whose source vanished, and a
+file no row claims, which is the signature of an `adopt` interrupted
+between the rename and the manifest write. Prevention is an ADR 0004
+revision, now a v2.0 roadmap item. Suite 307 / 81.
+
 **1.0.6** — 1.0.x hardening arc, Tier 1 item 1 (2026-08-25). Closes
 **F-007**, **F-016** and **F-017**, all in `audit_read`. F-007 was the
 sharpest defect the 2026-08-25 sweep found: the reader took the *first*
@@ -296,8 +311,8 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 295 assertions across
-  79 test groups (the group figure read `66` from 1.0.1 through
+- `tests/hapi.tcyr` — primary suite. 307 assertions across
+  81 test groups (the group figure read `66` from 1.0.1 through
   1.0.3 — a stale header; the per-tier breakdown below has always
   summed to the real count):
   - Manifest (7 groups): minimal, three-link acceptance,

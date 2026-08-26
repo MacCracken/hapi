@@ -261,6 +261,19 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
         }
     }
 
+    # 0b. Refuse an unrepresentable name BEFORE any mutation. The
+    # manifest write below would refuse it too, but only after the
+    # rename and the symlink had already committed — which is exactly
+    # the shape (mutations without a record) this arc exists to remove.
+    if (_hmw_representable(source_cstr) == 0 || _hmw_representable(target_cstr) == 0) {
+        _hap_eputs("hapi: cannot adopt ");
+        _hap_eputs(abs_target);
+        _hap_eputs("\n  ");
+        _hap_eputs(hapi_mfw_err_msg(HapiMfwUnrepresentable));
+        _hap_eputs("\n  (nothing was moved; rename the file and try again)\n");
+        return 1;
+    }
+
     # 1. Move the file into the package (sys_rename).
     var rrc = hapi_rename(abs_target, abs_source);
     if (rrc < 0) {

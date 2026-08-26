@@ -6,6 +6,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.0.7] - 2026-08-25
+
+> **1.0.x hardening arc — the rest of the manifest write path.** F-021
+> and F-028, the two findings left on the path 1.0.6 locked. That closes
+> `issues/2026-08-25-manifest-write-integrity.md` entirely. No
+> caller-visible surface change; the v1.0 contract stays frozen. Suite
+> **307 assertions / 81 groups**.
+
+### Fixed
+- **A quote in a filename silently rewrote the manifest row (F-021).**
+  `manifest_append_link_row` wrote `source` / `target` raw, so adopting
+  a file named `.ev"il` produced `source = "ev"il"` and `hapi inspect`
+  read it back as `ev` — hapi's declared state describing a file that
+  does not exist, at exit 0. A later `link` / `sync` would act on that
+  row.
+
+  ⚠ **Escaping is not the fix, and finding out why changed it.** The
+  audit proposed mirroring the parser's escaping contract; the parser
+  turns out not to have one. Its `\`-skips-the-next-byte rule stops a
+  quote from *terminating* the value but never strips the backslash, so
+  a written `ev\"il` parses back as the six characters `ev\"il` —
+  still not the filename. There is no un-escape half to mirror, and
+  adding one would change how every existing manifest parses: an ADR
+  0001 frozen-surface change, so v2.0.
+
+  hapi therefore **refuses to write a row it cannot faithfully
+  represent** — `"`, `\`, and control bytes — rather than writing one
+  that quietly means something else. `adopt` checks before the rename,
+  so nothing is moved: the file stays where it is with a message naming
+  the reason. Ordinary names are unaffected.
+- **A crash mid-`adopt` left the file invisible to every verb (F-028,
+  detection half).** `adopt` renames the file into the package before it
+  writes the row, so a SIGKILL, an OOM kill or a closing lid in that
+  window strands the user's dotfile in the package with **no row, no
+  symlink and no trail entry** — and every other verb reports a clean
+  world, because they all start from manifest rows. Only a directory
+  walk can see it.
+
+  `hapi check` now compares the manifest against the package directory
+  in both directions: a row whose source is missing, and a file in the
+  package that no row claims. Staging leftovers (`hapi.cyml.<pid>.tmp`)
+  are correctly not orphans. Exit 1 on divergence, which is what a check
+  verb is for; the exit-code contract is unchanged.
+
+  This is detection, not prevention, and deliberately so — true
+  crash-atomicity means writing an intent record before the rename,
+  which is an **ADR 0004 revision**, not a patch. It stays on the
+  roadmap.
+
+### Changed
+- **`fs` is no longer a dead dependency.** `check`'s directory walk uses
+  `lib/fs.cyr`'s `dir_list`, which already handles both the Linux and
+  agnos dirent layouts — so hapi does not hand-roll a per-target dirent
+  parser, which is the exact class of divergence this arc keeps finding.
+  The audit's "declared but unused" note on `fs` is closed; `slice`
+  remains unused.
+
 ## [1.0.6] - 2026-08-25
 
 > **1.0.x hardening arc — Tier 1, both open items.** The trail reader

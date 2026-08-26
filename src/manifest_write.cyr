@@ -23,6 +23,52 @@ enum HapiMfWriteError {
     HapiMfwWriteFailed = 2;
     HapiMfwRenameFailed = 3;
     HapiMfwRowNotFound = 4;
+    HapiMfwUnrepresentable = 5;
+}
+
+# Can `s` be written into a `hapi.cyml` string value and read back as
+# itself? (F-021)
+#
+# The honest answer for three byte classes is no, and escaping does not
+# help: the parser's `\`-skips-the-next-byte rule stops a quote from
+# TERMINATING the string but never strips the backslash, so a written
+# `ev\"il` parses back as the six characters `ev\"il`, not `ev"il`.
+# There is no un-escape half to mirror. Adding one would change how
+# every existing manifest parses — an ADR 0001 frozen-surface change,
+# so v2.0, not a patch.
+#
+# Until then hapi declines to write a row it cannot faithfully
+# represent, rather than writing one that quietly means something else.
+# Before 1.0.7 a filename containing `"` produced `source = "ev"il"`,
+# which `inspect` read back as `ev` — hapi's declared state describing a
+# file that does not exist, at exit 0.
+#   0x22 `"`  — terminates the value
+#   0x5C `\`  — the escape lead-in; ambiguous without an un-escape
+#   < 0x20, 0x7F — newline ends the line-oriented parse; the rest are
+#                  invisible in a file the user is expected to read
+fn _hmw_representable(s): i64 {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c == 34 || c == 92 || c < 32 || c == 127) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+# Human-readable reason for a manifest-write failure.
+fn hapi_mfw_err_msg(code): i64 {
+    if (code == HapiMfwReadFailed) { return "could not read the manifest"; }
+    if (code == HapiMfwWriteFailed) { return "could not write the manifest"; }
+    if (code == HapiMfwRenameFailed) { return "could not commit the manifest rewrite"; }
+    if (code == HapiMfwRowNotFound) { return "no matching [[link]] row in the manifest"; }
+    if (code == HapiMfwUnrepresentable) {
+        return "path contains a byte hapi.cyml cannot represent (a quote, a backslash, or a control character)";
+    }
+    return "unknown manifest-write error";
 }
 
 # Directory portion of `path` (no trailing slash), or "." when there is
@@ -197,6 +243,10 @@ fn _hmw_find_separator(buf, n): i64 {
 # Measured on a 3 MB manifest with 16 concurrent adopts: 16 files moved,
 # 16 symlinks planted, 16 trail entries — and ONE manifest row (F-012).
 fn manifest_append_link_row(manifest_path, source, target): i64 {
+    # Refuse before taking the lock: a row we cannot represent must
+    # never reach the file (F-021).
+    if (_hmw_representable(source) == 0) { return 0 - HapiMfwUnrepresentable; }
+    if (_hmw_representable(target) == 0) { return 0 - HapiMfwUnrepresentable; }
     var lk = _hmw_lock(manifest_path);
     if (lk < 0) { return 0 - HapiMfwWriteFailed; }
     var rc = _hmw_append_unlocked(manifest_path, source, target);

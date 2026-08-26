@@ -1822,6 +1822,110 @@ fn test_backup_copy_refuses_symlink_source() {
 }
 
 # ============================================================
+# 1.0.7 — manifest write-path integrity (F-021, F-028)
+# ============================================================
+
+# F-021: the manifest writer wrote source/target raw, so a filename
+# containing a quote produced `source = "ev"il"` and the parser read it
+# back as `ev` — hapi's declared state describing a file that does not
+# exist, at exit 0. Escaping cannot fix it: the parser's
+# `\`-skips-the-next-byte rule never strips the backslash, so there is
+# no un-escape half to mirror (adding one would change how every
+# existing manifest parses — ADR 0001, so v2.0). hapi refuses instead.
+fn test_manifest_write_refuses_unrepresentable() {
+    test_group("manifest_write: refuses a value hapi.cyml cannot represent");
+
+    var env = _test_fresh_env();
+    var pkg = _test_make_package(0, 0);
+    var mpath = _fsl_path_join(pkg, "hapi.cyml");
+
+    var quoted = alloc(8);
+    memcpy(quoted, "ev", 2); store8(quoted + 2, 34);      # "
+    memcpy(quoted + 3, "il", 2); store8(quoted + 5, 0);
+    assert_eq(manifest_append_link_row(mpath, quoted, ".ok"),
+              0 - HapiMfwUnrepresentable, "quote in source refused");
+    assert_eq(manifest_append_link_row(mpath, "ok", quoted),
+              0 - HapiMfwUnrepresentable, "quote in target refused");
+
+    var backslash = alloc(6);
+    memcpy(backslash, "a", 1); store8(backslash + 1, 92); # \
+    memcpy(backslash + 2, "b", 1); store8(backslash + 3, 0);
+    assert_eq(manifest_append_link_row(mpath, backslash, ".ok"),
+              0 - HapiMfwUnrepresentable, "backslash refused");
+
+    var newline = alloc(6);
+    memcpy(newline, "a", 1); store8(newline + 1, 10);     # \n
+    memcpy(newline + 2, "b", 1); store8(newline + 3, 0);
+    assert_eq(manifest_append_link_row(mpath, newline, ".ok"),
+              0 - HapiMfwUnrepresentable, "newline refused");
+
+    # An ordinary row still writes.
+    assert_eq(manifest_append_link_row(mpath, "plain", ".plain"), 0,
+              "an ordinary row still appends");
+
+    # And adopt refuses BEFORE moving anything.
+    var scope = load64(env);
+    var evil = alloc(strlen(scope) + 12);
+    memcpy(evil, scope, strlen(scope));
+    var ep = strlen(scope);
+    memcpy(evil + ep, "/.q", 3); ep = ep + 3;
+    store8(evil + ep, 34); ep = ep + 1;                   # "
+    memcpy(evil + ep, "x", 1); ep = ep + 1;
+    store8(evil + ep, 0);
+    var fd = file_open(evil, 0x241, 0x1A4);
+    assert(fd >= 0, "fixture file with a quote created");
+    file_write(fd, "z", 1);
+    file_close(fd);
+    assert_eq(cmd_adopt(evil, pkg), 1, "adopt refuses an unrepresentable name");
+    assert_eq(link_probe_kind(link_probe(evil)), HAPI_LP_FILE,
+              "the file was not moved");
+
+    hapi_unlink(evil);
+    _test_clear_env();
+    return 0;
+}
+
+# F-028 (detection half): `adopt` renames the file into the package
+# BEFORE writing the row, so an interrupt in that window leaves the
+# dotfile in the package with no row, no symlink and no trail entry —
+# invisible to every verb that starts from manifest rows. `hapi check`
+# now walks the package directory and reports the divergence both ways.
+fn test_check_detects_manifest_package_divergence() {
+    test_group("check: reports manifest/package divergence");
+
+    var env = _test_fresh_env();
+    # A package with a real row AND its source file on disk — the two
+    # sides must agree before we can meaningfully diverge them.
+    var pkg = _test_make_package("zshrc", ".zshrc");
+
+    # Healthy package agrees with its manifest.
+    assert_eq(cmd_check(pkg, 0), 0, "a healthy package checks clean");
+
+    # The crash orphan: a file in the package that no row claims.
+    var orphan = _fsl_path_join(pkg, "orphaned-by-crash");
+    var fd = file_open(orphan, 0x241, 0x1A4);
+    file_write(fd, "stranded", 8);
+    file_close(fd);
+    assert_eq(cmd_check(pkg, 0), 1, "an unclaimed package file is reported");
+
+    # A staging leftover is not package content and must not be flagged.
+    hapi_unlink(orphan);
+    var stage = _fsl_path_join(pkg, "hapi.cyml.4242.tmp");
+    var sfd = file_open(stage, 0x241, 0x1A4);
+    file_write(sfd, "x", 1);
+    file_close(sfd);
+    assert_eq(cmd_check(pkg, 0), 0, "a .tmp staging leftover is not an orphan");
+    hapi_unlink(stage);
+
+    # The other direction: a row whose source has vanished.
+    hapi_unlink(_fsl_path_join(pkg, "zshrc"));
+    assert_eq(cmd_check(pkg, 0), 1, "a row with a missing source is reported");
+
+    _test_clear_env();
+    return 0;
+}
+
+# ============================================================
 # 1.0.5 P(-1) — buffer-bound regressions (F-014, F-008)
 # ============================================================
 
@@ -2321,6 +2425,8 @@ fn main() {
     test_cmd_rollback_stops_at_marker();
     test_rollback_replay_entry_has_no_backup_path();
     test_manifest_write_preserves_large_body();
+    test_manifest_write_refuses_unrepresentable();
+    test_check_detects_manifest_package_divergence();
     test_backup_disambiguates_colliding_basenames();
     test_canonicalize_honours_cap();
     test_audit_entry_honours_cap();

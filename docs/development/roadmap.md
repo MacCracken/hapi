@@ -56,11 +56,13 @@ runs in.
   hold different inodes) plus a pid-unique `O_EXCL` staging file. Its
   regression lives in `scripts/concurrency-test.sh`, which CI runs,
   because the defect needs two processes and `.tcyr` cannot fork.
-  **Still open on the same write path: F-021** (no TOML escaping on the
-  written row) and **F-028** (a SIGKILL mid-`adopt` leaves the file
-  outside `$HOME` with nothing recording it — detection via `hapi check`
-  is the 1.0.x half; true crash-atomicity is an ADR 0004 revision).
-  → [`issues/2026-08-25-manifest-write-integrity.md`](issues/2026-08-25-manifest-write-integrity.md)
+  **F-021 and F-028 followed in 1.0.7**, closing the issue: hapi refuses
+  to write a manifest row it cannot faithfully represent (escaping was
+  impossible — the parser has no un-escape half), and `hapi check` now
+  reports manifest/package divergence in both directions, which is the
+  detection half of the crash window. Prevention — an intent record
+  before the rename — is an ADR 0004 revision, listed under v2.0.
+  → [`issues/archived/2026-08-25-manifest-write-integrity.md`](issues/archived/2026-08-25-manifest-write-integrity.md)
 - **F-015 / F-002 · per-component symlink resolution** — a symlinked
   *intermediate* component of an ordinary `$HOME` target escapes the
   scope on a plain `hapi link`, no flag involved, and `--force` then
@@ -273,6 +275,17 @@ rationale that justifies the major bump.
   load-bearing for rollback correctness; needs its own ADR
   defining compaction markers + rollback semantics across the
   new boundary.
+
+### Adopt crash-atomicity (ADR 0004 revision)
+
+- **An intent record written before the rename.** `adopt` commits the
+  filesystem move before the manifest row and the trail entry, so an
+  interrupt in that window strands the user's dotfile in the package
+  with nothing recording it (F-028). 1.0.7 ships **detection** — `hapi
+  check` walks the package directory and reports the orphan — but
+  prevention needs `adopt` to become recoverable, which changes the
+  operation's shape and therefore ADR 0004's *single atomic entry*
+  decision. Earns the major bump.
 
 ### Default-behavior changes
 

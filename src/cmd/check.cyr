@@ -8,12 +8,24 @@
 # guards against typos and stale schema drift.
 #
 # Exit codes:
-#   0  manifest parsed cleanly (lenient or strict, per flag)
-#   1  parse error (including strict-mode rejection)
+#   0  manifest parsed cleanly AND agrees with the package directory
+#   1  parse error (including strict-mode rejection), or a divergence
+#      between the manifest and what is actually in the package
 #   2  bad usage
+#
+# The divergence check is the detection half of F-028. `adopt` renames
+# the file into the package BEFORE it writes the row, so a SIGKILL, an
+# OOM kill or a closing lid in that window leaves the user's dotfile
+# sitting in the package with no row, no symlink and no trail entry —
+# and every other verb then reports a clean world, because they all
+# start from manifest rows. Only a directory walk can see it. True
+# crash-atomicity (an intent record written before the rename) is an
+# ADR 0004 revision, not a patch; this is the half a patch can carry.
 
 include "src/manifest.cyr"
 include "src/cmd/inspect.cyr"   # reuse _hapi_inspect_print_manifest / _hi_eputs
+include "src/fs_link.cyr"
+include "lib/fs.cyr"            # dir_list — portable across the dirent layouts
 
 # Same resolver as inspect; keeping it inline so check stays
 # decoupled from the inspect module's private helpers.
@@ -40,6 +52,97 @@ fn _hck_resolve_manifest(arg): i64 {
     return out;
 }
 
+# Does `name` correspond to manifest row source `src`? True when they
+# are equal, or when `src` lives beneath `name` (a row source of
+# `config/zsh` is covered by the top-level entry `config`).
+fn _hck_covers(src, name): i64 {
+    var sn = strlen(src);
+    var nn = strlen(name);
+    if (nn > sn) { return 0; }
+    if (memeq(src, name, nn) == 0) { return 0; }
+    if (sn == nn) { return 1; }
+    if (load8(src + nn) == 47) { return 1; }
+    return 0;
+}
+
+# Is `name` a staging file from an interrupted write, rather than
+# package content? `hapi.cyml.<pid>.tmp` — see _hmw_write_atomic.
+fn _hck_is_staging(name): i64 {
+    var n = strlen(name);
+    if (n < 4) { return 0; }
+    if (load8(name + n - 4) == 46 && load8(name + n - 3) == 116
+        && load8(name + n - 2) == 109 && load8(name + n - 1) == 112) { return 1; }
+    return 0;
+}
+
+# Compare the manifest against the package directory, both ways.
+# Returns the number of divergences reported (0 = they agree).
+fn _hck_report_divergence(mpath, m): i64 {
+    var pkg_dir = _fsl_path_dirname(mpath);
+    var links = hapi_mf_links(m);
+    var nl = vec_len(links);
+    var bad = 0;
+
+    # 1. Every row must have its source present in the package.
+    var i = 0;
+    while (i < nl) {
+        var lk = vec_get(links, i);
+        var src = _fsl_str_to_cstr(hapi_link_source(lk));
+        var abs_src = _fsl_path_join(pkg_dir, src);
+        if (link_probe_kind(link_probe(abs_src)) == HAPI_LP_ABSENT) {
+            if (bad == 0) { _hi_eputs("\ndivergence between the manifest and the package:\n"); }
+            _hi_eputs("  row source is missing: ");
+            _hi_eputs(src);
+            _hi_eputs("\n");
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+
+    # 2. Every file in the package must be claimed by a row. An
+    # unclaimed one is the F-028 crash orphan: adopt moved it in and
+    # died before recording it.
+    var names = dir_list(str_from(pkg_dir));
+    var nn = vec_len(names);
+    var j = 0;
+    while (j < nn) {
+        var nm = _fsl_str_to_cstr(vec_get(names, j));
+        var skip = 0;
+        if (_hck_cstr_eq(nm, "hapi.cyml") == 1) { skip = 1; }
+        if (_hck_is_staging(nm) == 1) { skip = 1; }
+        if (skip == 0) {
+            var claimed = 0;
+            var k = 0;
+            while (k < nl) {
+                var src2 = _fsl_str_to_cstr(hapi_link_source(vec_get(links, k)));
+                if (_hck_covers(src2, nm) == 1) { claimed = 1; }
+                k = k + 1;
+            }
+            if (claimed == 0) {
+                if (bad == 0) { _hi_eputs("\ndivergence between the manifest and the package:\n"); }
+                _hi_eputs("  file in the package with no [[link]] row: ");
+                _hi_eputs(nm);
+                _hi_eputs("\n");
+                bad = bad + 1;
+            }
+        }
+        j = j + 1;
+    }
+
+    if (bad > 0) {
+        _hi_eputs("  (an unclaimed file is the signature of an `adopt` that was\n");
+        _hi_eputs("   interrupted after the move and before the manifest write)\n");
+    }
+    return bad;
+}
+
+fn _hck_cstr_eq(a, b): i64 {
+    if (a == 0 || b == 0) { return 0; }
+    var an = strlen(a);
+    if (an != strlen(b)) { return 0; }
+    return memeq(a, b, an);
+}
+
 fn cmd_check(path, strict): i64 {
     if (path == 0) {
         _hi_eputs("usage: hapi check <package-dir|hapi.cyml> [--strict]\n");
@@ -63,6 +166,10 @@ fn cmd_check(path, strict): i64 {
     }
     var m = load64(res + 8);
     _hapi_inspect_print_manifest(m);
+
+    var diverged = _hck_report_divergence(mpath, m);
+    if (diverged > 0) { return 1; }
+
     if (strict == 1) {
         print("ok (strict)\n", 12);
     } else {
