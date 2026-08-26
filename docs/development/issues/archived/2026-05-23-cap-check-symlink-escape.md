@@ -1,3 +1,27 @@
+> ## ✅ RESOLVED in 1.0.8 (2026-08-25)
+>
+> Closed as hapi's own work, three months after it was filed against a
+> dependency that turned out not to exist. `fsl_resolve_path` walks a
+> path component by component and follows a symlink at every one
+> (hop-capped at 40, absent components kept literal); `cap_target_allowed`
+> decides on the resolved location, resolving the scope root too so a
+> `$HOME` reached through a symlink is not a false refusal. `link` marks
+> an escape `LINK_ACT_ESCAPE`, which **`--force` does not override** —
+> the old advice to "rerun with --force" was itself the mechanism that
+> destroyed a file outside `$HOME`. `adopt`'s 1.0.5 check is upgraded to
+> the same test.
+>
+> **The grant is `HAPI_ALLOWED_ROOTS`, not `--root`.** `--root` re-roots
+> where every target resolves; the allowlist authorizes a destination,
+> which is what this needs. That distinction was got wrong in the first
+> draft and is worth keeping written down.
+>
+> Cost: ~10% cold / ~13% warm on the sync benchmark, recorded in
+> `docs/benchmarks.md` rather than absorbed. Mutation-proven — reverting
+> to lexical containment turns the new groups RED, including `the file
+> outside the scope is untouched (got 1, expected 2)`: under the mutant
+> it became a symlink.
+
 # `--root` cap-check is lexical-only — a symlinked path component can escape $HOME
 
 **Discovered:** 2026-05-23 during the P(-1) security audit pass

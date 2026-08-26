@@ -53,6 +53,8 @@ real HDD or under cgroup-throttled IO.
 
 | 1.0.5   | 91        | 76        | 0 bytes           | 2026-08-25 | P(-1) sweep. The ~8% cold / ~12% warm cost against 1.0.4 is attributable and expected: F-014 and F-008 added a size-computation pass over the manifest strings and the audit values before each write. Best of three; spread ±1 ms. ⭐ The trail is **byte-identical** at 101,150 bytes / 350 entries — the audit-format rewrite shifted nothing. |
 
+| 1.0.8   | 100       | 86        | 0 bytes           | 2026-08-25 | F-015: every target's parent is now resolved component-by-component before hapi will write to it, so the capability boundary holds against a symlinked parent directory. ~10% cold / ~13% warm against 1.0.7 — attributable and expected (a `link_probe` per component per row), well inside the >2x gate. Trail byte-identical at 101,150 bytes. |
+
 ⚠ **On the 0.9.0 → 1.0.4 delta.** Three things changed at once between
 the two rows: the compiler (6.0.1 → 6.5.35), the kernel (7.0.9 → 7.1.9),
 and hapi's own `link_probe`. The 0.9.0 row is a single run; the 1.0.4 row

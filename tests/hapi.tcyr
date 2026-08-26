@@ -1822,6 +1822,116 @@ fn test_backup_copy_refuses_symlink_source() {
 }
 
 # ============================================================
+# 1.0.8 — the resolved capability boundary (F-015 / F-002)
+# ============================================================
+
+# F-015: `fsl_lexical_normalize` collapses `..` but treats every
+# component as a plain name, so an ordinary convenience symlink —
+# `~/.config -> /mnt/other/etc` — put a manifest target outside the
+# scope root on a PLAIN `hapi link`, no flag involved. `--force` then
+# deleted whatever was there, and `status` reported the result OK.
+fn test_resolve_path_follows_intermediate_symlinks() {
+    test_group("cap: path resolution follows a symlinked component");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+
+    # scope/outside/  and  scope/link -> scope/outside
+    var outside = _fsl_path_join(scope, "outside");
+    fsl_mkdir_parents(_fsl_path_join(outside, "x"));
+    var linkdir = _fsl_path_join(scope, "linkdir");
+    assert_eq(hapi_symlink(outside, linkdir), 0, "component symlink created");
+
+    # A path THROUGH the symlink resolves to its physical location.
+    var through = _fsl_path_join(linkdir, "foo");
+    var resolved = fsl_resolve_path(through);
+    assert(resolved != 0, "resolution succeeds");
+    assert_eq(_har_cstr_eq(resolved, _fsl_path_join(outside, "foo")), 1,
+              "resolves through the symlinked component");
+
+    # A component that does not exist yet is kept literally — hapi
+    # creates parent directories, so an absent parent is routine.
+    var absent = _fsl_path_join(scope, "nope/deeper");
+    assert_eq(_har_cstr_eq(fsl_resolve_path(absent), absent), 1,
+              "absent components are kept literally");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cap_target_allowed_resolves() {
+    test_group("cap: target containment is decided physically");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    cap_set_home(scope);
+
+    # An escape hatch OUTSIDE the scope root entirely.
+    var out = "/tmp/hapi-f015-outside";
+    fsl_mkdir_parents(_fsl_path_join(out, "x"));
+    var escape = _fsl_path_join(scope, "escape");
+    assert_eq(hapi_symlink(out, escape), 0, "escaping symlink created");
+
+    # Lexically `scope/escape` looks contained; physically it is not.
+    assert_eq(cap_within_scope(escape, scope), 1, "lexically inside");
+    assert_eq(cap_target_allowed(escape, scope), 0, "physically outside — refused");
+
+    # An ordinary in-scope directory is allowed.
+    var inside = _fsl_path_join(scope, "plain");
+    fsl_mkdir_parents(_fsl_path_join(inside, "x"));
+    assert_eq(cap_target_allowed(inside, scope), 1, "in-scope parent allowed");
+
+    # HAPI_ALLOWED_ROOTS is the grant that authorizes the destination.
+    # `--root` is NOT: it re-roots every target, a different operation.
+    cap_set_allowlist(out);
+    assert_eq(cap_target_allowed(escape, scope), 1, "allowlisted destination permitted");
+    cap_set_allowlist(0);
+    assert_eq(cap_target_allowed(escape, scope), 0, "refused again once the grant is gone");
+
+    cap_set_home(0);
+    _test_clear_env();
+    return 0;
+}
+
+fn test_link_refuses_symlinked_component_escape() {
+    test_group("link: refuses an escape --force cannot override");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    cap_set_home(scope);
+
+    var out = "/tmp/hapi-f015-linkout";
+    fsl_mkdir_parents(_fsl_path_join(out, "x"));
+    var precious = _fsl_path_join(out, "zshrc");
+    var pf = file_open(precious, 0x241, 0x1A4);
+    file_write(pf, "PRECIOUS", 8);
+    file_close(pf);
+
+    # ~/.config -> /tmp/hapi-f015-linkout
+    var cfg = _fsl_path_join(scope, ".config");
+    assert_eq(hapi_symlink(out, cfg), 0, "convenience symlink created");
+
+    var pkg = _test_make_package("zshrc", ".config/zshrc");
+
+    assert_eq(cmd_link(pkg, 0), 1, "plain link refuses the escape");
+    # --force must NOT override it: following that advice is what
+    # destroyed the file before 1.0.8.
+    assert_eq(cmd_link(pkg, 1), 1, "--force does not override the escape");
+    assert_eq(link_probe_kind(link_probe(precious)), HAPI_LP_FILE,
+              "the file outside the scope is untouched");
+
+    # Nothing was recorded either.
+    var tr = audit_read_default_r();
+    assert_eq(is_err_result(tr), 0, "trail readable");
+    assert_eq(vec_len(load64(tr + 8)), 0, "no audit entry for a refused escape");
+
+    hapi_unlink(precious);
+    cap_set_home(0);
+    _test_clear_env();
+    return 0;
+}
+
+# ============================================================
 # 1.0.7 — manifest write-path integrity (F-021, F-028)
 # ============================================================
 
@@ -2425,6 +2535,9 @@ fn main() {
     test_cmd_rollback_stops_at_marker();
     test_rollback_replay_entry_has_no_backup_path();
     test_manifest_write_preserves_large_body();
+    test_resolve_path_follows_intermediate_symlinks();
+    test_cap_target_allowed_resolves();
+    test_link_refuses_symlinked_component_escape();
     test_manifest_write_refuses_unrepresentable();
     test_check_detects_manifest_package_divergence();
     test_backup_disambiguates_colliding_basenames();

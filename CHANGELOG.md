@@ -6,6 +6,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.0.8] - 2026-08-25
+
+> **The 1.0.x hardening arc's Tier 1 is closed.** F-015 — and with it
+> F-002, open since the 2026-05-23 audit — is fixed: hapi's capability
+> boundary now decides on the *physical* location of a target, not its
+> spelling. No caller-visible surface change; the v1.0 contract stays
+> frozen. Suite **323 assertions / 84 groups**.
+
+### Fixed
+- **A symlinked parent directory put a target outside `$HOME` on a
+  plain `hapi link`, and `--force` then deleted what was there
+  (F-015 / F-002).** `~/.config -> /mnt/other/etc` is an ordinary
+  convenience symlink — or arrives with a restored backup or a shared
+  dotfiles repo. `fsl_lexical_normalize` collapses `..` but treats every
+  component as a plain name, so a row targeting `.config/foo` looked
+  contained and was not.
+
+  Measured, all with **no flag at all**: a bare `hapi link` wrote a
+  symlink outside `$HOME` and exited 0, recording the *unresolved*
+  in-`$HOME` path in the trail so nothing downstream could tell. With a
+  file already there, hapi refused — as an ordinary file conflict —
+  and advised `--force`; **following that advice destroyed the file
+  outside `$HOME`** and left `status` reporting `1 / 1 OK`.
+
+  New `fsl_resolve_path` walks a path component by component and follows
+  a symlink at every one, hop-capped at 40 like the kernel's own ELOOP
+  budget, keeping absent components literal (hapi creates parent
+  directories, so an absent parent is routine). `cap_target_allowed`
+  decides on the resolved location, resolving the scope root too so a
+  `$HOME` that is itself reached through a symlink does not cause a
+  false refusal. An escape is a **`LINK_ACT_ESCAPE`, which `--force`
+  does not override** — mirroring the existing rule for directories —
+  and is reported before the generic conflict message so it never
+  carries the `--force` advice. `adopt`'s 1.0.5 containment check is
+  upgraded to the same resolved test.
+
+  ⚠ **`--root` is not the escape hatch, and the first draft of this
+  message said it was.** `--root` re-roots where *every* manifest target
+  resolves, which is a different operation from authorizing one
+  symlink's destination. The grant is `HAPI_ALLOWED_ROOTS`, ADR 0005's
+  actual capability mechanism, and it says what is meant: this location
+  is authorized. Verified end to end — refused bare, refused under
+  `--force` with the outside file intact, permitted once the destination
+  is allowlisted, and an ordinary in-`$HOME` package unaffected.
+
+### Changed
+- **`docs/benchmarks.md` gains a 1.0.8 row.** Resolving every target's
+  parent per component costs **~10% cold / ~13% warm** (100 ms / 86 ms,
+  from 91 / 76). That is the price of the capability boundary actually
+  holding, it is recorded rather than absorbed, and it is well inside
+  the >2× regression gate; warm audit growth stays 0 bytes and the trail
+  is still byte-identical at 101,150 bytes.
+
 ## [1.0.7] - 2026-08-25
 
 > **1.0.x hardening arc — the rest of the manifest write path.** F-021

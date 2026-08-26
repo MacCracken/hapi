@@ -234,3 +234,12 @@ containment predicate for a path hapi is about to *write*, as distinct
 from `cap_check_root_r`, which vets the `--root` value the user typed.
 `adopt` needs it because its `<file>` argument is itself a write target
 (F-011). Internal addition; `cap_check_root_r`'s signature is untouched.
+
+**5. Closed in 1.0.8.** `cap_target_allowed(path, scope_root)` decides
+containment on the **resolved** path — `fsl_resolve_path` follows a
+symlink at every component — with the scope root resolved too. F-002 and
+F-015 are fixed. The decision above is unchanged: `$HOME` by default,
+`--root` to move the scope, `HAPI_ALLOWED_ROOTS` to grant a destination,
+and `cap_check_root_r(path) -> Result` still frozen. What changed is
+that the boundary now holds against a symlinked parent directory, which
+it did not from v1.0 through 1.0.7.

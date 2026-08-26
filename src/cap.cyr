@@ -117,6 +117,31 @@ fn cap_within_scope(path, scope_root): i64 {
     return _cap_path_within(np, ns);
 }
 
+# May hapi write at `path`, given `scope_root`?
+#
+# The PHYSICAL location decides, not the spelling: an ordinary
+# convenience symlink — `~/.config -> /mnt/other/etc` — puts a target
+# outside the scope on a plain `hapi link` with no flag involved, and
+# `--force` then deletes whatever is there (F-015). `cap_within_scope`
+# is lexical and cannot see that.
+#
+# Two ways to be allowed, and the second is the point: the resolved
+# location is inside the resolved scope root, OR it is inside a root the
+# user has explicitly granted via HAPI_ALLOWED_ROOTS. `--root` is NOT
+# the escape hatch here — it re-roots where every manifest target
+# resolves, which is a different operation from authorizing one
+# symlink's destination. The allowlist is ADR 0005's grant mechanism and
+# says exactly what is meant: this location is authorized.
+fn cap_target_allowed(path, scope_root): i64 {
+    var rp = fsl_resolve_path(path);
+    if (rp == 0) { return 0; }              # unprovable => refuse
+    var rs = fsl_resolve_path(scope_root);
+    if (rs != 0) {
+        if (_cap_path_within(rp, rs) == 1) { return 1; }
+    }
+    return _cap_in_allowlist(rp);
+}
+
 fn cap_check_root_r(root_arg): Result {
     if (root_arg == 0 || strlen(root_arg) == 0) {
         return Err(HapiCapInvalidPath);

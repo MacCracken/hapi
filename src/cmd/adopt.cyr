@@ -126,7 +126,7 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     # widens the scope legitimately (scope_root is already the
     # cap-approved override by this point); without it an absolute or
     # `..` path used to escape $HOME entirely at exit 0.
-    if (cap_within_scope(abs_target, scope_root_abs) == 0) {
+    if (cap_target_allowed(_fsl_path_dirname(abs_target), scope_root_abs) == 0) {
         _hap_eputs("hapi: refusing to adopt outside the scoped root: ");
         _hap_eputs(abs_target);
         _hap_eputs("\n  (scope: ");

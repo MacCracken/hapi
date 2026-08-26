@@ -214,6 +214,119 @@ fn fsl_to_absolute(path): i64 {
 # exactly the property the capability cap-check needs to reject
 # `--root /home/user/../etc` while leaving the symlink-resolution
 # question for the kavach migration.
+# Split an absolute path into its components (no ".", no "..", already
+# collapsed by fsl_lexical_normalize). Returns a vec of Str.
+fn _fsl_split(path): i64 {
+    var parts = vec_new();
+    var n = strlen(path);
+    var start = 1;
+    var i = 1;
+    while (i <= n) {
+        var at_sep = 0;
+        if (i == n) { at_sep = 1; }
+        elif (load8(path + i) == 47) { at_sep = 1; }
+        if (at_sep == 1) {
+            var seg_len = i - start;
+            if (seg_len > 0) { vec_push(parts, str_new(path + start, seg_len)); }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return parts;
+}
+
+# Resolve `path` by following a symlink at EVERY component, left to
+# right — the physical path, as the kernel would reach it.
+#
+# This is the missing half of the capability boundary (F-015).
+# `fsl_lexical_normalize` collapses `..` but treats every component as a
+# plain name, so an ordinary convenience symlink — `~/.config ->
+# /mnt/other/etc` — put a manifest target outside the scope root on a
+# PLAIN `hapi link`, no flag involved, and `--force` then deleted
+# whatever was there. Lexical containment cannot see that; only
+# following the links can.
+#
+# Components that do not exist yet are kept literally: hapi creates
+# parent directories, so the parent of a new target is routinely absent,
+# and an absent component cannot be a symlink out of the scope.
+#
+# Hop-capped at 40 (the kernel's own ELOOP budget). Returns 0 if the cap
+# is hit — the caller must treat that as "cannot prove containment" and
+# refuse, never as "contained".
+fn fsl_resolve_path(path): i64 {
+    var cur = fsl_lexical_normalize(fsl_to_absolute(path));
+    var hops = 0;
+    var parts = _fsl_split(cur);
+    var idx = 0;
+    var acc = alloc(2);
+    store8(acc, 47); store8(acc + 1, 0);          # "/"
+
+    var go = 1;
+    while (go == 1) {
+        if (idx >= vec_len(parts)) { go = 0; continue; }
+        var seg = vec_get(parts, idx);
+        acc = _fsl_path_join(acc, _fsl_str_to_cstr(seg));
+        idx = idx + 1;
+
+        var probe = link_probe(acc);
+        if (link_probe_kind(probe) == HAPI_LP_SYMLINK) {
+            hops = hops + 1;
+            if (hops > 40) { return 0; }
+            var tgt = link_probe_target(probe);
+            if (tgt == 0) { return 0; }
+            var next = 0;
+            if (load8(tgt) == 47) {
+                next = fsl_lexical_normalize(tgt);
+            } else {
+                next = fsl_lexical_normalize(_fsl_path_join(_fsl_path_dirname(acc), tgt));
+            }
+            # Re-seat the walk at the link target, then continue with the
+            # components we have not consumed yet.
+            var rest = vec_new();
+            var r = idx;
+            while (r < vec_len(parts)) { vec_push(rest, vec_get(parts, r)); r = r + 1; }
+            var head = _fsl_split(next);
+            var h = 0;
+            var merged = vec_new();
+            while (h < vec_len(head)) { vec_push(merged, vec_get(head, h)); h = h + 1; }
+            h = 0;
+            while (h < vec_len(rest)) { vec_push(merged, vec_get(rest, h)); h = h + 1; }
+            parts = merged;
+            idx = 0;
+            acc = alloc(2);
+            store8(acc, 47); store8(acc + 1, 0);
+        }
+    }
+    return acc;
+}
+
+# Is the PHYSICAL location of `path` inside the PHYSICAL scope root?
+# Both sides are resolved, so a scope root that is itself reached
+# through a symlink (`/home/u -> /mnt/home/u`) does not cause a false
+# refusal. Returns 0 when containment cannot be proven.
+# Component-boundary prefix match. Local to this module: cap.cyr's
+# equivalent lives downstream of this file (it includes fs_link.cyr), so
+# reaching for it here would be a cycle.
+fn _fsl_within(path, prefix): i64 {
+    var pn = strlen(path);
+    var fn_ = strlen(prefix);
+    if (fn_ == 0) { return 0; }
+    if (fn_ > 1 && load8(prefix + fn_ - 1) == 47) { fn_ = fn_ - 1; }
+    if (pn < fn_) { return 0; }
+    if (memeq(path, prefix, fn_) == 0) { return 0; }
+    if (pn == fn_) { return 1; }
+    if (load8(path + fn_) == 47) { return 1; }
+    return 0;
+}
+
+fn fsl_resolved_within(path, scope_root): i64 {
+    var rp = fsl_resolve_path(path);
+    if (rp == 0) { return 0; }
+    var rs = fsl_resolve_path(scope_root);
+    if (rs == 0) { return 0; }
+    return _fsl_within(rp, rs);
+}
+
 fn fsl_lexical_normalize(path): i64 {
     var n = strlen(path);
     if (n == 0 || load8(path) != 47) { return _fsl_cstr_dup(path); }

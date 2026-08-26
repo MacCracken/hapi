@@ -36,7 +36,9 @@ runs in.
 > belong to the 1.0.x patch line, ahead of anything in the additive
 > v1.x bucket below. Ordering is by blast radius, not by effort.
 
-### Tier 1 — silent data loss or a wrong destructive action
+### Tier 1 — ✅ CLOSED (1.0.6 – 1.0.8)
+
+All three entries shipped. Tier 2 is now the front of the arc.
 
 - ~~**F-007 · the trail reader's 256 KB head cap**, with **F-016**
   (interior malformed line) and **F-017** (unreadable trail read as
@@ -63,16 +65,15 @@ runs in.
   detection half of the crash window. Prevention — an intent record
   before the rename — is an ADR 0004 revision, listed under v2.0.
   → [`issues/archived/2026-08-25-manifest-write-integrity.md`](issues/archived/2026-08-25-manifest-write-integrity.md)
-- **F-015 / F-002 · per-component symlink resolution** — a symlinked
-  *intermediate* component of an ordinary `$HOME` target escapes the
-  scope on a plain `hapi link`, no flag involved, and `--force` then
-  deletes the file outside `$HOME`. Now hapi-owned work: the kavach dep
-  gate is void (see below), and `hapi_readlink` — the primitive it needs
-  — is portable across all three targets as of 1.0.4. The constraint
-  that makes this an arc rather than a patch: four verbs prove ownership
-  by recomputing `fsl_compute_relative` and byte-comparing, so changing
-  the resolver changes what all four compare.
-  → [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md)
+- ~~**F-015 / F-002 · per-component symlink resolution**~~ **— shipped in
+  1.0.8, closing Tier 1.** The ownership-proof constraint was sidestepped
+  rather than solved: `fsl_compute_relative` and the trail values are
+  untouched, and containment is a *separate* resolved check applied
+  before hapi writes. So the four verbs that byte-compare still compare
+  exactly what they always did. `--force` cannot override an escape, and
+  the grant is `HAPI_ALLOWED_ROOTS` — not `--root`, which re-roots every
+  target and is a different operation.
+  → [`issues/archived/2026-05-23-cap-check-symlink-escape.md`](issues/archived/2026-05-23-cap-check-symlink-escape.md)
 
 ### Tier 2 — hapi reports a world that is not there
 

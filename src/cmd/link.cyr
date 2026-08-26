@@ -24,6 +24,7 @@
 include "src/manifest.cyr"
 include "src/audit.cyr"
 include "src/fs_link.cyr"
+include "src/cap.cyr"
 include "src/cli.cyr"
 include "src/backup.cyr"
 
@@ -34,6 +35,7 @@ enum HapiLinkAction {
     LINK_ACT_CONFLICT_FILE = 3;
     LINK_ACT_CONFLICT_DIR = 4;
     LINK_ACT_ERROR = 5;
+    LINK_ACT_ESCAPE = 6;
 }
 
 # Test/CI override for the scope root. When set, takes
@@ -113,6 +115,18 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     store64(plan + 16, abs_tgt);
     store64(plan + 24, rel);
 
+    # Does the target's parent PHYSICALLY sit inside the scope root?
+    # An ordinary convenience symlink — `~/.config -> /mnt/other/etc` —
+    # puts this row outside the scope on a plain `hapi link`, with no
+    # flag involved, and `--force` then deletes whatever is there
+    # (F-015). Lexical containment cannot see it; only following the
+    # links can. Checked before the probe, because if we are outside the
+    # scope the state of the target is not our business.
+    if (cap_target_allowed(tgt_parent, scope_root_abs) == 0) {
+        store64(plan + 32, LINK_ACT_ESCAPE);
+        return plan;
+    }
+
     var probe = link_probe(abs_tgt);
     var kind = link_probe_kind(probe);
     if (kind == HAPI_LP_ABSENT) {
@@ -154,6 +168,8 @@ fn _hlnk_print_conflict(plan): i64 {
         _hlnk_eputs("(existing regular file)");
     } elif (action == LINK_ACT_CONFLICT_DIR) {
         _hlnk_eputs("(existing directory)");
+    } elif (action == LINK_ACT_ESCAPE) {
+        _hlnk_eputs("(resolves outside the scoped root)");
     } else {
         _hlnk_eputs("(probe error)");
     }
@@ -216,6 +232,35 @@ fn cmd_link(pkg_arg, force): i64 {
         elif (act == LINK_ACT_ERROR) { conflict_count = conflict_count + 1; }
         else { conflict_count = conflict_count + 1; }
         i = i + 1;
+    }
+
+    # A row that resolves outside the scope root is refused FIRST, and
+    # `--force` does not override it. The generic conflict message below
+    # advises `--force`, and following that advice is precisely what
+    # deleted a file outside $HOME before 1.0.8 — so this must be
+    # reported on its own terms, pointing at `--root` instead.
+    var escaped = 0;
+    var ke = 0;
+    while (ke < nlinks) {
+        var ple = vec_get(plans, ke);
+        if (load64(ple + 32) == LINK_ACT_ESCAPE) {
+            if (escaped == 0) {
+                _hlnk_eputs("hapi: refusing to link outside the scoped root:\n");
+            }
+            _hlnk_print_conflict(ple);
+            escaped = 1;
+        }
+        ke = ke + 1;
+    }
+    if (escaped == 1) {
+        _hlnk_eputs("  scope: ");
+        _hlnk_eputs(scope_root_abs);
+        _hlnk_eputs("\n  a symlinked parent directory can put a target outside the\n");
+        _hlnk_eputs("  scope even though the manifest path looks relative to it.\n");
+        _hlnk_eputs("  --force does NOT override this. To authorize that location,\n");
+        _hlnk_eputs("  add it to HAPI_ALLOWED_ROOTS (ADR 0005); `--root` re-roots\n");
+        _hlnk_eputs("  every target and is a different operation.\n");
+        return 1;
     }
 
     # If any conflicts and --force isn't on, refuse and list them.

@@ -5,6 +5,25 @@
 
 ## Version
 
+**1.0.8** — 1.0.x hardening arc, **Tier 1 closed** (2026-08-25). Fixes
+**F-015**, and with it **F-002**, open since the 2026-05-23 audit:
+hapi's capability boundary now decides on a target's *physical*
+location. `fsl_lexical_normalize` collapses `..` but treats every
+component as a plain name, so an ordinary `~/.config -> /mnt/other/etc`
+put a row outside the scope on a bare `hapi link` — exit 0, with the
+unresolved in-`$HOME` path recorded in the trail — and, where a file was
+already there, hapi refused as an ordinary conflict and advised
+`--force`, which then **destroyed the file outside `$HOME`** while
+`status` reported OK. New `fsl_resolve_path` follows a symlink at every
+component (hop-capped at 40; absent components stay literal), and
+`cap_target_allowed` decides on the resolved location with the scope
+root resolved too. An escape is `LINK_ACT_ESCAPE`, which `--force` does
+**not** override; the grant is `HAPI_ALLOWED_ROOTS`, not `--root`.
+Crucially the ownership-proof constraint was sidestepped, not solved:
+`fsl_compute_relative` and the trail values are untouched, so the four
+verbs that byte-compare still compare what they always did. Costs ~10%
+cold / ~13% warm, recorded in `../benchmarks.md`. Suite 323 / 84.
+
 **1.0.7** — 1.0.x hardening arc, the rest of the manifest write path
 (2026-08-25). Closes **F-021** and **F-028**, and with them the
 write-path issue 1.0.6 opened. F-021: the writer emitted `source` /
@@ -311,8 +330,8 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 307 assertions across
-  81 test groups (the group figure read `66` from 1.0.1 through
+- `tests/hapi.tcyr` — primary suite. 323 assertions across
+  84 test groups (the group figure read `66` from 1.0.1 through
   1.0.3 — a stale header; the per-tier breakdown below has always
   summed to the real count):
   - Manifest (7 groups): minimal, three-link acceptance,
