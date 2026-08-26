@@ -4,6 +4,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`link_probe` on agnos now uses `readlink` (#70), not stat-classification.** agnos grew a
+  ring-3 `readlink#70` — the symlink-introspection peer of `symlink#63` — so `src/fs_link.cyr`'s
+  agnos branch probes readlink FIRST: `n > 0` ⇒ it is a symlink and hapi already holds the target
+  to byte-compare against the manifest (a DANGLING link included — #70 SEES it, where `stat#33`
+  reported it absent); otherwise it falls back to `stat#33` to split file/dir/absent (stat follows,
+  but the path is not a symlink there). This closes the agnos-only gap 1.0.3 documented — hapi
+  could create links but could neither see an existing one nor read its target for
+  `status`/reconcile. New `hapi_readlink` shim in `src/agnos_compat.cyr`: on agnos it calls the
+  local syscall number `AGNOS_SYS_READLINK`#70 (no cyrius `sys_readlink` peer exists yet — the same
+  self-contained pattern `hapi_symlink` used for #63 before the 6.4.x peer; collapses to a native
+  `sys_readlink(...)` once cyrius ships the peer and the vendored `lib/` re-syncs). Linux/macOS
+  `link_probe` and every other target path are byte-unchanged; suite still **242 assertions**.
+
 ## [1.0.3] - 2026-07-08
 
 > agnos target support + toolchain/vendored-stdlib refresh

@@ -16,6 +16,17 @@ include "lib/syscalls.cyr"
 include "lib/string.cyr"
 include "lib/io.cyr"
 
+#ifdef CYRIUS_TARGET_AGNOS
+# readlink(2) as agnos syscall #70 — the symlink-INTROSPECTION peer of symlink#63
+# (landed agnos 1.5x.x). 4-arg: (path, pathlen, buf, buflen; a4 in r10). Unlike #63,
+# NO cyrius `sys_readlink` peer exists yet in ANY stdlib snapshot (it is a brand-new
+# kernel syscall), so it is called by the local number here — the same self-contained
+# pattern hapi used for #63 before the 6.4.x peer, and that lib/agnosys.cyr uses. Once
+# cyrius ships a `sys_readlink`#70 peer and hapi re-syncs its vendored lib/, hapi_readlink
+# below collapses to a native `sys_readlink(...)` call (exactly how hapi_symlink did).
+var AGNOS_SYS_READLINK = 70;
+#endif
+
 # unlink(path). Linux: unlink(path). agnos: unlink(path, pathlen) — the
 # path length is an explicit argument (no NUL-scan in the kernel).
 fn hapi_unlink(path): i64 {
@@ -56,6 +67,21 @@ fn hapi_symlink(target, linkpath): i64 {
     return sys_symlink(target, strlen(target), linkpath, strlen(linkpath));
 #else
     return sys_symlink(target, linkpath);
+#endif
+}
+
+# readlink(path, buf, buflen) → the symlink's TEXT target byte count (NOT
+# NUL-terminated, ≤ buflen), or a negative error. agnos #70 is the introspection
+# peer of symlink#63: it NO-FOLLOWs the final path component and returns -1 when
+# `path` is not a symlink (incl. a missing path). Linux forwards to the 3-arg
+# sys_readlink (returns -errno: EINVAL=22 not-a-symlink, ENOENT=2 absent). agnos
+# takes the path length explicitly (path, pathlen, buf, buflen) and — lacking a
+# cyrius peer for #70 — is called by the local number (see AGNOS_SYS_READLINK above).
+fn hapi_readlink(path, buf, buflen): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    return syscall(AGNOS_SYS_READLINK, path, strlen(path), buf, buflen);
+#else
+    return sys_readlink(path, buf, buflen);
 #endif
 }
 
