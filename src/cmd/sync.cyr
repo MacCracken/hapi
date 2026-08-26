@@ -9,9 +9,9 @@
 # without `--force` — link is already idempotent by design (M2
 # acceptance test), and that's exactly the contract sync wants.
 # The verb is the user-facing intent: "make this match" vs
-# link's "create these now". A later patch may add reconciliation
-# beyond what link does (e.g. prune trail entries no longer in
-# the manifest); that's deferred from this milestone.
+# link's "create these now". Reconciliation beyond what link does
+# (e.g. prune trail entries no longer in the manifest) is tracked at
+# docs/development/issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md.
 #
 # Exit codes — passed through from cmd_link:
 #   0  state matches manifest after the run

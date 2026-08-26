@@ -93,8 +93,30 @@ fn _cap_in_allowlist(path): i64 {
 # denial. Caller passes the user-supplied flag value verbatim
 # (may be relative; we canonicalize via fsl_to_absolute, then
 # lexically normalize so `..` segments cannot escape the cap-
-# checked prefix). Symlink-following resolution is out of scope
-# for v0.8.x — the kavach migration owns that work.
+# checked prefix). Symlink-following resolution is deliberately not
+# done here — see F-002 in docs/audit/2026-08-25-audit.md and
+# docs/development/issues/2026-05-23-cap-check-symlink-escape.md for
+# the re-scoped owner (hapi itself, via per-component readlink; the
+# 1.0.5 audit established that kavach will not supply this).
+# Is `path` contained by `scope_root`? Both are lexically normalized
+# first, so a `..` segment in either cannot smuggle a non-prefix past
+# the component-boundary match.
+#
+# This is the containment predicate for a path hapi is about to WRITE,
+# as distinct from `cap_check_root_r`, which vets the `--root` value
+# the user typed. `adopt` needs it because its `<file>` argument is a
+# write target in its own right: through 1.0.4 an absolute path outside
+# the scope root was moved into the package and a symlink planted in
+# its place, with no `--root` and exit 0 — the one thing CLAUDE.md's
+# capability rule exists to prevent.
+fn cap_within_scope(path, scope_root): i64 {
+    if (path == 0 || scope_root == 0) { return 0; }
+    if (strlen(path) == 0 || strlen(scope_root) == 0) { return 0; }
+    var np = fsl_lexical_normalize(fsl_to_absolute(path));
+    var ns = fsl_lexical_normalize(fsl_to_absolute(scope_root));
+    return _cap_path_within(np, ns);
+}
+
 fn cap_check_root_r(root_arg): Result {
     if (root_arg == 0 || strlen(root_arg) == 0) {
         return Err(HapiCapInvalidPath);

@@ -61,6 +61,25 @@ jobs:
           mkdir -p build
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
+      - name: Build (aarch64, compile-only)
+        # Cross-compile only — no aarch64 runner, so this proves the
+        # target still COMPILES, nothing more. That is the whole point:
+        # `--aarch64` silently stopped building at 1.0.2 (a bare
+        # `SYS_OPEN`, the one constant the aarch64 table deliberately
+        # does not define) and nothing noticed until 1.0.4, because CI
+        # built x86_64 only. Since cyrius 6.5.1 a wrong argument count
+        # is a hard error rather than a warning, so an unbuilt target
+        # can now break on drift that x86_64 accepts.
+        run: cyrius build --aarch64 src/main.cyr build/${{ github.event.repository.name }}-aarch64
+
+      - name: Build (agnos, compile-only)
+        # Same rationale. hapi's agnos arm is a real second syscall ABI
+        # (explicit path lengths, sync-for-fsync, mkdir's length-not-mode
+        # second argument) living behind #ifdef CYRIUS_TARGET_AGNOS, so
+        # it is invisible to every other build. Compile-only: running it
+        # needs mirshi, which is not on the runner.
+        run: cyrius build --agnos src/main.cyr build/${{ github.event.repository.name }}-agnos
+
       - name: Test
         # v5.6.28: bare `cyrius test` picks up the [build].test entry
         # AND auto-discovers tests/*.tcyr — avoids the previous

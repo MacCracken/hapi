@@ -5,6 +5,27 @@
 
 ## Version
 
+**1.0.5** — P(-1) hardening sweep + repairs (2026-08-25). **Six
+HIGH-severity defects fixed**: two heap overflows reachable from an
+ordinary manifest (`hapi_mf_canonicalize` and the audit entry
+composers both accepted a `cap` argument and never read it — the
+first took `link` / `sync` / `--dry-run` down with SIGSEGV, the
+second wrote ~42 KB of attacker-chosen bytes past a 4 KB allocation
+and destroyed the trail); two silent destructions of user bytes (a
+manifest past 256 KB truncated and the truncation committed by
+`adopt`; `--backup-to` overwriting a snapshot when two rows shared a
+target basename); one capability escape (`adopt` moved files from
+outside `$HOME` with no `--root`); and one argument-parsing bug that
+made `hapi rollback <pkg>` reverse the **entire** trail at exit 0.
+Each fix carries a mutation-proven regression test. **Twenty findings
+remain open** — see
+[`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md), which
+also re-scopes F-002 (the kavach dependency gate is void; kavach is a
+sandbox-execution framework with no capability API). CI now compiles
+aarch64 and agnos, not just x86_64. Suite 280 / 76; `cyrius lint`
+clean tree-wide. No surface change — the v1.0 contract stays frozen
+and byte-identical.
+
 **1.0.4** — toolchain/vendored-stdlib refresh + agnos symlink
 introspection (2026-08-25). Cyrius pin `6.4.22` → `6.5.35`; `lib/`
 resynced to the 6.5.35 snapshot (108 files — 67 updated, 10 new, the
@@ -243,8 +264,8 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 246 assertions across
-  71 test groups (the group figure read `66` from 1.0.1 through
+- `tests/hapi.tcyr` — primary suite. 280 assertions across
+  76 test groups (the group figure read `66` from 1.0.1 through
   1.0.3 — a stale header; the per-tier breakdown below has always
   summed to the real count):
   - Manifest (7 groups): minimal, three-link acceptance,
@@ -260,6 +281,12 @@ in-source magic-number `syscall(N, ...)` calls.)_
   - rollback (5 groups): full reverse, link/unlink/link →
     clean, idempotent, stops at marker, replayed link entry
     carries no `backup_path`
+  - P(-1) 1.0.5 buffer/capability regressions (5 groups):
+    canonicalize refuses rather than overflowing (F-014), audit
+    entry composer refuses rather than overflowing (F-008), a
+    manifest past 256 KB survives a row append (F-009), colliding
+    backup basenames get distinct snapshots (F-010), adopt refuses
+    a target outside the scoped root (F-011)
   - manifest_write (2 groups): append row, remove row
   - adopt (5 groups): happy path, refuse
     symlink / directory / absent / duplicate target

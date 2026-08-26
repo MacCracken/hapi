@@ -78,3 +78,38 @@ can see the result before hapi acts on it.
 - [`docs/audit/2026-05-23-audit.md`](../../audit/2026-05-23-audit.md) F-002 — origin entry.
 - [ADR 0005](../../adr/0005-capability-bounded-roots.md) — kavach migration plan.
 - [`state.md`](../state.md) — kavach swap noted under "M7 onward fills".
+
+---
+
+## Update — 2026-08-25 (1.0.5 P(-1) sweep): re-scoped, and un-blocked
+
+**The dependency this was waiting on will never supply it.** kavach is
+at 3.12.3 and is a sandbox *execution* framework — ten backends,
+strength scoring, credential proxy, HMAC audit chain — whose entire
+public path surface is `kavach_path_exists`. There is no
+`cap_check(scope, action)`, none is planned, and adopting it would
+collide with hapi's no-process-spawning rule. This is hapi's work now.
+
+**The scope was also too narrow.** As filed, this covers the `--root`
+value, and leans on the user having typed an explicit escape flag. The
+sweep constructed the flagless case (filed as F-015): a symlinked
+*intermediate component* of an ordinary `$HOME` target — `~/.config ->
+/mnt/other/etc` — escapes the scope on a plain `hapi link`, and with
+`--force` deletes the file outside `$HOME`. Re-scope to **every path
+hapi derives from the scope root**.
+
+**The primitive now exists.** `hapi_readlink` is portable across
+Linux, aarch64 and agnos as of 1.0.4. The pinned stdlib exposes no
+`openat2` / `RESOLVE_BENEATH`, so the shape is a per-component
+`readlink` / `O_NOFOLLOW` walk.
+
+**Why it was not fixed in 1.0.5.** Four verbs (`unlink`, `rollback` ×2,
+`status`) prove ownership by recomputing `fsl_compute_relative` and
+byte-comparing the result against the trail. Changing what the resolver
+returns changes what all four compare, so this needs its own arc with
+its own regression coverage — not a patch release that had already
+changed two buffer disciplines and a capability check.
+
+See [`../../audit/2026-08-25-audit.md`](../../audit/2026-08-25-audit.md)
+and the *Next arc* section of
+[`../../audit/README.md`](../../audit/README.md).

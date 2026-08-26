@@ -132,7 +132,7 @@ fn audit_ensure_dir(): i64 {
 }
 
 # JSON-escape a single byte into `out`, returning bytes written.
-# Out buffer must have >= 6 bytes (worst case: `\uXXXX`).
+# Out buffer must have >= 6 bytes (worst case: `\uXXXX`).   #skip-lint
 fn _audit_json_escape_byte(c, out): i64 {
     if (c == 34) { store8(out, 92); store8(out + 1, 34); return 2; }
     if (c == 92) { store8(out, 92); store8(out + 1, 92); return 2; }
@@ -155,36 +155,89 @@ fn _audit_json_escape_byte(c, out): i64 {
     return 1;
 }
 
-# Emit a JSON string field — `"key":"value"` — into out at *pos.
-# `value` is a cstring; null is rendered as empty string.
-fn _audit_emit_field(out, pos_ptr, key, value): i64 {
+# Entry-composition overflow flag. Set by the bounded writers when a
+# write would pass `cap`; `_audit_format_link_op` clears it on entry and
+# turns it into a refusal on exit.
+#
+# A refusal, never a truncation: a short line has no `\n`, so the next
+# genuine entry concatenates onto it and the reader drops BOTH. Losing
+# the trail is worse than refusing the write, and refusing is already an
+# enumerated outcome (`hapi: audit-trail write failed`, exit 1).
+var _audit_ovf = 0;
+
+# Write one byte at *pos_ptr if it fits in `cap`; else set the flag.
+fn _audit_put8(out, pos_ptr, cap, c): i64 {
     var pos = load64(pos_ptr);
-    store8(out + pos, 34); pos = pos + 1;
-    var klen = strlen(key);
-    memcpy(out + pos, key, klen);
-    pos = pos + klen;
-    store8(out + pos, 34); pos = pos + 1;
-    store8(out + pos, 58); pos = pos + 1;
-    store8(out + pos, 34); pos = pos + 1;
+    if (pos + 1 > cap) { _audit_ovf = 1; return 0; }
+    store8(out + pos, c);
+    store64(pos_ptr, pos + 1);
+    return 0;
+}
+
+# Copy `n` bytes at *pos_ptr if they fit in `cap`; else set the flag.
+fn _audit_putn(out, pos_ptr, cap, src, n): i64 {
+    var pos = load64(pos_ptr);
+    if (pos + n > cap) { _audit_ovf = 1; return 0; }
+    memcpy(out + pos, src, n);
+    store64(pos_ptr, pos + n);
+    return 0;
+}
+
+# Emit a JSON string field — `"key":"value"` — into out at *pos.
+# `value` is a cstring; null is rendered as empty string. Every write is
+# bounded by `cap`; the escape writer can emit up to 6 bytes per input
+# byte (`\u00XX`), so the per-byte headroom check reserves 6.
+fn _audit_emit_field(out, pos_ptr, cap, key, value): i64 {
+    _audit_put8(out, pos_ptr, cap, 34);
+    _audit_putn(out, pos_ptr, cap, key, strlen(key));
+    _audit_put8(out, pos_ptr, cap, 34);
+    _audit_put8(out, pos_ptr, cap, 58);
+    _audit_put8(out, pos_ptr, cap, 34);
     if (value != 0) {
         var vlen = strlen(value);
         var i = 0;
         while (i < vlen) {
+            var pos = load64(pos_ptr);
+            if (pos + 6 > cap) {
+                _audit_ovf = 1;
+                i = vlen;
+                continue;
+            }
             var c = load8(value + i);
-            pos = pos + _audit_json_escape_byte(c, out + pos);
+            store64(pos_ptr, pos + _audit_json_escape_byte(c, out + pos));
             i = i + 1;
         }
     }
-    store8(out + pos, 34); pos = pos + 1;
-    store64(pos_ptr, pos);
+    _audit_put8(out, pos_ptr, cap, 34);
     return 0;
 }
 
-fn _audit_emit_comma(out, pos_ptr): i64 {
-    var pos = load64(pos_ptr);
-    store8(out + pos, 44);
-    store64(pos_ptr, pos + 1);
-    return 0;
+fn _audit_emit_comma(out, pos_ptr, cap): i64 {
+    return _audit_put8(out, pos_ptr, cap, 44);
+}
+
+# Upper bound on the composed length of a link-shape entry. Every value
+# is counted at 6x for worst-case `\u00XX` control-byte escaping, plus
+# the fixed key/punctuation overhead and the ISO-8601 `ts`. A sizing
+# hint, not the safety mechanism — the bounded writers are that.
+fn _audit_vlen(v): i64 {
+    if (v == 0) { return 0; }
+    return strlen(v);
+}
+
+fn audit_entry_size(pkg, pkg_version, manifest_hash,
+                    source, target, abs_source, abs_target,
+                    backup_path): i64 {
+    var n = 256;                       # `{`, `ts`, `op`, keys, commas, `}\n`
+    n = n + 6 * _audit_vlen(pkg);
+    n = n + 6 * _audit_vlen(pkg_version);
+    n = n + 6 * _audit_vlen(manifest_hash);
+    n = n + 6 * _audit_vlen(source);
+    n = n + 6 * _audit_vlen(target);
+    n = n + 6 * _audit_vlen(abs_source);
+    n = n + 6 * _audit_vlen(abs_target);
+    n = n + 6 * _audit_vlen(backup_path);
+    return n;
 }
 
 # Compose a single audit-trail line for a link-shape op into
@@ -197,31 +250,33 @@ fn _audit_format_link_op(out, cap, op, pkg, pkg_version, manifest_hash,
                          source, target, abs_source, abs_target,
                          backup_path): i64 {
     var pos = 0;
+    _audit_ovf = 0;
     var ts = iso8601_now();
-    store8(out + pos, 123); pos = pos + 1;     # {
-    _audit_emit_field(out, &pos, "ts", ts);
-    _audit_emit_comma(out, &pos);
-    _audit_emit_field(out, &pos, "op", op);
-    _audit_emit_comma(out, &pos);
-    _audit_emit_field(out, &pos, "pkg", pkg);
-    _audit_emit_comma(out, &pos);
-    _audit_emit_field(out, &pos, "pkg_version", pkg_version);
-    _audit_emit_comma(out, &pos);
-    _audit_emit_field(out, &pos, "manifest_hash", manifest_hash);
-    _audit_emit_comma(out, &pos);
-    _audit_emit_field(out, &pos, "source", source);
-    _audit_emit_comma(out, &pos);
-    _audit_emit_field(out, &pos, "target", target);
-    _audit_emit_comma(out, &pos);
-    _audit_emit_field(out, &pos, "abs_source", abs_source);
-    _audit_emit_comma(out, &pos);
-    _audit_emit_field(out, &pos, "abs_target", abs_target);
+    _audit_put8(out, &pos, cap, 123);          # {
+    _audit_emit_field(out, &pos, cap, "ts", ts);
+    _audit_emit_comma(out, &pos, cap);
+    _audit_emit_field(out, &pos, cap, "op", op);
+    _audit_emit_comma(out, &pos, cap);
+    _audit_emit_field(out, &pos, cap, "pkg", pkg);
+    _audit_emit_comma(out, &pos, cap);
+    _audit_emit_field(out, &pos, cap, "pkg_version", pkg_version);
+    _audit_emit_comma(out, &pos, cap);
+    _audit_emit_field(out, &pos, cap, "manifest_hash", manifest_hash);
+    _audit_emit_comma(out, &pos, cap);
+    _audit_emit_field(out, &pos, cap, "source", source);
+    _audit_emit_comma(out, &pos, cap);
+    _audit_emit_field(out, &pos, cap, "target", target);
+    _audit_emit_comma(out, &pos, cap);
+    _audit_emit_field(out, &pos, cap, "abs_source", abs_source);
+    _audit_emit_comma(out, &pos, cap);
+    _audit_emit_field(out, &pos, cap, "abs_target", abs_target);
     if (backup_path != 0 && strlen(backup_path) > 0) {
-        _audit_emit_comma(out, &pos);
-        _audit_emit_field(out, &pos, "backup_path", backup_path);
+        _audit_emit_comma(out, &pos, cap);
+        _audit_emit_field(out, &pos, cap, "backup_path", backup_path);
     }
-    store8(out + pos, 125); pos = pos + 1;    # }
-    store8(out + pos, 10); pos = pos + 1;     # \n
+    _audit_put8(out, &pos, cap, 125);         # }
+    _audit_put8(out, &pos, cap, 10);          # \n
+    if (_audit_ovf == 1) { return 0 - 1; }
     return pos;
 }
 
@@ -271,19 +326,26 @@ fn audit_format_unadopt(out, cap, pkg, pkg_version, manifest_hash,
 # and `op`. Used to delimit rollback windows (ADR 0002).
 fn audit_format_rollback_marker(out, cap): i64 {
     var pos = 0;
+    _audit_ovf = 0;
     var ts = iso8601_now();
-    store8(out + pos, 123); pos = pos + 1;
-    _audit_emit_field(out, &pos, "ts", ts);
-    _audit_emit_comma(out, &pos);
-    _audit_emit_field(out, &pos, "op", "rollback-marker");
-    store8(out + pos, 125); pos = pos + 1;
-    store8(out + pos, 10); pos = pos + 1;
+    _audit_put8(out, &pos, cap, 123);
+    _audit_emit_field(out, &pos, cap, "ts", ts);
+    _audit_emit_comma(out, &pos, cap);
+    _audit_emit_field(out, &pos, cap, "op", "rollback-marker");
+    _audit_put8(out, &pos, cap, 125);
+    _audit_put8(out, &pos, cap, 10);
+    if (_audit_ovf == 1) { return 0 - 1; }
     return pos;
 }
 
 # Append a formatted entry to the audit trail. Shared core
 # used by the link / unlink / rollback-marker callers.
 fn _audit_append_bytes(buf, n): Result {
+    # A composer that overflowed its buffer returns -1. Refuse the
+    # write rather than handing a negative length to the writer: a
+    # truncated line has no `\n`, so the next entry would concatenate
+    # onto it and the reader would drop both.
+    if (n <= 0) { return Err(HapiAuditWriteFailed); }
     var mkrc = audit_ensure_dir();
     if (mkrc < 0) { return Err(HapiAuditMkdirFailed); }
     var path = audit_trail_path();
@@ -296,8 +358,11 @@ fn _audit_append_bytes(buf, n): Result {
 fn audit_append_link_r(pkg, pkg_version, manifest_hash,
                        source, target, abs_source, abs_target,
                        backup_path): Result {
-    var buf = alloc(4096);
-    var n = audit_format_link(buf, 4096, pkg, pkg_version, manifest_hash,
+    var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
+                               source, target, abs_source, abs_target,
+                               backup_path);
+    var buf = alloc(cap);
+    var n = audit_format_link(buf, cap, pkg, pkg_version, manifest_hash,
                               source, target, abs_source, abs_target,
                               backup_path);
     return _audit_append_bytes(buf, n);
@@ -305,8 +370,10 @@ fn audit_append_link_r(pkg, pkg_version, manifest_hash,
 
 fn audit_append_unlink_r(pkg, pkg_version, manifest_hash,
                          source, target, abs_source, abs_target): Result {
-    var buf = alloc(4096);
-    var n = audit_format_unlink(buf, 4096, pkg, pkg_version, manifest_hash,
+    var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
+                               source, target, abs_source, abs_target, 0);
+    var buf = alloc(cap);
+    var n = audit_format_unlink(buf, cap, pkg, pkg_version, manifest_hash,
                                 source, target, abs_source, abs_target);
     return _audit_append_bytes(buf, n);
 }
@@ -314,8 +381,11 @@ fn audit_append_unlink_r(pkg, pkg_version, manifest_hash,
 fn audit_append_adopt_r(pkg, pkg_version, manifest_hash,
                         source, target, abs_source, abs_target,
                         backup_path): Result {
-    var buf = alloc(4096);
-    var n = audit_format_adopt(buf, 4096, pkg, pkg_version, manifest_hash,
+    var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
+                               source, target, abs_source, abs_target,
+                               backup_path);
+    var buf = alloc(cap);
+    var n = audit_format_adopt(buf, cap, pkg, pkg_version, manifest_hash,
                                source, target, abs_source, abs_target,
                                backup_path);
     return _audit_append_bytes(buf, n);
@@ -323,8 +393,10 @@ fn audit_append_adopt_r(pkg, pkg_version, manifest_hash,
 
 fn audit_append_unadopt_r(pkg, pkg_version, manifest_hash,
                           source, target, abs_source, abs_target): Result {
-    var buf = alloc(4096);
-    var n = audit_format_unadopt(buf, 4096, pkg, pkg_version, manifest_hash,
+    var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
+                               source, target, abs_source, abs_target, 0);
+    var buf = alloc(cap);
+    var n = audit_format_unadopt(buf, cap, pkg, pkg_version, manifest_hash,
                                  source, target, abs_source, abs_target);
     return _audit_append_bytes(buf, n);
 }
@@ -351,8 +423,14 @@ fn audit_manifest_hash(path): i64 {
     if (is_err_result(mr) == 1) { return 0; }
     var m = load64(mr + 8);
 
-    var cbuf = alloc(65536);
-    var n = hapi_mf_canonicalize(m, cbuf, 65536);
+    # Size the buffer from the parsed manifest rather than a fixed
+    # 64 KB. `hapi_mf_canonical_size` over-estimates and the
+    # canonicalizer's writes are bounded either way, so an oversized
+    # manifest now refuses (n < 0 -> "could not hash manifest",
+    # exit 1) instead of overflowing the heap.
+    var cap = hapi_mf_canonical_size(m);
+    var cbuf = alloc(cap);
+    var n = hapi_mf_canonicalize(m, cbuf, cap);
     if (n <= 0) { return 0; }
 
     var digest[20];

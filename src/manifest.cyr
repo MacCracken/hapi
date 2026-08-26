@@ -17,12 +17,14 @@
 # reason the dispatch lives here, not the bracket counting.
 #
 # Filesystem checks (source paths exist, target paths writable,
-# capability scope) are deferred to M2 `link` — this parser
-# produces a static description that runs on any well-formed
+# capability scope) belong to `link` / `adopt`, not here — this
+# parser produces a static description that runs on any well-formed
 # manifest without touching the scoped root.
 
 include "lib/result.cyr"
-include "lib/bayan.cyr"   # cyml folded into bayan in the v6.1.25 stdlib carve; cyml_* call sites preserved via bayan _compat shims
+# cyml folded into bayan in the v6.1.25 stdlib carve; the cyml_*
+# call sites below ride bayan's _compat forwarders unchanged.
+include "lib/bayan.cyr"
 include "lib/str.cyr"
 include "lib/vec.cyr"
 include "lib/alloc.cyr"
@@ -462,64 +464,135 @@ fn _hapi_mf_sort_links_by_target(links): i64 {
     return 0;
 }
 
-# Emit `prefix"<escaped value>"\n` to `out` at *pos_ptr; bumps pos.
-fn _hapi_mf_emit_kv(out, pos_ptr, key, val_data, val_len): i64 {
+# Canonicalization overflow flag. Set by the bounded writers below
+# when a write would pass `cap`; `hapi_mf_canonicalize` clears it on
+# entry and turns it into a refusal on exit.
+#
+# A flag rather than a per-call return because the emitters are called
+# from inside the row loop: refusing at the first overflow and carrying
+# the verdict out is what lets the byte sequence stay EXACTLY what it
+# was for every manifest that does fit. The canonical bytes are the
+# `sha1c:` hash preimage frozen by ADR 0002 — truncating instead of
+# refusing would silently change the hash of an oversized manifest.
+var _hapi_mf_canon_ovf = 0;
+
+# Write one byte at *pos_ptr if it fits in `cap`; else set the flag.
+fn _hapi_mf_put8(out, pos_ptr, cap, c): i64 {
     var pos = load64(pos_ptr);
-    var klen = strlen(key);
-    memcpy(out + pos, key, klen); pos = pos + klen;
-    store8(out + pos, 32); pos = pos + 1;     # space
-    store8(out + pos, 61); pos = pos + 1;     # =
-    store8(out + pos, 32); pos = pos + 1;     # space
-    store8(out + pos, 34); pos = pos + 1;     # "
+    if (pos + 1 > cap) { _hapi_mf_canon_ovf = 1; return 0; }
+    store8(out + pos, c);
+    store64(pos_ptr, pos + 1);
+    return 0;
+}
+
+# Copy `n` bytes at *pos_ptr if they fit in `cap`; else set the flag.
+fn _hapi_mf_putn(out, pos_ptr, cap, src, n): i64 {
+    var pos = load64(pos_ptr);
+    if (pos + n > cap) { _hapi_mf_canon_ovf = 1; return 0; }
+    memcpy(out + pos, src, n);
+    store64(pos_ptr, pos + n);
+    return 0;
+}
+
+# Emit `prefix"<escaped value>"\n` to `out` at *pos_ptr; bumps pos.
+# Every write is bounded by `cap`; an overflow sets the module flag and
+# the remaining writes become no-ops, so `pos` never passes `cap`.
+fn _hapi_mf_emit_kv(out, pos_ptr, cap, key, val_data, val_len): i64 {
+    _hapi_mf_putn(out, pos_ptr, cap, key, strlen(key));
+    _hapi_mf_put8(out, pos_ptr, cap, 32);     # space
+    _hapi_mf_put8(out, pos_ptr, cap, 61);     # =
+    _hapi_mf_put8(out, pos_ptr, cap, 32);     # space
+    _hapi_mf_put8(out, pos_ptr, cap, 34);     # "
     var i = 0;
     while (i < val_len) {
         var c = load8(val_data + i);
         if (c == 34 || c == 92) {
-            store8(out + pos, 92); pos = pos + 1;
+            _hapi_mf_put8(out, pos_ptr, cap, 92);
         }
-        store8(out + pos, c); pos = pos + 1;
+        _hapi_mf_put8(out, pos_ptr, cap, c);
         i = i + 1;
     }
-    store8(out + pos, 34); pos = pos + 1;     # "
-    store8(out + pos, 10); pos = pos + 1;     # \n
-    store64(pos_ptr, pos);
+    _hapi_mf_put8(out, pos_ptr, cap, 34);     # "
+    _hapi_mf_put8(out, pos_ptr, cap, 10);     # \n
     return 0;
 }
 
-# Re-serialize parsed manifest `m` into `out` (max `cap` bytes).
-# Returns bytes written. Caller is responsible for sizing `out`
-# generously (64 KB is plenty for realistic manifests).
+# Upper bound on the canonical form of `m`, for sizing the buffer.
+# Deliberately an OVER-estimate: every value is counted at 2x for
+# worst-case `"` / `\` escaping, plus fixed per-row overhead. It is a
+# sizing hint, NOT the safety mechanism — `hapi_mf_canonicalize`'s
+# bounded writers are, so a hint that is somehow too small refuses
+# cleanly instead of overflowing.
+fn hapi_mf_canonical_size(m): i64 {
+    var n = 64;                       # "[package]\n" + slack
+    var nm = hapi_mf_name(m);
+    n = n + 2 * str_len(nm) + 16;
+    var ver = hapi_mf_version(m);
+    n = n + 2 * str_len(ver) + 16;
+    var desc = hapi_mf_description(m);
+    if (desc != 0) { n = n + 2 * str_len(desc) + 20; }
+
+    var ig = hapi_mf_ignore(m);
+    var ign = vec_len(ig);
+    var i = 0;
+    while (i < ign) {
+        n = n + 2 * str_len(vec_get(ig, i)) + 8;
+        i = i + 1;
+    }
+    if (ign > 0) { n = n + 16; }
+
+    var links = hapi_mf_links(m);
+    var nl = vec_len(links);
+    var j = 0;
+    while (j < nl) {
+        var lk = vec_get(links, j);
+        n = n + 2 * str_len(hapi_link_source(lk));
+        n = n + 2 * str_len(hapi_link_target(lk));
+        n = n + 48;                   # "\n[[link]]\n" + both key lines
+        j = j + 1;
+    }
+    return n;
+}
+
+# Re-serialize parsed manifest `m` into `out`, writing at most `cap`
+# bytes. Returns bytes written, or -1 if the canonical form does not
+# fit — `cap` is now honoured (it was accepted and ignored through
+# 1.0.4, so a manifest whose canonical form passed the caller's buffer
+# overflowed the heap and took `link` / `sync` / `adopt` down with
+# SIGSEGV, exit 139, outside the documented 0/1/2 contract).
+#
+# Refuses rather than truncating on purpose: these bytes are the
+# `sha1c:` manifest_hash preimage frozen by ADR 0002, so emitting a
+# short prefix would quietly hash a different document. Callers size
+# the buffer with `hapi_mf_canonical_size`.
 fn hapi_mf_canonicalize(m, out, cap): i64 {
     var pos = 0;
+    _hapi_mf_canon_ovf = 0;
 
-    var hdr = "[package]\n";
-    var hlen = 10;
-    memcpy(out + pos, hdr, hlen); pos = pos + hlen;
+    _hapi_mf_putn(out, &pos, cap, "[package]\n", 10);
 
     var nm = hapi_mf_name(m);
-    _hapi_mf_emit_kv(out, &pos, "name", str_data(nm), str_len(nm));
+    _hapi_mf_emit_kv(out, &pos, cap, "name", str_data(nm), str_len(nm));
 
     var ver = hapi_mf_version(m);
-    _hapi_mf_emit_kv(out, &pos, "version", str_data(ver), str_len(ver));
+    _hapi_mf_emit_kv(out, &pos, cap, "version", str_data(ver), str_len(ver));
 
     var desc = hapi_mf_description(m);
     if (desc != 0 && str_len(desc) > 0) {
-        _hapi_mf_emit_kv(out, &pos, "description", str_data(desc), str_len(desc));
+        _hapi_mf_emit_kv(out, &pos, cap, "description", str_data(desc), str_len(desc));
     }
 
     var ig = hapi_mf_ignore(m);
     var ign = vec_len(ig);
     if (ign > 0) {
-        var prefix = "ignore = [";
-        var plen = 10;
-        memcpy(out + pos, prefix, plen); pos = pos + plen;
+        _hapi_mf_putn(out, &pos, cap, "ignore = [", 10);
         var i = 0;
         while (i < ign) {
             if (i > 0) {
-                store8(out + pos, 44); pos = pos + 1;   # ,
-                store8(out + pos, 32); pos = pos + 1;   # space
+                _hapi_mf_put8(out, &pos, cap, 44);      # ,
+                _hapi_mf_put8(out, &pos, cap, 32);      # space
             }
-            store8(out + pos, 34); pos = pos + 1;       # "
+            _hapi_mf_put8(out, &pos, cap, 34);          # "
             var s = vec_get(ig, i);
             var sd = str_data(s);
             var sl = str_len(s);
@@ -527,16 +600,16 @@ fn hapi_mf_canonicalize(m, out, cap): i64 {
             while (k < sl) {
                 var c = load8(sd + k);
                 if (c == 34 || c == 92) {
-                    store8(out + pos, 92); pos = pos + 1;
+                    _hapi_mf_put8(out, &pos, cap, 92);
                 }
-                store8(out + pos, c); pos = pos + 1;
+                _hapi_mf_put8(out, &pos, cap, c);
                 k = k + 1;
             }
-            store8(out + pos, 34); pos = pos + 1;       # "
+            _hapi_mf_put8(out, &pos, cap, 34);          # "
             i = i + 1;
         }
-        store8(out + pos, 93); pos = pos + 1;           # ]
-        store8(out + pos, 10); pos = pos + 1;           # \n
+        _hapi_mf_put8(out, &pos, cap, 93);              # ]
+        _hapi_mf_put8(out, &pos, cap, 10);              # \n
     }
 
     var sorted = _hapi_mf_clone_links(hapi_mf_links(m));
@@ -544,18 +617,17 @@ fn hapi_mf_canonicalize(m, out, cap): i64 {
     var nlinks = vec_len(sorted);
     var j = 0;
     while (j < nlinks) {
-        store8(out + pos, 10); pos = pos + 1;           # blank line
-        var lhdr = "[[link]]\n";
-        var llen = 9;
-        memcpy(out + pos, lhdr, llen); pos = pos + llen;
+        _hapi_mf_put8(out, &pos, cap, 10);              # blank line
+        _hapi_mf_putn(out, &pos, cap, "[[link]]\n", 9);
         var lk = vec_get(sorted, j);
         var src = hapi_link_source(lk);
         var tgt = hapi_link_target(lk);
-        _hapi_mf_emit_kv(out, &pos, "source", str_data(src), str_len(src));
-        _hapi_mf_emit_kv(out, &pos, "target", str_data(tgt), str_len(tgt));
+        _hapi_mf_emit_kv(out, &pos, cap, "source", str_data(src), str_len(src));
+        _hapi_mf_emit_kv(out, &pos, cap, "target", str_data(tgt), str_len(tgt));
         j = j + 1;
     }
 
+    if (_hapi_mf_canon_ovf == 1) { return 0 - 1; }
     return pos;
 }
 

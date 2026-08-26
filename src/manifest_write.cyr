@@ -27,22 +27,38 @@ enum HapiMfWriteError {
 
 # Read the entire file into a freshly-allocated buffer. Returns
 # the buffer; writes the length through *out_len. Returns 0 on
-# any read failure.
+# any read failure, INCLUDING a short read.
+#
+# The buffer is sized from the file rather than fixed. Through 1.0.4
+# this read into a fixed alloc(262144) and stopped at the cap with no
+# signal — and both callers hand the result straight to
+# `_hmw_write_atomic`, so `hapi adopt` on a manifest past 256 KB
+# committed the truncation via tmp+rename and permanently destroyed
+# everything beyond it at exit 0. ADR 0001 sanctions an arbitrarily
+# long markdown body below the `---` separator, so that size is
+# reachable without the user doing anything unusual.
 fn _hmw_slurp(path, out_len): i64 {
     var fd = file_open(path, 0, 0);
     if (fd < 0) { return 0; }
-    var buf = alloc(262144);
+    var size = xlseek(fd, 0, 2);              # SEEK_END
+    if (size < 0) { file_close(fd); return 0; }
+    if (xlseek(fd, 0, 0) < 0) { file_close(fd); return 0; }   # SEEK_SET
+    # One byte of headroom so a file that GREW since the probe reads
+    # past `size` and is caught below rather than silently truncated.
+    var cap = size + 1;
+    var buf = alloc(cap);
     var total = 0;
     var rgo = 1;
     while (rgo == 1) {
-        var n = file_read(fd, buf + total, 262144 - total);
+        var n = file_read(fd, buf + total, cap - total);
         if (n <= 0) { rgo = 0; }
         else {
             total = total + n;
-            if (total >= 262144) { rgo = 0; }
+            if (total >= cap) { rgo = 0; }
         }
     }
     file_close(fd);
+    if (total > size) { return 0; }           # grew mid-read: refuse
     store64(out_len, total);
     return buf;
 }
@@ -77,7 +93,9 @@ fn _hmw_find_separator(buf, n): i64 {
     }
     var i = 0;
     while (i + 4 < n) {
-        if (load8(buf + i) == 10 && load8(buf + i + 1) == 45 && load8(buf + i + 2) == 45 && load8(buf + i + 3) == 45 && load8(buf + i + 4) == 10) {
+        if (load8(buf + i) == 10 && load8(buf + i + 1) == 45
+            && load8(buf + i + 2) == 45 && load8(buf + i + 3) == 45
+            && load8(buf + i + 4) == 10) {
             return i + 1;
         }
         i = i + 1;

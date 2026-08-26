@@ -119,6 +119,22 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     var scope_root_abs = fsl_to_absolute(scope_root);
 
     var abs_target = _hap_resolve_target(file_arg, scope_root_abs);
+
+    # The <file> argument is a write target: adopt renames it away and
+    # plants a symlink where it stood. It must therefore be inside the
+    # scope root, exactly like a manifest [[link]] target. `--root`
+    # widens the scope legitimately (scope_root is already the
+    # cap-approved override by this point); without it an absolute or
+    # `..` path used to escape $HOME entirely at exit 0.
+    if (cap_within_scope(abs_target, scope_root_abs) == 0) {
+        _hap_eputs("hapi: refusing to adopt outside the scoped root: ");
+        _hap_eputs(abs_target);
+        _hap_eputs("\n  (scope: ");
+        _hap_eputs(scope_root_abs);
+        _hap_eputs(")\n  (pass --root <path> to open a different scope)\n");
+        return 1;
+    }
+
     var manifest_path = _hap_resolve_manifest(pkg_arg);
     var pkg_dir_abs = _fsl_path_dirname(manifest_path);
 

@@ -187,3 +187,50 @@ freely.
   signal; hapi cares about *authorization* (was this
   workflow granted this scope?). The two are different
   questions; conflating them weakens both.
+
+---
+
+## Addendum — 2026-08-25 (1.0.5 P(-1) sweep)
+
+**The decision stands. Two factual claims supporting it do not.**
+Recorded as an addendum rather than an edit: ADR 0005 is *Frozen at
+v1.0.0* and the decision — `$HOME` by default, `--root` plus a
+capability grant to widen, `cap_check_root_r(path) -> Result` as the
+frozen interface — is unchanged. What follows corrects the rationale.
+
+**1. The kavach migration path does not exist.** The *kavach migration
+path* section above says the fix for F-002 lands "when kavach exposes a
+stable `cap_check(scope, action)` surface". kavach is at **3.12.3** —
+long past stable — and it is a **sandbox execution framework**: ten
+backends, strength scoring, an externalization scanner pipeline, a
+credential proxy, an HMAC-SHA256 audit chain. Its entire public
+path-facing surface is `kavach_path_exists`. There is no capability or
+path-resolution API, none is planned, and adopting a process-sandboxing
+framework would collide with CLAUDE.md's hard *no process spawning from
+command handlers* rule. **The dep gate is void.** Per-component
+symlink-aware resolution is hapi's own work; the primitive it needs
+(`hapi_readlink`, portable across Linux, aarch64 and agnos) landed in
+1.0.4, and the pinned stdlib exposes no `openat2` / `RESOLVE_BENEATH`,
+so the shape is a `readlink` / `O_NOFOLLOW` per-component walk.
+
+**2. "The user typed an explicit escape flag" does not cover the
+escape.** The deferral's rationale assumes the unresolved case always
+involves `--root`. It does not: a symlinked *intermediate component* of
+an ordinary `$HOME` target — `~/.config -> /mnt/other/etc`, an everyday
+convenience symlink — escapes the scope on a plain `hapi link`, with no
+flag at all (F-015). F-002 is therefore re-scoped from *the `--root`
+value* to *every path hapi derives from the scope root*.
+
+**3. `unlink` and `rollback` do not re-check the grant.** They act on
+the trail-recorded `abs_target` without re-validating the capability
+that authorised the original write. This is a defensible position — hapi
+removes only what it created — but it is a *boundary*, not a
+consequence of the design above, and it was undocumented. Recorded as
+an accepted boundary in
+[`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md).
+
+**4. What 1.0.5 did add.** `cap_within_scope(path, scope_root)` — the
+containment predicate for a path hapi is about to *write*, as distinct
+from `cap_check_root_r`, which vets the `--root` value the user typed.
+`adopt` needs it because its `<file>` argument is itself a write target
+(F-011). Internal addition; `cap_check_root_r`'s signature is untouched.

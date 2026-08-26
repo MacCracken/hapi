@@ -83,7 +83,7 @@ fn _har_read_str(buf, len, pos_ptr, out_cstr): i64 {
             if (scan >= len) { return 0 - 1; }
             var esc = load8(buf + scan);
             if (esc == 117) {
-                # \uXXXX — for our writer, only control bytes (0x00-0x1F),
+                # \uXXXX — for our writer, only control bytes (0x00-0x1F),   #skip-lint
                 # which encode in 1 UTF-8 byte. Allow general \u00XX → 1 byte.
                 if (scan + 4 >= len) { return 0 - 1; }
                 out_len = out_len + 1;

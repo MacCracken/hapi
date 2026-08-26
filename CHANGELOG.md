@@ -6,6 +6,134 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.0.5] - 2026-08-25
+
+> P(-1) hardening sweep per CLAUDE.md, and the repairs out of it.
+> **Six HIGH-severity defects fixed** — two heap overflows reachable from
+> an ordinary manifest, two silent destructions of user bytes, one
+> capability escape, and one argument-parsing bug that made
+> `hapi rollback <pkg>` reverse the entire trail. Full record in
+> [`docs/audit/2026-08-25-audit.md`](docs/audit/2026-08-25-audit.md),
+> including the **twenty findings that remain open**. No caller-visible
+> surface change; the v1.0 contract (command surface, ADR 0001 manifest
+> schema, ADR 0002 audit-trail format) stays frozen and byte-identical.
+> Suite **280 assertions / 76 groups**; `cyrius lint` clean tree-wide;
+> x86_64, aarch64 and agnos all build.
+
+### Fixed
+- **`hapi_mf_canonicalize` ignored its `cap` argument — heap overflow,
+  SIGSEGV, exit 139 (F-014).** A 3,000-row manifest (138 KB, well under
+  the cyml read cap) killed `hapi link`, `hapi sync` **and
+  `hapi link --dry-run`** with an exit code outside the published 0/1/2
+  contract and no diagnostic. `--dry-run` is not spared because the
+  manifest hash is computed before the dry-run branch. The overflow
+  lands on the `sorted` vec the row loop is iterating, so the faulting
+  pointer is built from manifest bytes. Writes are now bounded and
+  `hapi_mf_canonical_size` sizes the caller's buffer, so that manifest
+  **links successfully** rather than merely refusing. It refuses rather
+  than truncates when a buffer really is too small: these bytes are the
+  `sha1c:` `manifest_hash` preimage frozen by ADR 0002, so a short
+  prefix would quietly hash a different document. Canonical output is
+  unchanged for every manifest that already fit — asserted by an
+  exact-size byte comparison, the four standing canonical-hash groups,
+  and a benchmark trail that is byte-identical at 101,150 bytes.
+- **Audit entry composers ignored `cap` — out-of-bounds heap write that
+  destroyed the trail (F-008).** `_audit_emit_field` wrote unbounded
+  into a fixed `alloc(4096)`, and both bounds are attacker-sized: the
+  values come from the manifest and the JSON escaper expands a control
+  byte 6:1. A legal 19×200-character target composed 8,027 bytes into
+  4,096; the same target as `0x01` bytes composed 46,028 — a ~42 KB
+  overflow of attacker-chosen content. The post-format
+  `audit_ensure_dir()` then bump-allocated *on top of* the formatted
+  bytes, so the line reaching disk carried spliced heap content and a
+  raw NUL: `link` exited 0, the trail stopped parsing, and `unlink`
+  reported `unlinked 1 / 1` while the symlink stayed on disk. Writes are
+  now bounded and each buffer is sized from its own inputs; an entry
+  that cannot fit refuses through the existing
+  `hapi: audit-trail write failed` / exit 1 path. Never truncates — a
+  short line has no `\n`, so the next entry concatenates onto it and the
+  reader drops both.
+- **`adopt` applied no capability bound to its `<file>` argument
+  (F-011).** `hapi adopt /path/outside/$HOME/f pkg` with **no `--root`**
+  exited 0, moved the file out of its directory and planted a symlink
+  there — a direct violation of CLAUDE.md's *"do not write outside
+  `$HOME` without an explicit `--root` flag"*. `adopt`'s `<file>` is a
+  write target and is now checked like one, via a new
+  `cap_within_scope(path, scope_root)` that lexically normalizes both
+  sides before a component-boundary match. Absolute and `../` escapes
+  refuse with exit 1 and leave the file untouched; a file inside `$HOME`
+  still adopts; and a path outside `$HOME` **with** a `--root` grant
+  still adopts, so the capability grant keeps working.
+- **`hapi rollback <pkg>` reversed the entire trail (F-013).** Every
+  verb silently discarded positional arguments it had no slot for, so a
+  user scoping a rollback to one package destroyed every link in the
+  visible trail at exit 0 — and `hapi link A B` reported complete
+  success having linked only A. Every verb now rejects an extra
+  positional with exit 2 and a named diagnostic. Legitimate forms are
+  unaffected.
+- **A manifest past 256 KB was truncated and the truncation committed
+  (F-009).** `_hmw_slurp` read into a fixed `alloc(262144)` and stopped
+  at the cap with no signal, and both callers hand the buffer straight
+  to the atomic rewrite — so `hapi adopt` on a 300 KB manifest exited 0
+  having permanently deleted the markdown body and everything after it.
+  ADR 0001 sanctions an arbitrarily long body below the `---`
+  separator, so the size is reachable without doing anything unusual.
+  The buffer is now sized from the file, with one byte of headroom so a
+  file that grew mid-read is refused rather than committed short.
+- **`--backup-to` destroyed one snapshot when two rows shared a target
+  basename (F-010).** The destination is `<ts>-<pkg>-<basename>`, so
+  `a/config` and `b/config` composed the same path inside one second and
+  the second copy overwrote the first — destroying exactly the bytes
+  `--force` was about to delete — while both trail entries pointed
+  `backup_path` at the survivor. The composer now suffixes `-2`, `-3`, …
+  until the name is free, and the copy opens `O_EXCL` instead of
+  `O_TRUNC` as the backstop. Two adjacent repairs rode along: a `w == 0`
+  write result is an error rather than a silent spin, and the write-side
+  `file_close` return is captured, since a deferred error on the last
+  copy of the bytes must not read as success.
+
+### Changed
+- **CI compiles `--aarch64` and `--agnos`, not just x86_64.** Two
+  compile-only steps in `ci.yml`. Cross-compilation is all a GitHub runner
+  can do for these — there is no aarch64 runner and agnos needs mirshi — but
+  compiling is the check that was missing: `--aarch64` silently stopped
+  building at 1.0.2 over a bare `SYS_OPEN` and nothing noticed until 1.0.4,
+  because CI built one target. That matters more now that cyrius 6.5.1 makes
+  a wrong argument count a hard error rather than a warning, so an unbuilt
+  target can break on drift the x86_64 build accepts.
+- **`cyrius lint` is clean tree-wide** — six untracked deferrals and two
+  over-long lines cleared. Two of the deferrals were the linter matching
+  `XXX` inside the `\uXXXX` escape notation and are marked
+  `#skip-lint`; two were real deferrals now carrying their tracking
+  cross-reference (`cap.cyr` → F-002, `cmd/sync.cyr` → the sync-prune
+  issue); two were stale prose describing milestones that shipped long
+  ago. No behaviour change.
+
+### Known limitations
+- **Twenty audit findings from this sweep remain open in the shipped
+  1.0.5** and are listed in
+  [`docs/audit/2026-08-25-audit.md`](docs/audit/2026-08-25-audit.md).
+  The three that most deserve the next arc: **F-007**, the trail
+  reader's 256 KB head cap, which makes `rollback` reverse the wrong
+  window once the trail outgrows it; **F-012**, the unlocked manifest
+  read-modify-write, under which concurrent `adopt` drops rows; and
+  **F-015**, a symlinked intermediate component in a manifest target
+  escaping `$HOME` with no `--root`.
+- **F-002's dependency gate is void.** ADR 0005 parks the symlink-escape
+  fix on kavach exposing a stable `cap_check(scope, action)` API.
+  kavach is at 3.12.3 and is a *sandbox execution* framework — ten
+  backends, strength scoring, credential proxy, HMAC audit chain — whose
+  entire public path surface is `kavach_path_exists`. There is no such
+  API and none is planned, and adopting it would collide with hapi's
+  no-process-spawning rule. F-002 is hapi-owned work now, and the
+  primitive it needs (`hapi_readlink`, portable across all three
+  targets) landed in 1.0.4.
+- **Six files still fail `cyrius fmt --check`** under 6.5.28's indent
+  contract, unchanged from 1.0.4. Deliberately not reformatted inside a
+  release cut, because 6.5.28 also made `cyrius fmt <file>` rewrite in
+  place — the remedy the tool prints would silently rewrite the
+  ADR-0002-frozen `src/audit.cyr` and the 280-assertion suite.
+
 ## [1.0.4] - 2026-08-25
 
 > Toolchain + vendored-stdlib refresh (cyrius `6.4.22` → `6.5.35`),

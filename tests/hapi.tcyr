@@ -919,6 +919,47 @@ fn test_cmd_adopt_refuses_symlink() {
     return 0;
 }
 
+# F-011 (1.0.5 P(-1)): adopt's <file> argument is a write target — it
+# renames the file away and plants a symlink where it stood — but it was
+# never capability-checked. An absolute path outside the scope root, or
+# one reached via `..`, was adopted at exit 0 with no --root: the exact
+# escape CLAUDE.md's capability rule exists to prevent.
+fn test_cmd_adopt_refuses_outside_scope() {
+    test_group("adopt: refuses a target outside the scoped root");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _test_make_package(0, 0);
+
+    # A real regular file OUTSIDE the scope root. /tmp is never inside
+    # the per-test scratch scope, so this is a genuine escape attempt.
+    var outside = "/tmp/hapi-f011-outside.conf";
+    var fd = file_open(outside, 0x241, 0x180);      # O_WRONLY|O_CREAT|O_TRUNC, 0600
+    assert(fd >= 0, "fixture file created outside the scope");
+    file_write(fd, "secret\n", 7);
+    file_close(fd);
+
+    assert_eq(cmd_adopt(outside, pkg), 1, "absolute path outside scope exits 1");
+    # The file must be untouched — not renamed into the package.
+    assert_eq(link_probe_kind(link_probe(outside)), HAPI_LP_FILE, "outside file untouched");
+
+    # The predicate itself, both directions.
+    assert_eq(cap_within_scope(outside, scope), 0, "outside path is not within scope");
+    var inside = alloc(strlen(scope) + 16);
+    memcpy(inside, scope, strlen(scope));
+    memcpy(inside + strlen(scope), "/.inside\x00", 9);
+    assert_eq(cap_within_scope(inside, scope), 1, "inside path is within scope");
+    # A `..` segment must not smuggle an escape past the prefix match.
+    var escape = alloc(strlen(scope) + 24);
+    memcpy(escape, scope, strlen(scope));
+    memcpy(escape + strlen(scope), "/../etc/passwd\x00", 15);
+    assert_eq(cap_within_scope(escape, scope), 0, "`..` escape is not within scope");
+
+    hapi_unlink(outside);
+    _test_clear_env();
+    return 0;
+}
+
 fn test_cmd_adopt_refuses_directory() {
     test_group("adopt: refuses when target is a directory");
 
@@ -1649,6 +1690,190 @@ fn test_backup_copy_refuses_symlink_source() {
 }
 
 # ============================================================
+# 1.0.5 P(-1) — buffer-bound regressions (F-014, F-008)
+# ============================================================
+
+# F-009: _hmw_slurp read into a fixed alloc(262144) and stopped at the
+# cap with no signal, and both callers hand the buffer straight to
+# _hmw_write_atomic — so `adopt` on a manifest past 256 KB committed the
+# truncation via tmp+rename and permanently destroyed everything beyond
+# it at exit 0. ADR 0001 sanctions an arbitrarily long markdown body, so
+# that size is reachable without doing anything unusual.
+fn test_manifest_write_preserves_large_body() {
+    test_group("manifest_write: a manifest past 256 KB survives a row append");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _test_make_package(0, 0);
+    var mpath = _fsl_path_join(pkg, "hapi.cyml");
+
+    # Append a >256 KB markdown body below the ADR 0001 `---` separator,
+    # ending in a marker that must survive the rewrite.
+    var fd = file_open(mpath, O_WRONLY | 1024, 0x1A4);   # O_APPEND
+    assert(fd >= 0, "manifest opened for append");
+    file_write(fd, "\n---\n", 5);
+    var chunk = alloc(4097);
+    var i = 0;
+    while (i < 4096) { store8(chunk + i, 120); i = i + 1; }   # 'x'
+    store8(chunk + 4096, 0);
+    var w = 0;
+    while (w < 70) { file_write(fd, chunk, 4096); w = w + 1; }  # ~287 KB
+    file_write(fd, "\nTAIL-MARKER\n", 13);
+    file_close(fd);
+
+    var before = 0;
+    var raw = _hmw_slurp(mpath, &before);
+    assert(raw != 0, "slurp succeeds on a large manifest");
+    assert(before > 262144, "fixture really is past the old 256 KB cap");
+
+    # The append must preserve every byte of the body.
+    var rc = manifest_append_link_row(mpath, "newsrc", ".newtgt");
+    assert_eq(rc, 0, "row append succeeds");
+
+    var after = 0;
+    var raw2 = _hmw_slurp(mpath, &after);
+    assert(raw2 != 0, "re-slurp succeeds");
+    assert(after > before, "manifest grew rather than being truncated");
+    assert(_test_substr(raw2, after, "TAIL-MARKER") >= 0, "body tail survived");
+    assert(_test_substr(raw2, after, "newsrc") >= 0, "new row landed");
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-010: the backup filename is <ts>-<pkg>-<basename>, so two manifest
+# rows whose targets share a basename compose the SAME destination
+# inside one second. The second copy overwrote the first — destroying
+# exactly the bytes --force was about to delete — while both audit
+# entries recorded the surviving path.
+fn test_backup_disambiguates_colliding_basenames() {
+    test_group("backup: colliding basenames get distinct snapshots");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var bkdir = _fsl_path_join(scope, "bk");
+
+    # Two different sources that share a basename.
+    var da = _fsl_path_join(scope, "a");
+    var db = _fsl_path_join(scope, "b");
+    fsl_mkdir_parents(_fsl_path_join(da, "x"));
+    fsl_mkdir_parents(_fsl_path_join(db, "x"));
+    var fa = _fsl_path_join(da, "config");
+    var fb = _fsl_path_join(db, "config");
+    var f1 = file_open(fa, 0x241, 0x1A4); file_write(f1, "AAAA", 4); file_close(f1);
+    var f2 = file_open(fb, 0x241, 0x1A4); file_write(f2, "BBBB", 4); file_close(f2);
+
+    var p1 = hapi_backup_compose_path(bkdir, "pkg", fa);
+    assert_eq(hapi_backup_copy(fa, p1), 0, "first snapshot written");
+    var p2 = hapi_backup_compose_path(bkdir, "pkg", fb);
+    assert_eq(hapi_backup_copy(fb, p2), 0, "second snapshot written");
+
+    # Distinct destinations, and both originals recoverable.
+    assert_eq(_har_cstr_eq(p1, p2), 0, "colliding basenames compose distinct paths");
+    assert_eq(link_probe_kind(link_probe(p1)), HAPI_LP_FILE, "first snapshot still present");
+    assert_eq(link_probe_kind(link_probe(p2)), HAPI_LP_FILE, "second snapshot present");
+
+    # O_EXCL backstop: copying onto an existing destination refuses.
+    assert(hapi_backup_copy(fa, p1) < 0, "copy onto an existing snapshot refuses");
+
+    _test_clear_env();
+    return 0;
+}
+
+
+# F-014: hapi_mf_canonicalize accepted `cap` and never read it, so a
+# manifest whose canonical form outgrew the caller's buffer overflowed
+# the bump heap into the live `sorted` vec and took link / sync / adopt
+# down with SIGSEGV (exit 139, outside the documented 0/1/2 contract) —
+# `--dry-run` included, because the hash is computed before the dry-run
+# branch. It must now refuse, and must not write past `cap`.
+fn test_canonicalize_honours_cap() {
+    test_group("canonical: canonicalize refuses rather than overflowing");
+
+    var src = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"s\"\ntarget = \".t\"\n";
+    var r = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_err_result(r), 0, "fixture manifest parses");
+    var m = load64(r + 8);
+
+    # Full-size run establishes the true length.
+    var big = alloc(65536);
+    var full = hapi_mf_canonicalize(m, big, 65536);
+    assert(full > 0, "canonicalizes at full size");
+
+    # A buffer one byte short must refuse, not truncate and not write.
+    # Guard bytes on both sides of an exactly-sized-minus-one buffer
+    # prove nothing was written past the cap.
+    var small = alloc(full + 16);
+    var i = 0;
+    while (i < full + 16) { store8(small + i, 170); i = i + 1; }   # 0xAA
+    var n = hapi_mf_canonicalize(m, small, full - 1);
+    assert_eq(n, 0 - 1, "refuses with -1 when the canonical form does not fit");
+    var clean = 1;
+    i = full - 1;
+    while (i < full + 16) {
+        if (load8(small + i) != 170) { clean = 0; }
+        i = i + 1;
+    }
+    assert_eq(clean, 1, "wrote nothing at or past cap");
+
+    # Exactly-sized buffer still succeeds and is byte-identical to the
+    # full-size run — the ADR 0002 sha1c: preimage must not shift.
+    var exact = alloc(full);
+    var n2 = hapi_mf_canonicalize(m, exact, full);
+    assert_eq(n2, full, "exact-size buffer succeeds");
+    assert_eq(memeq(exact, big, full), 1, "canonical bytes unchanged");
+
+    # The sizing hint must never under-estimate the real length.
+    assert(hapi_mf_canonical_size(m) >= full, "size hint bounds the canonical form");
+    return 0;
+}
+
+# F-008: the audit entry composers accepted `cap` and never read it, so
+# a long manifest target composed past the fixed alloc(4096) — writing
+# attacker-sized bytes into the heap and splicing a NUL into the trail
+# line, which made the whole trail unreadable while `link` exited 0.
+fn test_audit_entry_honours_cap() {
+    test_group("audit: entry composer refuses rather than overflowing");
+
+    var buf = alloc(4096);
+    var full = audit_format_link(buf, 4096, "pkg", "1.0", "h",
+                                 "src", ".tgt", "/abs/src", "/abs/tgt", 0);
+    assert(full > 0, "composes at full size");
+
+    var small = alloc(full + 16);
+    var i = 0;
+    while (i < full + 16) { store8(small + i, 170); i = i + 1; }
+    var n = audit_format_link(small, full - 1, "pkg", "1.0", "h",
+                              "src", ".tgt", "/abs/src", "/abs/tgt", 0);
+    assert_eq(n, 0 - 1, "refuses with -1 when the entry does not fit");
+    var clean = 1;
+    i = full - 1;
+    while (i < full + 16) {
+        if (load8(small + i) != 170) { clean = 0; }
+        i = i + 1;
+    }
+    assert_eq(clean, 1, "wrote nothing at or past cap");
+
+    # The marker composer shares the bound.
+    var mk = alloc(256);
+    assert(audit_format_rollback_marker(mk, 256) > 0, "marker composes");
+    assert_eq(audit_format_rollback_marker(mk, 8), 0 - 1, "marker refuses when short");
+
+    # Sizing hint must bound a value that needs 6:1 control-byte escaping.
+    var ctrl = alloc(33);
+    i = 0;
+    while (i < 32) { store8(ctrl + i, 1); i = i + 1; }   # 32x 0x01
+    store8(ctrl + 32, 0);
+    var cap = audit_entry_size("pkg", "1.0", "h", "src", ctrl, "/a", "/b", 0);
+    var wide = alloc(cap);
+    var wn = audit_format_link(wide, cap, "pkg", "1.0", "h",
+                               "src", ctrl, "/a", "/b", 0);
+    assert(wn > 0, "sized buffer composes an escape-heavy entry");
+    assert(cap >= wn, "size hint bounds the escaped entry");
+    return 0;
+}
+
+# ============================================================
 # M7 — manifest-hash canonicalization (sha1: → sha1c:)
 # ============================================================
 
@@ -1939,10 +2164,15 @@ fn main() {
     test_cmd_rollback_idempotent();
     test_cmd_rollback_stops_at_marker();
     test_rollback_replay_entry_has_no_backup_path();
+    test_manifest_write_preserves_large_body();
+    test_backup_disambiguates_colliding_basenames();
+    test_canonicalize_honours_cap();
+    test_audit_entry_honours_cap();
     test_manifest_append_row();
     test_manifest_remove_row();
     test_cmd_adopt_happy_path();
     test_cmd_adopt_refuses_symlink();
+    test_cmd_adopt_refuses_outside_scope();
     test_cmd_adopt_refuses_directory();
     test_cmd_adopt_refuses_absent();
     test_cmd_adopt_refuses_duplicate_target();

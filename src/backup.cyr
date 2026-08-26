@@ -81,7 +81,7 @@ fn _hbk_basename(path): i64 {
 #   <dir>/<ts>-<pkg>-<basename(src_path)>
 # Inserts a `/` between <dir> and the tail only if <dir> doesn't
 # already end in one. Returns a heap cstring.
-fn hapi_backup_compose_path(dir, pkg, src_path): i64 {
+fn _hbk_compose_base(dir, pkg, src_path): i64 {
     var ts = _hbk_ts();
     var bn = _hbk_basename(src_path);
     var dl = strlen(dir);
@@ -104,6 +104,54 @@ fn hapi_backup_compose_path(dir, pkg, src_path): i64 {
     return out;
 }
 
+# Public composer: the base name above, made unique.
+#
+# The base is <ts>-<pkg>-<basename>, so two manifest rows whose targets
+# share a basename (`a/config` and `b/config`) compose the SAME path
+# within one second. That silently destroyed the first snapshot — the
+# very bytes --force was about to delete — and left both audit entries
+# pointing `backup_path` at the survivor. Suffix `-2`, `-3`, ... until
+# the name is free, so the earlier snapshot survives AND the path
+# recorded in the trail names the file that actually holds these bytes.
+#
+# The O_EXCL open in hapi_backup_copy is the backstop for the residual
+# race between this probe and the create.
+fn hapi_backup_compose_path(dir, pkg, src_path): i64 {
+    var base = _hbk_compose_base(dir, pkg, src_path);
+    if (link_probe_kind(link_probe(base)) == HAPI_LP_ABSENT) { return base; }
+
+    var bl = strlen(base);
+    var out = base;
+    var k = 2;
+    var go = 1;
+    while (go == 1) {
+        # "-" + up to 3 decimal digits + NUL
+        var cand = alloc(bl + 6);
+        memcpy(cand, base, bl);
+        var p2 = bl;
+        store8(cand + p2, 45); p2 = p2 + 1;        # -
+        if (k >= 100) {
+            store8(cand + p2, 48 + k / 100); p2 = p2 + 1;
+        }
+        if (k >= 10) {
+            var t = k / 10;
+            store8(cand + p2, 48 + t - (t / 10) * 10); p2 = p2 + 1;
+        }
+        store8(cand + p2, 48 + k - (k / 10) * 10); p2 = p2 + 1;
+        store8(cand + p2, 0);
+        if (link_probe_kind(link_probe(cand)) == HAPI_LP_ABSENT) {
+            out = cand;
+            go = 0;
+        } else {
+            k = k + 1;
+            # Give up rather than spin; O_EXCL then refuses the copy
+            # loudly instead of overwriting.
+            if (k > 999) { out = cand; go = 0; }
+        }
+    }
+    return out;
+}
+
 # Byte-copy a regular file from `src` to `dst`. mkdir -p the
 # parent of `dst` first. Returns 0 on success or a negative
 # errno on the first IO failure. 8 KiB read buffer; loop to
@@ -121,7 +169,16 @@ fn hapi_backup_copy(src, dst): i64 {
     # O_NOFOLLOW = 0x20000 on Linux x86_64.
     var rfd = file_open(src, O_RDONLY | 131072, 0);
     if (rfd < 0) { return rfd; }
-    var wfd = file_open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    # O_EXCL, not O_TRUNC: the destination name is
+    # <ts>-<pkg>-<basename>, so two manifest rows whose targets share a
+    # basename (`a/config` and `b/config`) compose the SAME path inside
+    # one second. With O_TRUNC the second copy silently overwrote the
+    # first — destroying exactly the bytes `--force` was about to
+    # delete, while both audit entries recorded the same `backup_path`,
+    # so the trail pointed at the surviving snapshot for both. Failing
+    # closed on an existing destination matches hapi's stated rule that
+    # conflicts surface explicitly rather than overwrite.
+    var wfd = file_open(dst, O_WRONLY | O_CREAT | O_EXCL, 0x1A4);
     if (wfd < 0) { file_close(rfd); return wfd; }
     var buf = alloc(8192);
     var go = 1;
@@ -134,13 +191,19 @@ fn hapi_backup_copy(src, dst): i64 {
             var wp = 0;
             while (wp < n && err == 0) {
                 var w = file_write(wfd, buf + wp, n - wp);
-                if (w <= 0) { err = w; }
+                # w == 0 must be an error, not a retry: `err = w` would
+                # leave err at 0 and spin here forever.
+                if (w == 0) { err = 0 - 5; }          # EIO
+                elif (w < 0) { err = w; }
                 else { wp = wp + w; }
             }
             if (err != 0) { go = 0; }
         }
     }
     file_close(rfd);
-    file_close(wfd);
+    # The backup is the last copy of bytes --force is about to delete,
+    # so a write error surfaced only at close must not be discarded.
+    var crc = file_close(wfd);
+    if (err == 0 && crc < 0) { err = crc; }
     return err;
 }

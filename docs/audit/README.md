@@ -46,7 +46,34 @@ Per CLAUDE.md Process P(-1), re-run the checklist:
 | Pass | Version at scan | Outcome |
 |------|-----------------|---------|
 | [`2026-05-23-audit.md`](2026-05-23-audit.md) | 0.8.0 → v1.0 hardening | F-001 (HIGH, `..` bypass) **fixed**; F-003 (LOW, backup-copy TOCTOU) **fixed**; F-002 (MEDIUM, symlink escape) **deferred** to kavach; F-004 / F-005 **accepted** boundaries. Closed P(-1) Step 5 for the v1.0 cut. |
+| [`2026-08-25-audit.md`](2026-08-25-audit.md) | 1.0.5 | ⚠ **The pass that broke the streak.** Nine HIGH findings, where the two prior passes found none — the earlier lens checked the validators, not the writers. Fixed: F-008 (audit composer heap overflow), F-009 (manifest truncated at 256 KB and the truncation committed), F-010 (`--backup-to` destroying a colliding snapshot), F-011 (`adopt` escaping `$HOME` with no `--root`), F-013 (`rollback <pkg>` reversing the whole trail), F-014 (canonicalize heap overflow → SIGSEGV). F-002 **re-scoped**: the kavach dep gate is void. Twenty findings remain open and listed. |
 | [`2026-05-24-audit.md`](2026-05-24-audit.md) | 1.0.0 (1.0.x-final) | Re-walk over the unchanged v1.0 surface. F-001/F-003 still fixed (test-asserted), F-002 still deferred (no kavach yet), F-004/F-005 still accepted. New F-006 (LOW, audit trail lost on state-dir wipe) **accepted** boundary. Reviewed the syscall-naming cleanup (behavior-neutral). |
+
+---
+
+## Next arc — owned by the pass after 1.0.5
+
+The 2026-08-25 sweep closed six HIGH findings and left twenty open. The
+next arc's scope is set by what it left behind, in this order:
+
+- **F-007 — the trail reader's 256 KB head cap.** `rollback` reverses
+  the wrong window once the trail outgrows it, destroying settled links
+  at exit 0. Fix with a size-derived read; land F-016 (interior
+  malformed line refuses) and F-017 (unreadable trail is an error, not
+  "empty") in the same function while it is open.
+- **F-012 — the unlocked manifest read-modify-write.** Concurrent
+  `adopt` commits the filesystem moves and drops manifest rows. Needs
+  `flock` plus a pid-unique `O_EXCL` tmp name, and a shell-driven
+  harness to regression-test it (`.tcyr` cannot fork).
+- **F-015 / F-002 — per-component symlink resolution.** Now hapi-owned
+  work, not a kavach dep gate. Note the constraint that makes it an arc
+  rather than a patch: four verbs prove ownership by recomputing
+  `fsl_compute_relative` and byte-comparing, so changing the resolver
+  changes what they compare.
+- **An agnos runner.** Three findings (F-027, F-031, and ADR 0002's
+  atomicity rationale on agnos) are target-conditional and could not be
+  reproduced here. Until one exists, this directory must say
+  *unverified on agnos* rather than *clean*.
 
 ---
 

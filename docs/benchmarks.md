@@ -51,6 +51,8 @@ real HDD or under cgroup-throttled IO.
 | 0.9.0   | 72        | 54        | 0 bytes           | 2026-05-23 | Baseline. P(-1) hardening repairs (F-001 / F-003) sit outside the sync hot path, so v0.8.0 produces equivalent numbers; comparison row will land when a perf-relevant change ships. |
 | 1.0.4   | 84        | 68        | 0 bytes           | 2026-08-25 | Toolchain refresh (cyrius `6.4.22` → `6.5.35`) + the agnos `readlink` work in `fs_link.cyr`. Best of four consecutive runs; spread was tight (cold 84–87, warm 68–71). ⚠ **The +17 % / +26 % against 0.9.0 is not attributable to this release** — see the note below. |
 
+| 1.0.5   | 91        | 76        | 0 bytes           | 2026-08-25 | P(-1) sweep. The ~8% cold / ~12% warm cost against 1.0.4 is attributable and expected: F-014 and F-008 added a size-computation pass over the manifest strings and the audit values before each write. Best of three; spread ±1 ms. ⭐ The trail is **byte-identical** at 101,150 bytes / 350 entries — the audit-format rewrite shifted nothing. |
+
 ⚠ **On the 0.9.0 → 1.0.4 delta.** Three things changed at once between
 the two rows: the compiler (6.0.1 → 6.5.35), the kernel (7.0.9 → 7.1.9),
 and hapi's own `link_probe`. The 0.9.0 row is a single run; the 1.0.4 row
@@ -83,9 +85,9 @@ atomicity holds.
   bytes. ✅ Verified at every row, 1.0.4 included (the
   `audit grew (warm)` column).
 - **Scale** — `sync` over a 100-pkg home completes in <1 s on a
-  modern machine. ✅ Cold 84 ms (well under).
+  modern machine. ✅ Cold 91 ms at 1.0.5 (well under).
 - **Per-link** — cold-create cost should stay under 1 ms / link
-  on a tmpfs / SSD-class device. ✅ 240 µs/link.
+  on a tmpfs / SSD-class device. ✅ 260 µs/link at 1.0.5.
 
 A future regression would surface as a > 2× jump in cold-time
 or any non-zero warm audit growth. Re-run this harness on every

@@ -8,7 +8,8 @@
 #   - Never deletes a user file
 #   - Never deletes a user-created symlink
 #   - Refuses any target whose current state diverges from
-#     what the trail recorded (user-mutated; out of scope)
+#     what the trail recorded (user-mutated: hapi removes only
+#     what it created, by design)
 #
 # The trail's `link` entries record both `abs_source` and
 # `abs_target`. We recompute the expected relative-target via
