@@ -4,19 +4,146 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.0.4] - 2026-08-25
+
+> Toolchain + vendored-stdlib refresh (cyrius `6.4.22` → `6.5.35`),
+> the agnos `readlink`#70 `link_probe` work that had been sitting in
+> Unreleased, and one latent audit-trail defect the new toolchain's
+> call-arity check surfaced. No caller-visible surface change; the
+> v1.0 contract (command surface, ADR 0001 manifest schema, ADR 0002
+> audit-trail format) stays frozen. Suite **246 assertions / 71
+> groups**, all passing; `--agnos` build green; `cyrius lint` clean.
+
+### Fixed
+- **`rollback` emitted a junk `backup_path` when reversing an `unlink`.**
+  `_hrb_reverse_unlink` (`src/cmd/rollback.cyr`) called the eight-argument
+  `audit_append_link_r` with seven: the optional `backup_path` was never
+  passed, so the callee read an uninitialized argument slot and the replay
+  entry could carry the field with a meaningless value. The reversal only
+  ever recreates a symlink into an **absent** target — nothing is
+  destructively overwritten, so there is no snapshot to record — and the
+  call now passes `0`, the documented "no backup" value (`src/audit.cyr`
+  emits the additive field only when `backup_path != 0 && strlen(...) > 0`).
+  ADR 0002's frozen **required**-field set is untouched; this only stops an
+  *optional* field from appearing where it has no meaning. The mismatch dates
+  to 0.8.0, when `--backup-to` gave `audit_append_link_r` its eighth
+  parameter and this call site was not updated with it. It shipped in every
+  release from 0.8.0 through 1.0.3 because a wrong argument count was a
+  **warning** until cyrius 6.5.1 — the compiler emitted the binary anyway,
+  so the only outward sign was one easily-missed line. 6.5.1 made it an
+  error (`_CHECK_ARITY` sets `_had_error`, no binary produced), which is why
+  adopting 6.5.35 is what surfaced it. Locked by a new regression group —
+  mutation-proven: it goes RED when the argument is replaced with a non-zero
+  path. Three call sites in `tests/hapi.tcyr` carried the same omission (plus
+  one nine-argument `audit_format_link`) and are fixed with it.
+- **`cyrius build --aarch64` did not compile.** `src/fs_link.cyr`'s
+  `link_probe` opened the probe fd with a bare
+  `syscall(SYS_OPEN, path, 0, 0)`, and there is no `SYS_OPEN` on aarch64
+  Linux — it has `openat(2)` only, so `lib/syscalls_aarch64_linux.cyr`
+  deliberately declines to define the constant (its own comment notes that
+  56 there is `openat` while 56 on x86_64 is `io_setup`, so a bare number
+  would be worse than an undefined one). The site now calls the named
+  `sys_open(path, flags, mode)` wrapper, which every non-agnos table
+  provides and which routes through `SYS_OPENAT` + `AT_FDCWD` on aarch64.
+  It sits in the non-agnos `#else` arm, so agnos's differently-shaped
+  `sys_open(name, namelen, flags)` is out of reach. Pre-existing and
+  unrelated to the pin bump — CI has never built aarch64 — and it is the
+  last un-swept site from the 1.0.2 named-wrapper migration that actually
+  broke a target. x86_64 and agnos codegen are unaffected; the suite is
+  unchanged at 246.
+
 ### Changed
-- **`link_probe` on agnos now uses `readlink` (#70), not stat-classification.** agnos grew a
-  ring-3 `readlink#70` — the symlink-introspection peer of `symlink#63` — so `src/fs_link.cyr`'s
-  agnos branch probes readlink FIRST: `n > 0` ⇒ it is a symlink and hapi already holds the target
-  to byte-compare against the manifest (a DANGLING link included — #70 SEES it, where `stat#33`
-  reported it absent); otherwise it falls back to `stat#33` to split file/dir/absent (stat follows,
-  but the path is not a symlink there). This closes the agnos-only gap 1.0.3 documented — hapi
-  could create links but could neither see an existing one nor read its target for
-  `status`/reconcile. New `hapi_readlink` shim in `src/agnos_compat.cyr`: on agnos it calls the
-  local syscall number `AGNOS_SYS_READLINK`#70 (no cyrius `sys_readlink` peer exists yet — the same
-  self-contained pattern `hapi_symlink` used for #63 before the 6.4.x peer; collapses to a native
-  `sys_readlink(...)` once cyrius ships the peer and the vendored `lib/` re-syncs). Linux/macOS
-  `link_probe` and every other target path are byte-unchanged; suite still **242 assertions**.
+- **Toolchain pin `6.4.22` → `6.5.35`** (`cyrius.cyml` `[package].cyrius`)
+  and **vendored `lib/` resynced to the 6.5.35 snapshot**
+  (`cyrius lib sync --full`): 108 files — 67 updated, 10 new
+  (`async_macos.cyr`, `async_win.cyr`, `thread_macos.cyr`, and the seven
+  files of the `lib/unicode/` package directory), none removed. hapi's
+  declared `[deps] stdlib` set is unchanged, and nothing hapi calls was
+  renamed, moved, or removed across the span — the three stdlib symbols
+  retired between the pins (`_arena_alloc` / `_arena_reset` in `alloc`,
+  `_macho_capture_args` in `args_macos`, `json_v_parse_str` in `bayan`)
+  have no hapi call sites. The stale `lib/agnosys.cyr` bundle — vendored at
+  scaffold, dropped from the upstream snapshot at 6.4.x, never `include`d by
+  hapi — is pruned, so `lib/` again mirrors the pin exactly.
+
+  ⚠ **The shipped binary roughly doubles: ~280 KB → 562,992 bytes.** That is
+  the cost of the bigger 6.5.35 stdlib (`bayan` alone gained 439 functions
+  between the pins), not of anything hapi added — hapi's own source barely
+  moved this release. Note also that `CYRIUS_DCE=1`, which the release
+  workflow sets, now produces a binary of **exactly the same size** as a
+  plain build (byte-different, same length): this cyrius NOPs dead
+  functions in place rather than removing them, so the flag no longer buys
+  the size reduction `release.yml`'s comment still claims for it. Nothing
+  is broken by that — the DCE smoke run passes — but the artifact is
+  larger, and a future release that cares about download size should take
+  that up with the toolchain rather than expect DCE to fix it.
+- **`link_probe` on agnos uses `readlink`#70, not stat-classification.**
+  agnos grew a ring-3 `readlink#70` — the symlink-introspection peer of
+  `symlink#63` — so `src/fs_link.cyr`'s agnos branch probes readlink FIRST:
+  `n > 0` ⇒ it is a symlink and hapi already holds the target to byte-compare
+  against the manifest (a DANGLING link included — #70 SEES it, where
+  `stat#33` reported it absent); otherwise it falls back to `stat#33` to split
+  file/dir/absent (stat follows, but the path is not a symlink there). This
+  closes the agnos-only gap 1.0.3 documented under *Known limitations* — hapi
+  could create links but could neither see an existing one nor read its target
+  for `status` / reconcile. Linux/macOS `link_probe` and every other target
+  path are byte-unchanged.
+- **`hapi_readlink` now calls the native `sys_readlink` peer on agnos.** The
+  6.5.35 snapshot ships `sys_readlink(path, pathlen, buf, buflen)` in
+  `lib/syscalls_x86_64_agnos.cyr`, so the shim in `src/agnos_compat.cyr` drops
+  its locally-declared `AGNOS_SYS_READLINK = 70` and the raw `syscall(...)`
+  form — exactly the collapse the shim's own comment planned for, and the same
+  path `hapi_symlink` took for #63 at the 6.4.x refresh. The agnos/Linux
+  divergence is now only the arity.
+- **`hapi --version` derives its number from `CYRIUS_PKG_VERSION`.**
+  `hapi_print_version` (`src/main.cyr`) carried a hand-synced `"hapi 1.0.3"`
+  literal that had to be bumped in lockstep with `VERSION` — an
+  undocumented third sync point beside `VERSION` and the CHANGELOG header.
+  cyrius 6.5.21 exposes the resolved `[package].version` (i.e.
+  `${file:VERSION}`) as the compile-time constant `CYRIUS_PKG_VERSION`, and
+  6.5.34 made it visible inside `include`d files as well, so the literal is
+  retired and `VERSION` is the single source. Output shape is byte-identical
+  (`hapi <X.Y.Z>`), which the release workflow's smoke step already asserts
+  against the git tag.
+
+### Known post-upgrade items
+- **`cyrius fmt --check` now fails on six files** — five in `src/`
+  (`agnos_compat`, `audit`, `fs_link`, `cmd/adopt`, `cmd/link`) plus
+  `tests/hapi.tcyr`. 6.5.28 gave `fmt` a canonical continuation-indent
+  contract (2 spaces per open paren, 4 accepted, deeper rejected) that
+  hapi's existing style predates, so `cyrius audit`'s fmt step is red purely
+  from the toolchain move. Not reformatted here on purpose: **6.5.28 also
+  made `cyrius fmt <file>` rewrite in place** (stdout-only before; `--dry`
+  is the old behaviour), and reflexively running the remedy the tool prints
+  would silently reformat the ADR-0002-frozen `src/audit.cyr` and the
+  246-assertion suite inside a release cut. `ci.yml` does not run `fmt`, so
+  nothing is blocked. Review with `cyrius fmt <file> --dry` and reformat as
+  its own commit after the tag.
+- **Two `cyrius lint` line-length warnings** (`src/manifest.cyr:25`,
+  `src/manifest_write.cyr:80`, both over 120 chars), and a new lint *note*
+  on `src/fs_link.cyr:89` recommending `lib/io.cyr`'s `xgetdents` over the
+  raw `SYS_GETDENTS64` for agnos-bound directory code. `cyrius lint
+  src/main.cyr` is clean; these surface per-file.
+- **`fs` and `slice` are declared but unused** in `cyrius.cyml`
+  `[deps] stdlib` — zero `fs_*` and zero `slice_*` call sites. `lib/fs.cyr`
+  now carries 6.5.24's `#host_only` annotation, which is a hard error under
+  a kernel-mode build, so hapi is carrying its only `#host_only` module for
+  no benefit. Dropping both is a post-tag cleanup, not a release change.
+- **`src/manifest.cyr` reaches `bayan` through deprecation shims** —
+  `cyml_parse_file_r` / `cyml_doc_header` / `cyml_doc_header_len` are
+  one-line forwarders onto the real `bayan_cyml_*` entry points. Pure
+  forwarders today, deletable upstream at any minor bump with no
+  compile-time warning until they vanish. Three-line migration, post-tag.
+
+### Removed
+- **Known limitation "symlink introspection is unavailable on agnos"**
+  (recorded at 1.0.3). agnos `readlink#70` plus the native cyrius peer close
+  it: hapi can now see an existing link and read its target on agnos, so
+  `status` / reconcile behave as they do on Linux. agnos still exposes no
+  `lstat` and no `getcwd` — `link_probe` needs neither (readlink no-follows
+  the final component), and `_fsl_getcwd` continues to return `"."` there.
 
 ## [1.0.3] - 2026-07-08
 

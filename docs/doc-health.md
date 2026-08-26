@@ -6,7 +6,9 @@ type: state
 
 # Documentation Health — hapi
 
-> **Last refresh**: 2026-05-24 (**1.0.x-final arc.** Filed two issues (`no-arg-sync-bootstrap-recovery`, `audit-trail-lost-on-state-dir-wipe`). Added `docs/audit/README.md` (audit-arc convention + index) and `docs/audit/2026-05-24-audit.md` (1.0.x-final P(-1) re-walk; F-006 accepted boundary). Refreshed CHANGELOG Unreleased, state.md (242/66 tests, `HapiSysno` enum, F-006 recovery boundary), roadmap (no-arg-sync dogfood note). **Prior — 2026-05-23 post-v1.0 stale-sweep:** README.md rewritten from scaffold-era language to the v1.0 surface. Eleven guides scrubbed of milestone (`M2`/`M5`/`M6`) and version-bound (`v0.4.0`, `v0.7.0`) narrative — replaced with timeless behavior. CLAUDE.md P(-1) recast as a standing process. state.md command-surface table dropped the M-shipped column; "M7 onward fills" rewritten as the post-v1.0 implementation backlog. **roadmap.md fully rewritten** — M0–M8 milestone narrative replaced with a v1.x maintenance bucket + v2.0 Breaking-candidate bucket.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
+> **Last refresh**: 2026-08-25 (**1.0.4 toolchain refresh.** Cyrius pin `6.4.22` → `6.5.35`, `lib/` resynced (108 files), the agnos `readlink`#70 work folded out of Unreleased. Fixed two latent defects the pin bump surfaced (a seven-vs-eight-argument `audit_append_link_r` call in `rollback`, a warning until cyrius 6.5.1 made wrong arity an error; and a bare `SYS_OPEN` that kept `--aarch64` from compiling). Refreshed CHANGELOG (new `[1.0.4]` section), state.md (246/71 tests, pin, `src/agnos_compat.cyr` added to the Source list, the stale `66`-group figure corrected to the real count), benchmarks.md (first trend row since the 0.9.0 baseline), VERSION, cyrius.cyml. **Prior — 2026-05-24 1.0.x-final arc:** filed two issues (`no-arg-sync-bootstrap-recovery`, `audit-trail-lost-on-state-dir-wipe`); added `docs/audit/README.md` and `docs/audit/2026-05-24-audit.md`.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
+>
+> _Superseded refresh detail (2026-05-24 / 2026-05-23), kept for provenance_: (**1.0.x-final arc.** Filed two issues (`no-arg-sync-bootstrap-recovery`, `audit-trail-lost-on-state-dir-wipe`). Added `docs/audit/README.md` (audit-arc convention + index) and `docs/audit/2026-05-24-audit.md` (1.0.x-final P(-1) re-walk; F-006 accepted boundary). Refreshed CHANGELOG Unreleased, state.md (242/66 tests, `HapiSysno` enum, F-006 recovery boundary), roadmap (no-arg-sync dogfood note). **Prior — 2026-05-23 post-v1.0 stale-sweep:** README.md rewritten from scaffold-era language to the v1.0 surface. Eleven guides scrubbed of milestone (`M2`/`M5`/`M6`) and version-bound (`v0.4.0`, `v0.7.0`) narrative — replaced with timeless behavior. CLAUDE.md P(-1) recast as a standing process. state.md command-surface table dropped the M-shipped column; "M7 onward fills" rewritten as the post-v1.0 implementation backlog. **roadmap.md fully rewritten** — M0–M8 milestone narrative replaced with a v1.x maintenance bucket + v2.0 Breaking-candidate bucket.) | **Refresh cadence**: when docs are touched, update the affected row. Opportunistic, not periodic.
 > **Scope**: This repo only (`hapi`) — the entire `docs/` tree plus root-level files (README, CHANGELOG, CLAUDE.md, VERSION, LICENSE, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, cyrius.cyml). Per-stdlib-dep docs live in `cyrius/`; cross-repo state lives in [`development/state.md`](development/state.md), not here.
 >
 > **Convention adopted from agnosticos**: pattern mirrors [`cyrius/docs/doc-health.md`](https://github.com/MacCracken/cyrius/blob/main/docs/doc-health.md) (small-repo variant). Per `first-party-documentation.md § Development Docs`, the ledger lives at `docs/` root (not `docs/development/`) because its scope is the whole tree. Hapi's doc tree is ~34 markdown files (vs cyrius's ~105) so the tier structure here is leaner.
@@ -15,11 +17,14 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
 
-## At a glance — 2026-05-23 inventory (v1.0.0 shipped; contract frozen)
+## At a glance — 2026-08-25 inventory (1.0.4; v1.0 contract frozen)
 
-**44 markdown files** across the repo (root + docs tree) — the
-2026-05-24 1.0.x-final arc adds two issues, `docs/audit/README.md`,
-and `docs/audit/2026-05-24-audit.md` to the v1.0 inventory.
+**45 markdown files** across the repo (root + docs tree), counted
+2026-08-25 (`find . -name '*.md' -not -path './.git/*' -not -path
+'./lib/*'`) — the standing figure had read `44` and was one short.
+The 2026-05-24 1.0.x-final arc added two issues,
+`docs/audit/README.md` and `docs/audit/2026-05-24-audit.md` to the
+v1.0 inventory; the 2026-08-25 1.0.4 pass adds no new doc files.
 
 | Bucket | Count | What it means |
 |---|---|---|
@@ -40,17 +45,17 @@ Numbers approximate; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `README.md` | 2026-05-23 | ✅ Fresh | Top-level project README. Rewritten in the post-v1.0 sweep — scaffold-era "Pre-1.0 (0.1.0). No commands implemented yet." replaced with the v1.0 surface (ten verbs, capability boundary, audit trail, dogfood status). Links the v1.0 release notes + the guide / ADR / audit / benchmarks docs. |
-| `CHANGELOG.md` | 2026-05-23 | ✅ Fresh | **Source of truth per CLAUDE.md.** Through v0.7.0 (M6 close — `--root` + `--dry-run`); Unreleased section now carries the two M7 Tier-1 doc fixes (status guide clarification + upstream-drift guide). Refreshed every release. |
+| `README.md` | 2026-08-25 | ✅ Fresh | Top-level project README. 1.0.4 pass: Status header moved to v1.0.4 (contract unchanged since the 2026-05-23 freeze) and the Quick-start test count corrected from a stale `235 / 65` to the measured `246 / 71`. Prior: Rewritten in the post-v1.0 sweep — scaffold-era "Pre-1.0 (0.1.0). No commands implemented yet." replaced with the v1.0 surface (ten verbs, capability boundary, audit trail, dogfood status). Links the v1.0 release notes + the guide / ADR / audit / benchmarks docs. |
+| `CHANGELOG.md` | 2026-08-25 | ✅ Fresh | **Source of truth per CLAUDE.md.** Through `[1.0.4]` (toolchain refresh + the rollback `backup_path` fix + agnos `readlink`); `[Unreleased]` is empty. Historical note below is pre-v1.0: through v0.7.0 (M6 close — `--root` + `--dry-run`); Unreleased section now carries the two M7 Tier-1 doc fixes (status guide clarification + upstream-drift guide). Refreshed every release. |
 | `CLAUDE.md` | 2026-05-23 | ✅ Fresh | Process + procedures + project-identity. Post-v1.0 sweep: P(-1) Hardening section recast as a standing process (was "before v0.2.0 first feature cut, and before v1.0" — both events past). Quick-Start scaffold-output line softened. CHANGELOG-Format paragraph already updated at v1.0 cut. |
-| `VERSION` | 2026-05-20 | ✅ Fresh | `0.7.0`. Single source of truth; bumped manually in the same commit as the CHANGELOG header. |
+| `VERSION` | 2026-08-25 | ✅ Fresh | `1.0.4`. Single source of truth, and as of 1.0.4 the *only* place the number lives — `src/main.cyr` reads the compile-time `CYRIUS_PKG_VERSION` constant instead of a hand-synced literal. Bumped in the same commit as the CHANGELOG header. |
 | `CONTRIBUTING.md` | (pre-M5) | ✅ Fresh | Scaffolded by `cyrius init`. |
 | `SECURITY.md` | (pre-M5) | 🔵 Evergreen | Public reporting policy; re-read pass at v1.0. |
 | `CODE_OF_CONDUCT.md` | (pre-M5) | 🔵 Evergreen | Standard text; re-read pass at v1.0. |
 | `LICENSE` | (pre-M5) | 🔵 Evergreen | GPL-3.0-only; durable. |
-| `cyrius.cyml` | 2026-05-19 | ✅ Fresh | Toolchain pin `6.0.1`. Project manifest. |
-| `docs/doc-health.md` | 2026-05-23 | ✅ Fresh | **This file.** v0.9.0 refresh — M7 close. |
-| `docs/benchmarks.md` | 2026-05-23 | ✅ Fresh | **New 2026-05-23.** M7 close commitment. First `sync` baseline over a 100-pkg / 350-link synthetic home (cold 72 ms, warm 54 ms with 0 audit growth); methodology + reproduction inlined. Future trend rows fill in when perf-relevant code lands. |
+| `cyrius.cyml` | 2026-08-25 | ✅ Fresh | Toolchain pin `6.5.35`. Project manifest; `[deps] stdlib` set unchanged since the v6.1.25 `bayan` carve. |
+| `docs/doc-health.md` | 2026-08-25 | ✅ Fresh | **This file.** 1.0.4 refresh — toolchain/stdlib pass. |
+| `docs/benchmarks.md` | 2026-08-25 | ✅ Fresh | Second trend row landed at 1.0.4 (cold 84 ms, warm 68 ms, 0 audit growth, best-of-four) — the first since the 0.9.0 baseline, triggered by `fs_link.cyr` changing. Carries an explicit non-attribution note: compiler, kernel and code all moved between the two rows, so the delta is a current reading, not a cost. |
 
 ---
 
@@ -80,11 +85,13 @@ Numbers approximate; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `state.md` | 2026-05-23 | ✅ Fresh | **Rotates every release.** v1.0.0 cut + post-v1.0 sweep applied: command-surface table dropped the M-shipped column (the ten verbs are frozen, the milestone heritage now lives in the CHANGELOG); "M7 onward fills" rewritten as the post-v1.0 implementation backlog (kavach migration / stdlib syscall wrappers / no-arg sync discovery). Tests anchored at 235 / 65. |
+| `state.md` | 2026-08-25 | ✅ Fresh | **Rotates every release.** 1.0.4 pass: new Version paragraph (pin `6.5.35`, 108-file `lib/`, the agnos `readlink` closure, the rollback fix, `CYRIUS_PKG_VERSION`); Toolchain section gained a vendored-`lib/` line; `src/agnos_compat.cyr` added to the Source list; Dependencies gained the agnos-syscall-peer arc. Tests anchored at **246 / 71** — the group figure had read a stale `66` since 1.0.1 while the per-tier breakdown summed to the real count; both now agree. Also corrected the 1.0.2 "arch-correct on aarch64" claim, which was not true until 1.0.4. |
 | `roadmap.md` | 2026-05-23 | ✅ Fresh | **Fully rewritten 2026-05-23 post-v1.0 sweep.** M0–M8 milestone narrative dropped; restructured as v1.x maintenance / additive-growth bucket + v2.0 Breaking-candidate bucket + permanent out-of-scope list + a brief v1.0-sign-off pointer at the release-notes doc. Each v2 candidate carries the rationale that earns it a major bump. |
 | `issues/README.md` | 2026-05-20 | ✅ Fresh | Filing conventions for hapi-side dogfood papercuts; severity guide; triage + archival lifecycle; cross-repo upstream-issue pointer. |
 | `issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md` | 2026-05-20 | 🟡 Open | Low severity; M7 dogfood papercut. Deferred to post-v1.0 per existing roadmap entry. |
-| `issues/2026-05-23-cap-check-symlink-escape.md` | 2026-05-23 | 🟡 Open | **New 2026-05-23.** Medium severity; F-002 from the P(-1) audit. `--root` cap-check is lexical-only; symlinked path components escape. Deferred to the kavach migration per ADR 0005. |
+| `issues/2026-05-23-cap-check-symlink-escape.md` | 2026-05-23 | 🟡 Open | **New 2026-05-23.** Medium severity; F-002 from the P(-1) audit. `--root` cap-check is lexical-only; symlinked path components escape. Deferred to the kavach migration per ADR 0005. Note: 1.0.4 gives hapi a working cross-target `readlink` shim — the primitive a per-component resolver needs — but the sanctioned fix is still kavach. |
+| `issues/2026-05-24-no-arg-sync-bootstrap-recovery.md` | 2026-05-24 | 🟡 Open | Low severity; dogfood papercut from a drive-move recovery. Needs manifest discovery; post-v1.0 additive work. |
+| `issues/2026-05-24-audit-trail-lost-on-state-dir-wipe.md` | 2026-05-24 | 🟡 Open | Medium severity; F-006 accepted boundary. `status` is the post-recovery source of truth, not `list` / `rollback`. Not a bug awaiting a fix — a documented design edge. |
 | `issues/archived/2026-05-20-status-exit-1-short-circuits-script-chains.md` | 2026-05-23 | 📦 Archived | Resolved in Unreleased via Tier-1 guide-doc note (`docs/guides/status.md` *Exit-1 is an assertion, not a predicate* section). |
 | `issues/archived/2026-05-20-upstream-stock-template-drift-pattern.md` | 2026-05-23 | 📦 Archived | Resolved in Unreleased via Tier-1 new guide `docs/guides/upstream-drift.md`. Tier-2/3 remain post-v1.0 candidates. |
 | `issues/archived/2026-05-20-no-backup-to-flag-pre-hapi-bak-housekeeping.md` | 2026-05-23 | 📦 Archived | Resolved in Unreleased via the `--backup-to <dir>` flag on link / sync / adopt + the new `docs/guides/backup-to.md` guide + ADR 0002 additive-field note for `backup_path`. |

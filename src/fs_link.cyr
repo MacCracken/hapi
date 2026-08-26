@@ -83,7 +83,14 @@ fn link_probe(path): i64 {
         # Path exists, not a symlink. Distinguish file vs directory
         # via the same trick is_dir uses: open + getdents. ENOTDIR
         # (errno 20) on getdents = regular file.
-        var fd = syscall(SYS_OPEN, path, 0, 0);   # O_RDONLY
+        # sys_open, not a bare syscall(SYS_OPEN, ...): aarch64 Linux has
+        # no open(2), so lib/syscalls_aarch64_linux.cyr defines no
+        # SYS_OPEN at all (56 there is `openat`, and 56 on x86_64 is
+        # `io_setup` — a bare number would be worse than undefined). The
+        # named wrapper routes through SYS_OPENAT + AT_FDCWD there and
+        # SYS_OPEN here. This arm is the non-agnos `#else`, so agnos's
+        # differently-shaped sys_open(name, namelen, flags) is out of reach.
+        var fd = sys_open(path, 0, 0);            # O_RDONLY
         if (fd < 0) { return _fsl_probe_new(HAPI_LP_FILE, 0); }
         var dbuf = alloc(32);
         var gd = syscall(SYS_GETDENTS64, fd, dbuf, 32);

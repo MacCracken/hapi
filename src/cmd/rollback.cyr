@@ -83,6 +83,13 @@ fn _hrb_reverse_link(entry): i64 {
 
 # Reverse one unlink entry: if abs_target is absent, recreate
 # the symlink. Returns 1 if applied, 0 if skipped, -1 on IO.
+# The replay entry carries `backup_path` 0 — the reversal only
+# ever writes into an absent target, so nothing is overwritten
+# and there is no snapshot to record (ADR 0002 additive field).
+# Passing it explicitly is load-bearing: the argument was omitted
+# from 0.8.0 through 1.0.3, and until cyrius 6.5.1 promoted a wrong
+# argument count from warning to error, the callee simply read an
+# uninitialized slot.
 fn _hrb_reverse_unlink(entry): i64 {
     var abs_tgt = hae_abs_target(entry);
     var abs_src = hae_abs_source(entry);
@@ -101,7 +108,7 @@ fn _hrb_reverse_unlink(entry): i64 {
     var ar = audit_append_link_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         hae_source(entry), hae_target(entry),
-        hae_abs_source(entry), hae_abs_target(entry));
+        hae_abs_source(entry), hae_abs_target(entry), 0);
     if (is_err_result(ar) == 1) { return 0 - 1; }
     return 1;
 }

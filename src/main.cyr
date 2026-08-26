@@ -39,11 +39,16 @@ include "src/cap.cyr"
 include "src/backup.cyr"
 include "lib/args.cyr"
 
-# VERSION literal kept in sync with the VERSION file at the
-# project root. CLAUDE.md's work loop calls out "version sync"
-# explicitly — bump this string in the same commit as VERSION.
+# `hapi --version` prints `hapi <version>`. The number is
+# CYRIUS_PKG_VERSION — the compile-time constant cyrius resolves
+# from `[package].version`, which is `${file:VERSION}` — so the
+# VERSION file at the project root is the only place it lives.
+# Replaces the hand-synced literal this fn used to carry (the
+# constant landed in cyrius 6.5.21; 6.5.34 made it visible in
+# included files too, so a future move off main.cyr still works).
 fn hapi_print_version(): i64 {
-    println("hapi 1.0.3");
+    print("hapi ", 5);
+    println(CYRIUS_PKG_VERSION);
     return 0;
 }
 

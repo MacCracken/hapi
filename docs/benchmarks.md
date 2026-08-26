@@ -34,9 +34,9 @@ sanity checks, not statistical benchmarks.
 | Field | Value |
 |-------|-------|
 | CPU   | AMD Ryzen 7 5800H |
-| OS    | Linux 7.0.9-arch1-1 x86_64 |
+| OS    | Linux 7.0.9-arch1-1 x86_64 (0.9.0 row) · 7.1.9-arch1-2 (1.0.4 row) |
 | FS    | tmpfs (`/tmp`) |
-| Build | stripped, statically linked ELF |
+| Build | stripped, statically linked ELF, `CYRIUS_DCE=1` |
 
 tmpfs eliminates spinning-disk variance — these numbers are
 syscall + CPU bound, not IO bound. Numbers will be slower on a
@@ -49,13 +49,25 @@ real HDD or under cgroup-throttled IO.
 | Release | Cold (ms) | Warm (ms) | Audit grew (warm) | Date       | Notes |
 |---------|-----------|-----------|-------------------|------------|-------|
 | 0.9.0   | 72        | 54        | 0 bytes           | 2026-05-23 | Baseline. P(-1) hardening repairs (F-001 / F-003) sit outside the sync hot path, so v0.8.0 produces equivalent numbers; comparison row will land when a perf-relevant change ships. |
+| 1.0.4   | 84        | 68        | 0 bytes           | 2026-08-25 | Toolchain refresh (cyrius `6.4.22` → `6.5.35`) + the agnos `readlink` work in `fs_link.cyr`. Best of four consecutive runs; spread was tight (cold 84–87, warm 68–71). ⚠ **The +17 % / +26 % against 0.9.0 is not attributable to this release** — see the note below. |
 
-Per-link cost rolls up:
+⚠ **On the 0.9.0 → 1.0.4 delta.** Three things changed at once between
+the two rows: the compiler (6.0.1 → 6.5.35), the kernel (7.0.9 → 7.1.9),
+and hapi's own `link_probe`. The 0.9.0 row is a single run; the 1.0.4 row
+is best-of-four with a ±3 ms spread. No controlled A/B was run, so the
+honest reading is *"84/68 is the current number on this machine"*, not
+*"the refresh cost 12 ms"*. Both remain far inside the acceptance gates,
+and the byte-for-byte identical audit output (101,150 bytes / 350 entries,
+exactly as at 0.9.0) says the work performed per link is unchanged. A
+release that wants to claim a perf delta should interleave the two builds
+on one kernel.
 
-- Cold: 72 ms / 350 = **205 µs per link** (parse + symlink + audit-append)
-- Warm: 54 ms / 350 = **154 µs per probe** (parse + readlink + classify)
-- Per-process startup floor: ~0.56 ms (from the single-package
-  warm loop: 56 ms / 100 calls)
+Per-link cost rolls up (1.0.4 row):
+
+- Cold: 84 ms / 350 = **240 µs per link** (parse + symlink + audit-append)
+- Warm: 68 ms / 350 = **194 µs per probe** (parse + readlink + classify)
+- Per-process startup floor: ~0.67 ms (from the single-package
+  warm loop: 67 ms / 100 calls)
 
 ### Audit-trail growth (cold sync)
 
@@ -68,11 +80,12 @@ atomicity holds.
 ## Acceptance gates
 
 - **Idempotency** — warm sync MUST grow the audit trail by 0
-  bytes. ✅ Verified (the `audit grew (warm)` column).
+  bytes. ✅ Verified at every row, 1.0.4 included (the
+  `audit grew (warm)` column).
 - **Scale** — `sync` over a 100-pkg home completes in <1 s on a
-  modern machine. ✅ Cold 72 ms (well under).
+  modern machine. ✅ Cold 84 ms (well under).
 - **Per-link** — cold-create cost should stay under 1 ms / link
-  on a tmpfs / SSD-class device. ✅ 205 µs/link.
+  on a tmpfs / SSD-class device. ✅ 240 µs/link.
 
 A future regression would surface as a > 2× jump in cold-time
 or any non-zero warm audit growth. Re-run this harness on every

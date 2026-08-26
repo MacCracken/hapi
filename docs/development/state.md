@@ -5,6 +5,30 @@
 
 ## Version
 
+**1.0.4** — toolchain/vendored-stdlib refresh + agnos symlink
+introspection (2026-08-25). Cyrius pin `6.4.22` → `6.5.35`; `lib/`
+resynced to the 6.5.35 snapshot (108 files — 67 updated, 10 new, the
+stale scaffold-era `lib/agnosys.cyr` pruned). The declared
+`[deps] stdlib` set is unchanged and no symbol hapi calls moved across
+the span. Closes 1.0.3's agnos gap: `link_probe` probes agnos
+`readlink`#70 first (dangling links included) and `hapi_readlink`
+rides the snapshot's **native** `sys_readlink` peer, retiring the
+locally-declared syscall number. Fixes a latent defect dating to
+0.8.0 — `rollback` reversing an `unlink` passed seven
+arguments to the eight-argument `audit_append_link_r`, so the replay
+entry could carry a junk `backup_path`; it now passes `0` (no
+snapshot), locked by a mutation-proven regression group. That was a
+*warning* until cyrius 6.5.1 promoted a wrong argument count to an
+error, which is why it shipped unnoticed in 0.8.0 → 1.0.3 and why
+this refresh is what surfaced it. Also fixes `cyrius build
+--aarch64`, which did not compile: `fs_link.cyr`'s `link_probe`
+used a bare `SYS_OPEN`, a constant aarch64 Linux does not define.
+**All three targets now build: x86_64, aarch64 and agnos.**
+`hapi --version` reads `CYRIUS_PKG_VERSION` instead of a hand-synced
+literal, so `VERSION` is the only place the number lives. Suite
+246 / 71, all passing. No surface change — the v1.0 contract stays
+frozen.
+
 **1.0.3** — agnos target + toolchain/vendored-stdlib refresh
 (2026-07-08). Cyrius pin `6.2.24` → `6.4.22`; `lib/` resynced to the
 6.4.22 snapshot (98 files). hapi now builds `--agnos` and runs under
@@ -15,10 +39,11 @@ Linux-verbatim on non-agnos); `fs_link.cyr` `link_probe` classifies
 via `stat` (#33) on agnos and `_fsl_getcwd` returns `"."`. The
 refresh brought the peer's native `sys_symlink` (#63, now called
 directly) and an agnos-aware `file_append_locked` (LOCK_EX +
-SEEK_END). Known gap: agnos exposes no `lstat`/`readlink` to ring-3
-and its `stat` follows symlinks, so hapi can create but not yet
-introspect symlinks there (agnos-side follow-on). Suite still 242 /
-66, all passing. No surface change — the v1.0 contract stays frozen.
+SEEK_END). Known gap at the time: agnos exposed no `lstat`/`readlink`
+to ring-3 and its `stat` follows symlinks, so hapi could create but not
+introspect symlinks there — **closed in 1.0.4** by agnos `readlink`#70.
+Suite still 242 / 70, all passing. No surface change — the v1.0
+contract stays frozen.
 
 **1.0.2** — toolchain + vendored-stdlib refresh (2026-06-19).
 Cyrius pin `6.0.1` → `6.2.24`; `lib/` resynced to the 6.2.24
@@ -34,7 +59,7 @@ passing. No surface change — the v1.0 contract stays frozen.
 **1.0.1** — 1.0.x-final hardening patch (2026-05-24). Closes the
 1.0.x line: internal syscall naming (`HapiSysno` enum +
 stdlib `SYS_OPEN`/`SYS_CLOSE`), a trail-loss recovery regression
-test (suite now 242 / 66), and the 1.0.x-final P(-1) audit pass
+test (suite now 242 / 70), and the 1.0.x-final P(-1) audit pass
 ([`../audit/2026-05-24-audit.md`](../audit/2026-05-24-audit.md);
 new F-006 accepted boundary). No surface change — the v1.0
 contract stays frozen.
@@ -56,7 +81,10 @@ v0.6.0 (M5), v0.5.0 (M4), v0.4.0 (M3), v0.3.0 (M2), v0.2.0
 
 ## Toolchain
 
-- **Cyrius pin**: `6.2.24` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.5.35` (in `cyrius.cyml [package].cyrius`)
+- **Vendored `lib/`**: 108 files, the 6.5.35 full snapshot
+  (`cyrius lib sync --full`). Mirrors the pin exactly — nothing
+  hand-edited, nothing left over from an earlier snapshot.
 
 ## Shape
 
@@ -87,7 +115,21 @@ opt-in pre-`--force` snapshot.
 
 ## Source
 
-- `src/main.cyr` — entry point + argv dispatcher
+- `src/main.cyr` — entry point + argv dispatcher. `--version`
+  prints `hapi <X.Y.Z>` from the compile-time
+  `CYRIUS_PKG_VERSION` constant (cyrius resolves it from
+  `[package].version` = `${file:VERSION}`), so `VERSION` is the
+  only place the number lives — the hand-synced literal was
+  retired in 1.0.4.
+- `src/agnos_compat.cyr` — target-portability shims for the agnos
+  userland (`hapi_unlink` / `hapi_rename` / `hapi_fsync` /
+  `hapi_symlink` / `hapi_readlink` / `hapi_mkdir`). Each forwards
+  verbatim on Linux/macOS; the agnos branch absorbs the
+  syscall-ABI divergence (explicit path lengths, `sync` for
+  `fsync`, `mkdir`'s length-not-mode second argument). Every
+  wrapper now rides a native cyrius peer — the last locally
+  declared syscall number, `AGNOS_SYS_READLINK`#70, went away in
+  1.0.4 when the 6.5.35 snapshot shipped `sys_readlink`.
 - `src/manifest.cyr` — `hapi.cyml` parser + canonical
   re-serializer. `hapi_mf_canonicalize(m, out, cap)` emits
   the fixed byte form used by the v0.8.0 `sha1c:`
@@ -201,8 +243,10 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 242 assertions across
-  66 test groups:
+- `tests/hapi.tcyr` — primary suite. 246 assertions across
+  71 test groups (the group figure read `66` from 1.0.1 through
+  1.0.3 — a stale header; the per-tier breakdown below has always
+  summed to the real count):
   - Manifest (7 groups): minimal, three-link acceptance,
     validation, path traversal, comments, on-disk parse,
     missing file
@@ -213,8 +257,9 @@ in-source magic-number `syscall(N, ...)` calls.)_
   - link (3 groups): happy path, conflict refusal,
     --force refuses directory
   - unlink (2 groups): round-trip, user-mutation refusal
-  - rollback (4 groups): full reverse, link/unlink/link →
-    clean, idempotent, stops at marker
+  - rollback (5 groups): full reverse, link/unlink/link →
+    clean, idempotent, stops at marker, replayed link entry
+    carries no `backup_path`
   - manifest_write (2 groups): append row, remove row
   - adopt (5 groups): happy path, refuse
     symlink / directory / absent / duplicate target
@@ -269,7 +314,24 @@ Previously-pending stdlib syscall wrappers **landed in cyrius
 (proposal `2026-05-17-syscalls-at-family-stdlib.md`) and
 `sys_fsync` / `sys_fdatasync`
 (`2026-05-20-syscalls-fsync-stdlib.md`). The hand-rolled
-`HapiSysno` enum that stood in for them is retired.
+`HapiSysno` enum that stood in for them is retired — though one
+bare `syscall(SYS_OPEN, ...)` in `fs_link.cyr` survived that sweep
+and was only caught at 1.0.4, when it turned out to be the single
+constant the aarch64 table does not define. The remaining raw sites
+(`SYS_GETDENTS64`, `SYS_CLOSE`, `SYS_GETCWD`, all in `fs_link.cyr`)
+are defined on every target hapi builds for, so they compile;
+`cyrius lint` recommends `lib/io.cyr`'s `xgetdents` for the first as
+agnos-bound dir-code hygiene. Post-1.0.4 cleanup, tracked with the
+other post-upgrade items in the CHANGELOG's 1.0.4 section (`cyrius
+fmt --check`, the unused `fs` / `slice` deps, the `bayan` `cyml_*`
+deprecation shims).
+
+The agnos syscall peers followed the same arc: `sys_symlink`#63
+landed in the 6.4.x stdlib (consumed at 1.0.3) and
+`sys_readlink`#70 in 6.5.x (consumed at 1.0.4). hapi declares no
+syscall numbers of its own on any target as of 1.0.4. Still
+absent on agnos and not needed: `lstat` (readlink no-follows the
+final component) and `getcwd` (`_fsl_getcwd` returns `"."`).
 
 v1.0 ships the env-var allowlist stopgap (`HAPI_ALLOWED_ROOTS`)
 for non-`$HOME` roots; the kavach capability service replaces
@@ -305,7 +367,10 @@ Candidate post-v1.0 work (ordered loosely by maturity):
   `sys_fdatasync`~~ **(done, 1.0.2)** — landed in cyrius 6.2.x;
   the in-source `syscall(N, ...)` calls and the `HapiSysno`
   stand-in enum were replaced with the named wrappers. No
-  behavior change on x86_64; arch-correct on aarch64.
+  behavior change on x86_64. The "arch-correct on aarch64" half
+  of that claim only became true at 1.0.4 — one bare `SYS_OPEN`
+  was missed in `fs_link.cyr`, and it is the one constant the
+  aarch64 table does not define, so `--aarch64` did not build.
 - **`hapi sync --prune`** — re-evaluate if the
   full-rotation workaround keeps biting in dogfood. Tracked
   at `issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md`.
