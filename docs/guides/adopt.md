@@ -18,7 +18,14 @@ cwd.
 
 ## What it does
 
-1. Resolves `<file>` to an absolute path under the scope root.
+1. Resolves `<file>` to an absolute path and **refuses unless its
+   resolved location is inside the scope root** — a symlinked parent
+   counts, so `~/link-to-elsewhere/conf` is refused too. The `<file>`
+   argument is a write target in its own right: adopt renames it away
+   and plants a symlink where it stood.
+   It also refuses a name `hapi.cyml` cannot represent — a quote, a
+   backslash or a control byte — because the row would parse back as a
+   different path.
 2. Probes the target — refuses unless it's a regular file
    (not a symlink, not a directory, not absent).
 3. Parses the package's `hapi.cyml` — refuses if there's

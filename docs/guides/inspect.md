@@ -52,6 +52,11 @@ That separation is intentional. `inspect` runs on any well-formed
 manifest, in any working directory, with no filesystem side
 effects — useful for CI, manifest review, and distro packaging.
 
+⚠ `package.ignore` is **RESERVED and not honoured** (ADR 0001).
+`inspect` echoes it and the manifest hash covers it, but no verb
+applies it — a file listed there is still linked. Honouring it would
+change what a directory row materializes, so it is a v2.0 item.
+
 ## Exit codes
 
 | code | meaning                                            |

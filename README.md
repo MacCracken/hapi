@@ -24,9 +24,15 @@ Third leg of the terminal-aesthetics set:
 - **CYML manifest** (`hapi.cyml` in each package) instead of stow's
   directory-as-package convention. The manifest spells every
   symlink explicitly — no surprises from hidden-file conventions.
-- **Capability-bounded execution** — touches `$HOME` only by default;
-  any other root requires an explicit `--root` flag + capability
-  grant. Fits AGNOS auth posture (authorization over authentication).
+- **Capability-bounded execution** — touches `$HOME` only by default.
+  A different scope needs an explicit `--root` whose own path is inside
+  `$HOME` or listed in `HAPI_ALLOWED_ROOTS`; authorizing one
+  destination outside the scope is `HAPI_ALLOWED_ROOTS` alone.
+  Containment is decided on where a target *physically resolves* —
+  symlinks followed per component — so a symlinked parent directory
+  cannot smuggle a link out of the scope, and `--force` does not
+  override that refusal. Fits AGNOS auth posture (authorization over
+  authentication).
 - **Lightweight audit trail** — every `link` / `unlink` / `adopt` /
   `sync` writes a JSONL entry under `$XDG_STATE_HOME/hapi/`. Clean
   rollback is exactly *"replay the trail in reverse."*
@@ -35,12 +41,16 @@ Third leg of the terminal-aesthetics set:
 
 ## Status
 
-**v1.0.4** — the v1.0 contract, frozen 2026-05-23, still holds:
+**v1.0.10** — the v1.0 contract, frozen 2026-05-23, still holds:
 command surface (ten verbs plus five global flags), `hapi.cyml`
 manifest schema (ADR 0001), and audit-trail format (ADR 0002) are all
-contractual, and the 1.0.x line has added no surface. See
+contractual, and the 1.0.x line has added no surface. What it added
+instead is teeth: 1.0.5 → 1.0.10 is a hardening arc that closed all
+twenty findings of the
+[2026-08-25 P(-1) audit](docs/audit/2026-08-25-audit.md) — see
+[`CHANGELOG.md`](CHANGELOG.md) for the per-release record and
 [`docs/development/release-notes/1.0.0.md`](docs/development/release-notes/1.0.0.md)
-for the v1.0 surface and what's deferred post-v1.0.
+for the v1.0 surface.
 
 ## Quick start
 
@@ -48,7 +58,7 @@ for the v1.0 surface and what's deferred post-v1.0.
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/hapi   # compile
 ./build/hapi --help                    # see the verb set
-cyrius test                            # 246 assertions across 71 groups
+cyrius test                            # 365 assertions across 92 groups
 ```
 
 A worked example lives at
@@ -63,8 +73,10 @@ file with `hapi adopt ~/.somerc somepackage`.
   `--dry-run`, `--backup-to`) and the upstream-drift merge ritual.
 - [`docs/adr/`](docs/adr/) — five Architecture Decision Records.
   All frozen at v1.0.
-- [`docs/audit/2026-05-23-audit.md`](docs/audit/2026-05-23-audit.md)
-  — P(-1) security audit pass.
+- [`docs/audit/`](docs/audit/) — the P(-1) security audit passes
+  (index + three dated passes). The
+  [2026-08-25 pass](docs/audit/2026-08-25-audit.md) is the current one;
+  its twenty findings drove the 1.0.5 → 1.0.10 hardening arc.
 - [`docs/benchmarks.md`](docs/benchmarks.md) — sync over a 100-pkg
   synthetic home.
 - [`docs/development/state.md`](docs/development/state.md) — live

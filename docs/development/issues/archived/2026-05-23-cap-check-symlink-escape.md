@@ -99,9 +99,9 @@ can see the result before hapi acts on it.
 
 ## Cross-references
 
-- [`docs/audit/2026-05-23-audit.md`](../../audit/2026-05-23-audit.md) F-002 — origin entry.
-- [ADR 0005](../../adr/0005-capability-bounded-roots.md) — kavach migration plan.
-- [`state.md`](../state.md) — kavach swap noted under "M7 onward fills".
+- [`docs/audit/2026-05-23-audit.md`](../../../audit/2026-05-23-audit.md) F-002 — origin entry.
+- [ADR 0005](../../../adr/0005-capability-bounded-roots.md) — kavach migration plan.
+- [`state.md`](../../state.md) — kavach swap noted under "M7 onward fills".
 
 ---
 
@@ -134,6 +134,6 @@ returns changes what all four compare, so this needs its own arc with
 its own regression coverage — not a patch release that had already
 changed two buffer disciplines and a capability check.
 
-See [`../../audit/2026-08-25-audit.md`](../../audit/2026-08-25-audit.md)
+See [`../../audit/2026-08-25-audit.md`](../../../audit/2026-08-25-audit.md)
 and the *Next arc* section of
-[`../../audit/README.md`](../../audit/README.md).
+[`../../audit/README.md`](../../../audit/README.md).

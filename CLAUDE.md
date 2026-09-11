@@ -45,7 +45,7 @@ cyrius test                             # run tests/*.tcyr
 
 ## Key Principles
 
-- **Capability-bounded by default.** Every filesystem touch is bounded by an explicit capability. `$HOME` is the default root; touching anything else requires an explicit `--root` flag and a capability grant. Fits AGNOS auth posture (authorization over authentication).
+- **Capability-bounded by default.** Every filesystem touch is bounded by an explicit capability. `$HOME` is the default root; a different scope needs an explicit `--root` whose own path is inside `$HOME` or listed in `HAPI_ALLOWED_ROOTS`, while authorizing one destination outside the scope is `HAPI_ALLOWED_ROOTS` alone — `--root` re-roots every target and is a different operation. Containment is decided on where a path *physically resolves*, not how it is spelled. Fits AGNOS auth posture (authorization over authentication).
 - **Manifest-driven, not directory-driven.** Each package has a `hapi.cyml` manifest declaring source → target. We don't infer link shape from directory layout (that's stow's convention; it's brittle and silently does the wrong thing on hidden files).
 - **Every operation is auditable.** Every `link` / `unlink` / `adopt` / `sync` writes an entry to the audit trail. Rollback is exactly "replay the audit trail in reverse." No magic, no inference.
 - **Idempotent.** Running `hapi sync` twice produces the same result. Existing correct symlinks are no-ops, not errors.
@@ -62,7 +62,7 @@ cyrius test                             # run tests/*.tcyr
 - Do not trust external paths without validation — every path argument gets bounds, `../` traversal check, and symlink loop detection
 - Do not modify `lib/` files (vendored stdlib / dep symlinks managed by `cyrius deps`)
 - Do not silently overwrite an existing file — refuse and exit non-zero unless `--force` is explicit
-- Do not write outside `$HOME` without an explicit `--root` flag — the capability boundary is load-bearing
+- Do not write outside the scoped root without an explicit grant — `--root` re-roots the whole scope and its own path must be granted; authorizing a single destination is `HAPI_ALLOWED_ROOTS` (ADR 0005). Containment is decided on the *resolved* path and `--force` never overrides an escape — the capability boundary is load-bearing
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
 
 ## Process
@@ -114,9 +114,12 @@ format, and **always** before a major-version cut:
 - [`docs/guides/`](docs/guides/) — Task-oriented how-tos
 - [`docs/examples/`](docs/examples/) — Runnable example manifests
 - [`docs/development/state.md`](docs/development/state.md) — Live state snapshot
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Milestones through v1.0
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Forward-looking plan (post-v1.0 buckets; shipped work is deleted from it, not struck through)
 - [`docs/development/issues/`](docs/development/issues/) — Open dogfood papercuts + design-gap reports (one file per issue; archived on close)
+- [`docs/audit/`](docs/audit/) — Completed P(-1) security/hardening passes, one dated file per pass; findings carry stable `F-NNN` ids
+- [`docs/benchmarks.md`](docs/benchmarks.md) — `sync` scaling trend + the acceptance gates a release must not regress
 - [`docs/doc-health.md`](docs/doc-health.md) — Whole-tree doc-currency ledger (fresh / stale / archive / open-question; refreshed in place when docs are touched)
+- [`scripts/`](scripts/) — Shell harnesses for what `cyrius test` structurally cannot express, both run by CI: `concurrency-test.sh` (needs two hapi processes; `.tcyr` cannot fork) and `agnos-smoke.sh` (runs the `--agnos` build under mirshi; exits 2 = SKIP when mirshi is absent)
 
 Full doc-tree convention: [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md).
 

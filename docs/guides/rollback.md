@@ -31,8 +31,9 @@ this no-arg form.
      entry.
    - Anything else (user-mutated state) → silently skipped.
 
-The "only act if state still matches" gate is what makes
-rollback safe and idempotent. A second run sees a state that
+The "only act if state still matches" gate is what makes rollback
+**safe**: it never touches state a user or another tool changed since
+hapi wrote it. A second run sees a state that
 already matches the rollback's intent and does nothing.
 
 ## Example: clean rollback of a single link

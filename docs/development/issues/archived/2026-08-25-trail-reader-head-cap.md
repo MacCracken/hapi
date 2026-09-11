@@ -23,7 +23,7 @@
 **Discovered:** 2026-08-25, P(-1) hardening sweep (F-007, with F-016 and F-017 in the same function)
 **Severity:** High — a wrong *destructive* action, taken silently, at exit 0
 **Affects:** every version with `src/audit_reader.cyr` in its current shape; live in the shipped 1.0.5
-**Arc:** 1.0.x hardening, Tier 1 ([`../roadmap.md`](../roadmap.md))
+**Arc:** 1.0.x hardening, Tier 1 ([`../roadmap.md`](../../roadmap.md))
 
 ## Summary
 
@@ -46,7 +46,7 @@ the exact opposite: keep what was just done, destroy the oldest links.
 ## Reach
 
 Measured 445 bytes/entry on a deep `$HOME` during the sweep;
-[`../../benchmarks.md`](../../benchmarks.md) records 289 bytes/entry on
+[`../../benchmarks.md`](../../../benchmarks.md) records 289 bytes/entry on
 the synthetic harness. That puts the cliff at roughly **590–900 entries**
 — reachable by an ordinary dotfiles user over a year, and much sooner
 given `hapi checkpoint` is not idempotent (three consecutive checkpoints

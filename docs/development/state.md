@@ -5,200 +5,22 @@
 
 ## Version
 
-**1.0.10** — 1.0.x hardening arc, **the last two findings, and a
-correction** (2026-08-26). F-027 and F-031 were recorded as "blocked on
-an agnos runner" from the audit through 1.0.9; that was wrong. mirshi
-builds in this tree at 1.11.0 — above the ≥1.10.2 hapi has required
-since 1.0.3 — and runs an agnos ELF as a native Linux process. **F-027**:
-agnos has no `getcwd`, so a relative package argument produced a
-non-absolute `abs_source`, violating ADR 0002; hapi now prefers `PWD`
-and refuses when the cwd is unknowable, propagating the refusal through
-`fsl_canonical_arg` to `link` / `status` / `adopt`. **F-031**: agnos's
-`AO_*` set has no no-follow bit at all, so `O_NOFOLLOW` was dropped and
-F-003's defence did not exist there; `hapi_open_nofollow` is atomic on
-Linux/macOS and readlink-pre-checked on agnos (residual race accepted
-and documented). New `scripts/agnos-smoke.sh`, run by CI, with a missing
-mirshi reported as SKIP not green. Known gap, upstream: mirshi passes no
-envp, so scope-rooted verbs are not reachable under it. Suite 365 / 90.
-**All twenty audit findings are now closed.**
+**1.0.10** (2026-08-26). The 1.0.x hardening arc is closed — all
+twenty findings of the 2026-08-25 P(-1) sweep are fixed. The v1.0
+contract (command surface, manifest schema, audit-trail format) stayed
+frozen across the whole arc.
 
-**1.0.9** — 1.0.x hardening arc, **Tier 2 and Tier 3 closed in one
-batch** (2026-08-25). Eleven findings reproduced and fixed together.
-Tier 2 (hapi reporting a world that was not on disk): `link` refused a
-missing source and `status` now reports BROKEN instead of OK (**F-022**,
-one shared predicate so the two cannot drift); `list` uses a global
-per-target owner map so a `--force` takeover retires the previous claim
-(**F-023** — the naive build measured **41x** and was rejected for a
-hashmap index at 1.0x); package-dir arguments are canonicalized so
-`link .` no longer breaks `sync`'s idempotency contract (**F-024**, with
-the four ownership-proof sites deliberately untouched); `ignore` is
-documented reserved-not-honoured and `sync --backup-to` documented inert
-(**F-025**, **F-026**, both with v2.0 successors recorded). Tier 3
-(write-path and argument hardening): the trail is pre-flighted before
-any mutation, appended durably with an fsync and a torn-tail guard, and
-a failed append undoes exactly its own link (**F-018**); a flag-shaped
-value for `--root` / `--backup-to` is rejected (**F-019**); a package
-can no longer steer the `--backup-to` destination (**F-020**); created
-parents follow umask while hapi's own state stays 0700 (**F-029**); a
-trailing-slash target leaves no residue (**F-032**); `inspect` returns 2
-for a flag (**F-033**). Suite 361 / 89. **Two findings remain**, F-027
-and F-031, both agnos-target-conditional and blocked on a runner.
+Release-by-release detail lives in
+[`../../CHANGELOG.md`](../../CHANGELOG.md), and the findings with their
+resolutions in [`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md).
+This file is the *snapshot*, not a second changelog — it says what is
+true now, not how it got here.
 
-**1.0.8** — 1.0.x hardening arc, **Tier 1 closed** (2026-08-25). Fixes
-**F-015**, and with it **F-002**, open since the 2026-05-23 audit:
-hapi's capability boundary now decides on a target's *physical*
-location. `fsl_lexical_normalize` collapses `..` but treats every
-component as a plain name, so an ordinary `~/.config -> /mnt/other/etc`
-put a row outside the scope on a bare `hapi link` — exit 0, with the
-unresolved in-`$HOME` path recorded in the trail — and, where a file was
-already there, hapi refused as an ordinary conflict and advised
-`--force`, which then **destroyed the file outside `$HOME`** while
-`status` reported OK. New `fsl_resolve_path` follows a symlink at every
-component (hop-capped at 40; absent components stay literal), and
-`cap_target_allowed` decides on the resolved location with the scope
-root resolved too. An escape is `LINK_ACT_ESCAPE`, which `--force` does
-**not** override; the grant is `HAPI_ALLOWED_ROOTS`, not `--root`.
-Crucially the ownership-proof constraint was sidestepped, not solved:
-`fsl_compute_relative` and the trail values are untouched, so the four
-verbs that byte-compare still compare what they always did. Costs ~10%
-cold / ~13% warm, recorded in `../benchmarks.md`. Suite 323 / 84.
+Milestone index, for tracing an ADR or a guide back to its ship:
+v1.0.0 = M8 / v1.0 freeze (2026-05-23), v0.9.0 = M7 close, v0.8.0 = M7
+sweep, v0.7.0 = M6, v0.6.0 = M5, v0.5.0 = M4, v0.4.0 = M3, v0.3.0 = M2,
+v0.2.0 = M1, M0 scaffold 2026-05-19.
 
-**1.0.7** — 1.0.x hardening arc, the rest of the manifest write path
-(2026-08-25). Closes **F-021** and **F-028**, and with them the
-write-path issue 1.0.6 opened. F-021: the writer emitted `source` /
-`target` raw, so adopting `.ev"il` wrote `source = "ev"il"` and
-`inspect` read it back as `ev` — declared state describing a file that
-does not exist, exit 0. Escaping cannot fix it (the parser has no
-un-escape half: `ev\"il` parses back as six characters), and adding one
-is an ADR 0001 change, so hapi **refuses** to write a row it cannot
-faithfully represent, checking before the rename so nothing moves.
-F-028 (detection half): `hapi check` now compares the manifest against
-the package directory both ways — a row whose source vanished, and a
-file no row claims, which is the signature of an `adopt` interrupted
-between the rename and the manifest write. Prevention is an ADR 0004
-revision, now a v2.0 roadmap item. Suite 307 / 81.
-
-**1.0.6** — 1.0.x hardening arc, Tier 1 item 1 (2026-08-25). Closes
-**F-007**, **F-016** and **F-017**, all in `audit_read`. F-007 was the
-sharpest defect the 2026-08-25 sweep found: the reader took the *first*
-256 KB of an append-only file, so once the trail outgrew that,
-`rollback` could not see the most recent checkpoint marker, fell back to
-`start = 0`, and reversed the **oldest still-live links** while leaving
-the recent work in place — measured at **637 settled links destroyed**
-on an 800-entry trail, exit 0. The read is now sized from the file;
-`ENOENT` is distinguished from every other open failure; an interior
-malformed line is refused (a trailing partial one is still dropped —
-that is the writer's atomic-append contract). `rollback` / `unlink` /
-`list` consume `audit_read_default_r` and exit 1 with a diagnostic
-rather than acting on a partial view.
-
-Also closes **F-012**, the other open Tier 1 item: the manifest
-read-modify-write was unsynchronized and staged through a fixed
-`hapi.cyml.tmp`, so 16 concurrent adopts on a 3 MB manifest committed
-16 renames, 16 symlinks and 16 trail entries while leaving **one**
-manifest row. Now `LOCK_EX` on the package directory (the manifest is
-replaced by rename, so flocking it by path excludes nobody) plus a
-pid-unique `O_EXCL` staging file; 16/16 after. Its regression is
-`scripts/concurrency-test.sh` — the defect needs two processes, which
-`.tcyr` cannot express — and CI runs it.
-
-Suite 295 / 79 plus the shell harness. No surface change — the v1.0
-contract stays frozen.
-
-**1.0.5** — P(-1) hardening sweep + repairs (2026-08-25). **Six
-HIGH-severity defects fixed**: two heap overflows reachable from an
-ordinary manifest (`hapi_mf_canonicalize` and the audit entry
-composers both accepted a `cap` argument and never read it — the
-first took `link` / `sync` / `--dry-run` down with SIGSEGV, the
-second wrote ~42 KB of attacker-chosen bytes past a 4 KB allocation
-and destroyed the trail); two silent destructions of user bytes (a
-manifest past 256 KB truncated and the truncation committed by
-`adopt`; `--backup-to` overwriting a snapshot when two rows shared a
-target basename); one capability escape (`adopt` moved files from
-outside `$HOME` with no `--root`); and one argument-parsing bug that
-made `hapi rollback <pkg>` reverse the **entire** trail at exit 0.
-Each fix carries a mutation-proven regression test. **Twenty findings
-remain open** — see
-[`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md), which
-also re-scopes F-002 (the kavach dependency gate is void; kavach is a
-sandbox-execution framework with no capability API). CI now compiles
-aarch64 and agnos, not just x86_64. Suite 280 / 76; `cyrius lint`
-clean tree-wide. No surface change — the v1.0 contract stays frozen
-and byte-identical.
-
-**1.0.4** — toolchain/vendored-stdlib refresh + agnos symlink
-introspection (2026-08-25). Cyrius pin `6.4.22` → `6.5.35`; `lib/`
-resynced to the 6.5.35 snapshot (108 files — 67 updated, 10 new, the
-stale scaffold-era `lib/agnosys.cyr` pruned). The declared
-`[deps] stdlib` set is unchanged and no symbol hapi calls moved across
-the span. Closes 1.0.3's agnos gap: `link_probe` probes agnos
-`readlink`#70 first (dangling links included) and `hapi_readlink`
-rides the snapshot's **native** `sys_readlink` peer, retiring the
-locally-declared syscall number. Fixes a latent defect dating to
-0.8.0 — `rollback` reversing an `unlink` passed seven
-arguments to the eight-argument `audit_append_link_r`, so the replay
-entry could carry a junk `backup_path`; it now passes `0` (no
-snapshot), locked by a mutation-proven regression group. That was a
-*warning* until cyrius 6.5.1 promoted a wrong argument count to an
-error, which is why it shipped unnoticed in 0.8.0 → 1.0.3 and why
-this refresh is what surfaced it. Also fixes `cyrius build
---aarch64`, which did not compile: `fs_link.cyr`'s `link_probe`
-used a bare `SYS_OPEN`, a constant aarch64 Linux does not define.
-**All three targets now build: x86_64, aarch64 and agnos.**
-`hapi --version` reads `CYRIUS_PKG_VERSION` instead of a hand-synced
-literal, so `VERSION` is the only place the number lives. Suite
-246 / 71, all passing. No surface change — the v1.0 contract stays
-frozen.
-
-**1.0.3** — agnos target + toolchain/vendored-stdlib refresh
-(2026-07-08). Cyrius pin `6.2.24` → `6.4.22`; `lib/` resynced to the
-6.4.22 snapshot (98 files). hapi now builds `--agnos` and runs under
-mirshi (>= 1.10.2), unblocking it in the agnos-dev docker image. New
-`src/agnos_compat.cyr` shims the syscall-ABI divergences
-(`hapi_unlink`/`hapi_rename`/`hapi_fsync`/`hapi_symlink`/`hapi_mkdir`,
-Linux-verbatim on non-agnos); `fs_link.cyr` `link_probe` classifies
-via `stat` (#33) on agnos and `_fsl_getcwd` returns `"."`. The
-refresh brought the peer's native `sys_symlink` (#63, now called
-directly) and an agnos-aware `file_append_locked` (LOCK_EX +
-SEEK_END). Known gap at the time: agnos exposed no `lstat`/`readlink`
-to ring-3 and its `stat` follows symlinks, so hapi could create but not
-introspect symlinks there — **closed in 1.0.4** by agnos `readlink`#70.
-Suite still 242 / 70, all passing. No surface change — the v1.0
-contract stays frozen.
-
-**1.0.2** — toolchain + vendored-stdlib refresh (2026-06-19).
-Cyrius pin `6.0.1` → `6.2.24`; `lib/` resynced to the 6.2.24
-snapshot. Tracks the upstream stdlib carves — `cyml` (with
-`toml` / `json` / `base64` / `csv` / `bigint` / `u128`) folded
-into the bundled **`bayan`** module, `matrix` / `linalg` /
-`math_advanced` into **`ganita`** (v6.1.25 carve). hapi's only
-moved-module dependency is `cyml`; `src/manifest.cyr` now
-includes `lib/bayan.cyr` and the three `cyml_*` call sites ride
-`bayan`'s `_compat` shims unchanged. Suite still 242 / 66, all
-passing. No surface change — the v1.0 contract stays frozen.
-
-**1.0.1** — 1.0.x-final hardening patch (2026-05-24). Closes the
-1.0.x line: internal syscall naming (`HapiSysno` enum +
-stdlib `SYS_OPEN`/`SYS_CLOSE`), a trail-loss recovery regression
-test (suite now 242 / 70), and the 1.0.x-final P(-1) audit pass
-([`../audit/2026-05-24-audit.md`](../audit/2026-05-24-audit.md);
-new F-006 accepted boundary). No surface change — the v1.0
-contract stays frozen.
-
-**1.0.0** — M8 / v1.0 freeze shipped 2026-05-23. Contract
-locked: command surface (ten verbs + five global flags),
-`hapi.cyml` manifest schema (ADR 0001), audit-trail format
-(ADR 0002). All five ADRs now carry *Frozen at v1.0.0*. Full
-write-up at
-[`release-notes/1.0.0.md`](release-notes/1.0.0.md).
-
-Earlier ships (all 2026-05-23 unless noted):
-v0.9.0 (M7 close — P(-1) audit + benchmarks),
-v0.8.0 (M7 sweep — status guide, upstream-drift, `--backup-to`,
-sha1c canonicalization),
-v0.7.0 (M6 — `--root` + `--dry-run`, 2026-05-20),
-v0.6.0 (M5), v0.5.0 (M4), v0.4.0 (M3), v0.3.0 (M2), v0.2.0
-(M1) all 2026-05-20, M0 scaffold 2026-05-19.
 
 ## Toolchain
 
@@ -235,6 +57,21 @@ opt-in pre-`--force` snapshot.
 | `hapi check --strict` | 0 ok / 1 parse / 2 args  |
 | `hapi --version`      | 0                        |
 | `hapi --help`         | 0                        |
+
+ADR 0005's usage contract, tightened in 1.0.9: **every** verb rejects an
+extra positional with exit 2 (`hapi rollback <pkg>` used to ignore the
+argument and reverse the entire trail); a verb that takes no flags still
+owes 2 for one rather than 1 (F-033, `inspect`); and a flag-shaped value
+for `--root` / `--backup-to` is refused rather than consumed (F-019 —
+`link --root --dry-run pkg` used to create a directory named
+`--dry-run`). `status` exits 1 on drift, which is an assertion, not a
+predicate.
+
+Two accepted keys do nothing, and a state snapshot is the right place to
+say so: `--backup-to` is **inert on `sync`** (no `--force` there, so no
+destructive step to snapshot — F-026), and `package.ignore` is parsed,
+echoed by `inspect` and folded into the manifest hash but honoured by no
+verb (**reserved until v2.0** — F-025, ADR 0001).
 
 ## Source
 
@@ -371,71 +208,39 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. 365 assertions across
-  90 test groups (the group figure read `66` from 1.0.1 through
-  1.0.3 — a stale header; the per-tier breakdown below has always
-  summed to the real count):
-  - Manifest (7 groups): minimal, three-link acceptance,
-    validation, path traversal, comments, on-disk parse,
-    missing file
-  - Audit writer (2 groups): link entry format, JSON escaping
-  - Audit reader (3 groups): round trip, torn-line drop,
-    malformed drop
-  - fs_link (2 groups): relative computation, probe
-  - link (3 groups): happy path, conflict refusal,
-    --force refuses directory
-  - unlink (2 groups): round-trip, user-mutation refusal
-  - rollback (5 groups): full reverse, link/unlink/link →
-    clean, idempotent, stops at marker, replayed link entry
-    carries no `backup_path`
-  - trail reader (3 groups, 1.0.6): refuses an interior malformed
-    line (F-016), reads a trail past the old 256 KB cap (F-007),
-    absent trail is empty vs unreadable is an error (F-017)
-  - P(-1) 1.0.5 buffer/capability regressions (5 groups):
-    canonicalize refuses rather than overflowing (F-014), audit
-    entry composer refuses rather than overflowing (F-008), a
-    manifest past 256 KB survives a row append (F-009), colliding
-    backup basenames get distinct snapshots (F-010), adopt refuses
-    a target outside the scoped root (F-011)
-  - manifest_write (2 groups): append row, remove row
-  - adopt (5 groups): happy path, refuse
-    symlink / directory / absent / duplicate target
-  - rollback-of-adopt (1 group): three-step reversal
-  - checkpoint (1 group): marker bounds subsequent rollback
-  - status (4 groups): clean post-link, missing target,
-    wrong target, no-audit-writes invariant
-  - list (3 groups): live-link count after link/unlink cycle,
-    empty trail, unique-pkgs first-seen order
-  - strict-mode (4 groups): rejects unknown section, unknown
-    key in [package], unknown key in [[link]], accepts clean
-  - check (1 group): --strict flag does not leak across
-    parser invocations
-  - sync (3 groups): clean tree → no audit growth,
-    re-creates a missing link, recovers after a wiped
-    state dir (drive-move scenario; F-006 boundary)
-  - cap (4 groups): path-within matcher (exact / subdir /
-    boundary / empty), deny outside $HOME + allowlist,
-    allow inside $HOME, allow listed root (+ byte-prefix
-    collision rejection)
-  - dry-run (6 groups): link / unlink / adopt / sync /
-    rollback / checkpoint each write zero audit + zero
-    filesystem state under `hapi_set_dry_run(1)`
-  - backup-to (5 groups): compose_path filename
-    layout (dir + ts + pkg + basename, no doubled separator),
-    link --force snapshots regular-file conflicts with the
-    original bytes recoverable from the audit's
-    `backup_path` field, symlink conflicts skip the snapshot,
-    dry-run writes no snapshot file, adopt snapshots before
-    sys_rename
-  - canonical hash (4 groups): writer emits
-    `sha1c:` prefix, cosmetic edits (comments + whitespace)
-    yield identical hash, `[[link]]` row reorder yields
-    identical hash, target rename diverges
-  - audit-repair (4 groups): lexical normalize
-    collapses `..` / `.`; cap-check rejects `..` escape from
-    `$HOME` (F-001); allowlist entries lex-normalized;
-    `hapi_backup_copy` refuses symlink source under
-    `O_NOFOLLOW` (F-003)
+- `tests/hapi.tcyr` — primary suite. **365 assertions across 92 test
+  groups.** Re-derive rather than recount by hand — these figures have
+  rotted twice, and the per-tier breakdown below drifted 16 groups
+  short before the 2026-08-26 sweep:
+
+  ```sh
+  cyrius test                                   # assertions
+  grep -c 'test_group(' tests/hapi.tcyr         # groups
+  cyrius test 2>&1 | grep '^=== ' | sed 's/^=== //;s/:.*//' \
+    | sort | uniq -c | sort -rn                 # per-tier breakdown
+  ```
+
+  Groups by tier, as measured: manifest 7, cap 7, backup 7, rollback 6,
+  link 6, dry-run 6, adopt 6, status 5, canonical 5, audit_reader 5,
+  manifest_write 4, fs_link 4, check 4+2, audit-repair 4, audit 4,
+  sync 3, list 3, unlink 2, checkpoint 1, agnos_compat 1.
+
+### Harnesses
+
+`cyrius test` cannot express two of hapi's regressions, so they live
+beside it as shell harnesses. **CI runs both.**
+
+- `scripts/concurrency-test.sh` — F-012's regression. The defect needs
+  two hapi *processes* racing on one manifest, and `.tcyr` cannot fork
+  while hapi is syscall-only by rule. Measured before the fix: 16
+  concurrent adopts → 16 files moved, 16 symlinks, 16 trail entries and
+  **1** manifest row; 16/16 after.
+- `scripts/agnos-smoke.sh` — runs the `--agnos` build under mirshi.
+  Four checks: the binary loads and the agnos arg reader delivers argv,
+  the envp gap is asserted rather than assumed, a relative package
+  argument is refused rather than silently mis-resolved (F-027,
+  verified on-target), and the exit-code contract holds there too. A
+  missing mirshi exits **2 = SKIP** and CI warns — never green.
 
 ## Dependencies
 
@@ -490,57 +295,16 @@ means downstream packagers (zugot recipes) and user manifests.
 
 ## Next
 
-⚠ **The 1.0.x hardening arc is open, and it comes first.** The
-2026-08-25 P(-1) sweep fixed six HIGH defects in 1.0.5 and left
-**twenty findings live in the shipped tree**. They are enumerated
-in [`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md),
-bucketed by blast radius in
-[`roadmap.md`](roadmap.md#v10x--hardening-arc-open-from-the-2026-08-25-p-1-sweep),
-and the Tier 1 items carry their own issue files:
+The 1.0.x hardening arc is **closed** — all twenty findings of the
+2026-08-25 P(-1) sweep are fixed (1.0.5 → 1.0.10).
 
-- [`issues/2026-08-25-manifest-write-integrity.md`](issues/2026-08-25-manifest-write-integrity.md)
-  — F-012 / F-021 / F-028: the unlocked manifest read-modify-write.
-- [`issues/2026-05-23-cap-check-symlink-escape.md`](issues/2026-05-23-cap-check-symlink-escape.md)
-  — F-002 / F-015, re-scoped: per-component symlink resolution, now
-  hapi-owned since the kavach dep gate turned out to be void.
-- [`issues/2026-08-25-reporting-and-idempotency.md`](issues/2026-08-25-reporting-and-idempotency.md)
-  — Tier 2: `status` / `list` / `sync` reporting a world that is not
-  on disk.
+One thing is owed before the arc is formally signed off: a **P(-1)
+re-walk** over the repaired write paths. Thirteen fixes landed across
+1.0.9 and 1.0.10 and between them touched a path argument, a syscall
+and the audit-trail write path — all three of CLAUDE.md's re-run
+triggers. That re-walk is what reopens the additive v1.x bucket.
 
-**v1.0.0 has shipped** and the contract (command surface, manifest
-schema, audit-trail format) is frozen. The additive **v1.x** backlog
-below is on hold behind the arc's exit criteria — growth does not
-resume while a Tier 1 finding is open.
-
-Candidate post-v1.0 work (ordered loosely by maturity):
-
-- **per-component symlink resolution** — internal swap inside
-  `src/cap.cyr`, closing F-002 and F-015 without touching the
-  `cap_check_root_r` API. Was filed as the "kavach migration";
-  the dep gate is void (see the 2026-08-25 audit), so this is
-  Tier 1 of the 1.0.x hardening arc.
-  (`issues/2026-05-23-cap-check-symlink-escape.md`)
-- ~~**stdlib syscall wrappers** — `sys_rename` / `sys_fsync` /
-  `sys_fdatasync`~~ **(done, 1.0.2)** — landed in cyrius 6.2.x;
-  the in-source `syscall(N, ...)` calls and the `HapiSysno`
-  stand-in enum were replaced with the named wrappers. No
-  behavior change on x86_64. The "arch-correct on aarch64" half
-  of that claim only became true at 1.0.4 — one bare `SYS_OPEN`
-  was missed in `fs_link.cyr`, and it is the one constant the
-  aarch64 table does not define, so `--aarch64` did not build.
-- **`hapi sync --prune`** — re-evaluate if the
-  full-rotation workaround keeps biting in dogfood. Tracked
-  at `issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md`.
-- **`docs/architecture/NNN-upstream-drift-pattern.md`** —
-  earned when a second drifting-upstream consumer (sway /
-  fish / kitty) hits the pattern documented in
-  [`guides/upstream-drift.md`](../guides/upstream-drift.md).
-- **`docs/benchmarks.md` trend rows** — append on any release
-  that touches `cmd_link.cyr` / `audit.cyr` / `fs_link.cyr` /
-  the manifest parser. Regression gate per the file: > 2×
-  cold-time jump or any non-zero warm audit growth.
-
-The complete v1.0-shipped scope plus the full deferred set
-lives in [`roadmap.md`](roadmap.md). The v1.0 contract itself
-is documented in
-[`release-notes/1.0.0.md`](release-notes/1.0.0.md).
+Forward-looking work is **not** listed here — it lives in
+[`roadmap.md`](roadmap.md), which carries only work that has not
+shipped. Open dogfood papercuts are in
+[`issues/`](issues/) (3 open, 7 archived).

@@ -41,7 +41,7 @@
 **Discovered:** 2026-08-25, P(-1) hardening sweep (F-012, with F-021 and F-028 on the same write path)
 **Severity:** High — hapi's declarative state silently stops describing the filesystem
 **Affects:** `src/manifest_write.cyr` and `src/cmd/adopt.cyr`; live in the shipped 1.0.5
-**Arc:** 1.0.x hardening, Tier 1 ([`../roadmap.md`](../roadmap.md))
+**Arc:** 1.0.x hardening, Tier 1 ([`../roadmap.md`](../../roadmap.md))
 
 ## Summary
 
@@ -109,13 +109,13 @@ Ordered by value per unit of risk:
 
 F-012's and F-028's regressions need process control the `.tcyr` harness
 does not have. The honest home is a **shell harness alongside
-`cyrius test`**, the way [`../../benchmarks.md`](../../benchmarks.md)'s
+`cyrius test`**, the way [`../../benchmarks.md`](../../../benchmarks.md)'s
 harness already lives. That harness is a prerequisite for closing this
 issue, not an afterthought — without it the fix ships unverified.
 
 ## Related
 
-F-005 in [`../../audit/2026-05-23-audit.md`](../../audit/2026-05-23-audit.md)
+F-005 in [`../../audit/2026-05-23-audit.md`](../../../audit/2026-05-23-audit.md)
 is recorded as an accepted single-process TOCTOU boundary. The 2026-08-25
 sweep found that scoping wrong: the damage is in the **multi-process**
 case, and it is not a TOCTOU — it is this unlocked read-modify-write.

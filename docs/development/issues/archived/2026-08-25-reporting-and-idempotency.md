@@ -18,7 +18,7 @@
 **Discovered:** 2026-08-25, P(-1) hardening sweep (F-022, F-023, F-024, F-026, F-025)
 **Severity:** Medium — no data is destroyed, but the verbs whose entire job is to tell the user the truth do not
 **Affects:** `src/cmd/link.cyr`, `src/cmd/list.cyr`, `src/cmd/sync.cyr`, `src/fs_link.cyr`, `src/manifest.cyr`; live in the shipped 1.0.5
-**Arc:** 1.0.x hardening, Tier 2 ([`../roadmap.md`](../roadmap.md))
+**Arc:** 1.0.x hardening, Tier 2 ([`../roadmap.md`](../../roadmap.md))
 
 ## Why these are one issue
 
@@ -79,7 +79,7 @@ The guides and `--help` both present `--backup-to` as available on
 `sync`, and the snapshot branch on that path cannot fire. A user
 following the documentation believes their files are snapshotted before a
 destructive overwrite. They are not, and
-[`../../guides/backup-to.md`](../../guides/backup-to.md)'s claim that
+[`../../guides/backup-to.md`](../../../guides/backup-to.md)'s claim that
 "sync inherits `--force`" is flatly false.
 
 1.0.x fix is **documentation, not surface**: remove `sync` from every

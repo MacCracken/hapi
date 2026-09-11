@@ -19,9 +19,10 @@ this.
 
 ## What doesn't belong here
 
-- **Upstream bugs.** If the bug is in cyriusly, the kavach
-  daemon, the kernel, or a third-party tool, file it in that
-  repo. Hapi's `issues/` is for hapi-side bugs only.
+- **Upstream bugs.** If the bug is in cyriusly, mirshi (the
+  AGNOS→Linux syscall-translation supervisor), the cyrius toolchain
+  or its vendored stdlib, the kernel, or a third-party tool, file it
+  in that repo. Hapi's `issues/` is for hapi-side bugs only.
 - **Feature wishlists without a consumer stopgap.** Speculative
   surface ideas go in `docs/development/roadmap.md` under
   *Out of scope* or *post-v1.0 candidates*, not here. The bar
@@ -99,7 +100,10 @@ one of:
    surface" or "consumer-side concern, not hapi's surface".
 
 When the fix lands, the issue file:
-- Gets a `— RESOLVED` suffix in its top heading.
+- Opens with a resolution banner blockquote naming the fix version —
+  `> ## ✅ RESOLVED in X.Y.Z (YYYY-MM-DD)` — followed by what actually
+  landed, per finding, with the measurement that proved it. (Files
+  archived before 2026-08 instead carry a `— RESOLVED` heading suffix.)
 - Adds a status paragraph pointing at the fix version + the
   CHANGELOG section that closed it.
 - Moves to `archived/`.

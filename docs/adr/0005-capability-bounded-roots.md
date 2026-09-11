@@ -35,7 +35,11 @@ M6 has to deliver on that promise. Two requirements:
 
 The complicating constraint: **kavach** — the agnosticos
 capability service that will eventually own this surface —
-does not yet expose a stable API. The roadmap entry for M6
+does not yet expose a stable API.
+⚠ *This premise was false and the* **Addendum — 2026-08-25**
+*at the foot of this file corrects it: kavach is a sandbox-execution
+framework and never had this surface to give. The decision below still
+stands; only this justification for it does not.* The roadmap entry for M6
 acknowledges this explicitly:
 
 > **Dep gate**: when kavach exposes a stable capability API;

@@ -34,7 +34,7 @@ snapshot is written and the audit trail does not grow.
 
 ## Filename shape
 
-`<YYYYMMDD-HHMMSS>-<pkg>-<basename>` — for example:
+`<YYYYMMDD-HHMMSS>-<pkg>-<basename>[-N]` — for example:
 
 ```
 20260523-153042-hyprland-hyprland.conf

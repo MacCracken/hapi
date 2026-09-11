@@ -26,6 +26,13 @@ hapi check <package-dir|hapi.cyml> [--strict]
      unknown key inside a known section (e.g. `[package].author`,
      `[[link]].mode`) becomes a hard error.
 3. Prints the parsed manifest.
+4. **Walks the package directory** and reports where the manifest and
+   the package have diverged, in both directions:
+   - a `[[link]]` row whose `source` is missing from the package;
+   - a file in the package that **no row claims** — the signature of an
+     `adopt` interrupted between the rename and the manifest write.
+   Staging leftovers (`hapi.cyml.<pid>.tmp`) are not orphans. Any
+   divergence exits 1.
 4. Appends `ok` (or `ok (strict)`).
 
 ## Example: lenient vs strict
@@ -74,7 +81,7 @@ an older hapi binary mid-deployment.
 
 | code | meaning                                                       |
 |------|---------------------------------------------------------------|
-| 0    | parsed cleanly                                                |
+| 0    | parsed cleanly **and** the manifest matches the package        |
 | 1    | parse error (including strict-mode rejection)                 |
 | 2    | bad usage (no path argument)                                  |
 

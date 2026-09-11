@@ -22,6 +22,7 @@ hapi status <package-dir|hapi.cyml>
 | classification | meaning                                                |
 |----------------|--------------------------------------------------------|
 | `OK`           | symlink points where `hapi link` would write           |
+| `BROKEN`       | symlink text is right, but the **source is gone**      |
 | `MISSING`      | no file at the target                                  |
 | `WRONG`        | symlink points elsewhere                               |
 | `FILE`         | a regular file lives at the target                     |

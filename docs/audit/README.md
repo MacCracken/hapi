@@ -46,34 +46,32 @@ Per CLAUDE.md Process P(-1), re-run the checklist:
 | Pass | Version at scan | Outcome |
 |------|-----------------|---------|
 | [`2026-05-23-audit.md`](2026-05-23-audit.md) | 0.8.0 → v1.0 hardening | F-001 (HIGH, `..` bypass) **fixed**; F-003 (LOW, backup-copy TOCTOU) **fixed**; F-002 (MEDIUM, symlink escape) **deferred** to kavach; F-004 / F-005 **accepted** boundaries. Closed P(-1) Step 5 for the v1.0 cut. |
-| [`2026-08-25-audit.md`](2026-08-25-audit.md) | 1.0.5 | ⚠ **The pass that broke the streak.** Nine HIGH findings, where the two prior passes found none — the earlier lens checked the validators, not the writers. Fixed: F-008 (audit composer heap overflow), F-009 (manifest truncated at 256 KB and the truncation committed), F-010 (`--backup-to` destroying a colliding snapshot), F-011 (`adopt` escaping `$HOME` with no `--root`), F-013 (`rollback <pkg>` reversing the whole trail), F-014 (canonicalize heap overflow → SIGSEGV). F-002 **re-scoped**: the kavach dep gate is void. Twenty findings remain open and listed. |
+| [`2026-08-25-audit.md`](2026-08-25-audit.md) | 1.0.5 | ⚠ **The pass that broke the streak.** Nine HIGH findings where the two prior passes found none — the earlier lens checked the validators, not the writers. Twenty findings total; **all twenty are now closed** across 1.0.5 – 1.0.10 (see the arc note below). F-002 re-scoped off its void kavach dep gate and fixed at 1.0.8. |
 | [`2026-05-24-audit.md`](2026-05-24-audit.md) | 1.0.0 (1.0.x-final) | Re-walk over the unchanged v1.0 surface. F-001/F-003 still fixed (test-asserted), F-002 still deferred (no kavach yet), F-004/F-005 still accepted. New F-006 (LOW, audit trail lost on state-dir wipe) **accepted** boundary. Reviewed the syscall-naming cleanup (behavior-neutral). |
 
 ---
 
-## Next arc — owned by the pass after 1.0.5
+## The arc after the 2026-08-25 pass — ✅ CLOSED (1.0.6 – 1.0.10)
 
-The 2026-08-25 sweep closed six HIGH findings and left twenty open. The
-next arc's scope is set by what it left behind, in this order:
+That sweep left twenty findings open. They were scheduled as the
+**1.0.x hardening arc** in
+[`../development/roadmap.md`](../development/roadmap.md) and closed
+across 1.0.6 – 1.0.10:
 
-- **F-007 — the trail reader's 256 KB head cap.** `rollback` reverses
-  the wrong window once the trail outgrows it, destroying settled links
-  at exit 0. Fix with a size-derived read; land F-016 (interior
-  malformed line refuses) and F-017 (unreadable trail is an error, not
-  "empty") in the same function while it is open.
-- **F-012 — the unlocked manifest read-modify-write.** Concurrent
-  `adopt` commits the filesystem moves and drops manifest rows. Needs
-  `flock` plus a pid-unique `O_EXCL` tmp name, and a shell-driven
-  harness to regression-test it (`.tcyr` cannot fork).
-- **F-015 / F-002 — per-component symlink resolution.** Now hapi-owned
-  work, not a kavach dep gate. Note the constraint that makes it an arc
-  rather than a patch: four verbs prove ownership by recomputing
-  `fsl_compute_relative` and byte-comparing, so changing the resolver
-  changes what they compare.
-- **An agnos runner.** Three findings (F-027, F-031, and ADR 0002's
-  atomicity rationale on agnos) are target-conditional and could not be
-  reproduced here. Until one exists, this directory must say
-  *unverified on agnos* rather than *clean*.
+- **Tier 1** — the trail reader's 256 KB head cap (F-007/F-016/F-017,
+  1.0.6), the unlocked manifest read-modify-write (F-012, 1.0.6), and
+  per-component symlink resolution (F-015/F-002, 1.0.8).
+- **Tier 2 / Tier 3** — the remaining eleven, batched into 1.0.9.
+- **Target-conditional** — F-027 and F-031 in 1.0.10. These were
+  recorded here as *blocked on an agnos runner*; **that was wrong.**
+  mirshi builds in the tree and runs an agnos ELF as a native Linux
+  process. `scripts/agnos-smoke.sh` now exercises the agnos build under
+  it and CI runs it, so the gap cannot reopen silently.
+
+Two lessons this arc paid for, both about blockers recorded once and
+never re-checked: F-002 sat three months behind a dependency that did
+not exist (kavach is a sandbox-execution framework, not a capability
+service), and F-027/F-031 sat behind a runner that did.
 
 ---
 
@@ -101,7 +99,7 @@ findings still hold and weigh what's accumulated since
   kavach capability service. Re-confirm kavach has not shipped a
   stable API yet; if it has, the fix moves from this arc's
   "still-deferred" column into actual repair.
-  ([`../development/issues/2026-05-23-cap-check-symlink-escape.md`](../development/issues/2026-05-23-cap-check-symlink-escape.md))
+  ([`../development/issues/2026-05-23-cap-check-symlink-escape.md`](../development/issues/archived/2026-05-23-cap-check-symlink-escape.md))
 - **NEW — state-loss recovery boundary** — a 2026-05-24
   drive-move dogfood run surfaced that a wiped
   `$XDG_STATE_HOME/hapi/` leaves `hapi list` / `hapi rollback`

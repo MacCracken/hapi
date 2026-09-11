@@ -16,7 +16,12 @@ hapi link <path-to-hapi.cyml> [--force]
 For each `[[link]]` row in the manifest:
 
 1. Resolve the source: `<absolute-package-dir>/<source>`.
-2. Resolve the target: `$HOME/<target>` (the scoped root).
+   If the source is **not present on disk the row is refused** — the
+   symlink would dangle, and `--force` does not override that.
+2. Resolve the target: `$HOME/<target>` (the scoped root), and refuse
+   if its parent **resolves outside** that root once symlinks are
+   followed per component. `--force` does not override that either;
+   see [`capability.md`](capability.md).
 3. Probe the target with `readlink(2)` to classify:
    - **absent** — create the symlink
    - **symlink to the correct relative path** — no-op
@@ -101,8 +106,12 @@ lines.
 |------|------------------------------------------------------------------|
 | 0    | links applied (or already up-to-date)                            |
 | 1    | manifest parse failure, conflict without `--force`, IO error,    |
-|      | audit-trail write failure, or `--force` over a directory         |
-| 2    | bad usage (missing argument)                                     |
+|      | audit-trail write failure, or one of the three refusals          |
+|      | `--force` does **not** override: an existing directory, a row    |
+|      | whose **source is missing**, or a target that **resolves         |
+|      | outside the scope root**                                         |
+| 2    | bad usage — missing argument, an unknown flag, an extra          |
+|      | positional, or a flag-shaped value after `--root`/`--backup-to`  |
 
 ## See also
 
