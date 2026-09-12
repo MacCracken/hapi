@@ -41,7 +41,7 @@ Third leg of the terminal-aesthetics set:
 
 ## Status
 
-**v1.0.10** — the v1.0 contract, frozen 2026-05-23, still holds:
+**v1.0.11** — the v1.0 contract, frozen 2026-05-23, still holds:
 command surface (ten verbs plus five global flags), `hapi.cyml`
 manifest schema (ADR 0001), and audit-trail format (ADR 0002) are all
 contractual, and the 1.0.x line has added no surface. What it added
