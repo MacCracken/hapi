@@ -383,9 +383,9 @@ fn hapi_mf_parse_header_r(data, len): Result {
 # file itself (not the package dir) — directory-form dispatch
 # lives in src/cmd/inspect.cyr so the parser stays I/O-thin.
 fn hapi_mf_parse_file_r(path): Result {
-    var doc_r = cyml_parse_file_r(path);
-    if (is_err_result(doc_r) == 1) { return Err(HapiMfIoErr); }
-    var doc = load64(doc_r + 8);
+    var doc_t, doc_v = cyml_parse_file_r(path);
+    if (is_err_result(doc_t) == 1) { return Err(HapiMfIoErr); }
+    var doc = doc_v;
     var hdr = cyml_doc_header(doc);
     var hdr_len = cyml_doc_header_len(doc);
     return hapi_mf_parse_header_r(hdr, hdr_len);

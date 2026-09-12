@@ -43,7 +43,7 @@ fn link_probe_target(p): i64 { return load64(p + 8); }
 # (open + getdents) to split FILE vs DIRECTORY, because --force
 # treats those differently.
 fn link_probe(path): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     # agnos readlink#70 (the introspection peer of symlink#63) reads a symlink's
     # TEXT target and returns its byte length, or -1 when `path` is not a symlink
     # (a missing path included) — the same no-follow discriminator role the Linux
@@ -68,7 +68,7 @@ fn link_probe(path): i64 {
     if (rc < 0) { return _fsl_probe_new(HAPI_LP_ABSENT, 0); }
     if ((load64(st + STAT_MODE) & 0xF000) == 0x4000) { return _fsl_probe_new(HAPI_LP_DIRECTORY, 0); }
     return _fsl_probe_new(HAPI_LP_FILE, 0);
-#else
+    #else
     var buf = alloc(4096);
     var n = sys_readlink(path, buf, 4096);
     if (n > 0) {
@@ -101,7 +101,7 @@ fn link_probe(path): i64 {
         return _fsl_probe_new(HAPI_LP_FILE, 0);
     }
     return _fsl_probe_new(HAPI_LP_ERROR, 0);
-#endif
+    #endif
 }
 
 # Is a manifest row's `source` actually there? GNU stow probes the source
@@ -178,7 +178,7 @@ fn _fsl_path_dirname(path): i64 {
 # Used as the base for resolving the package-dir argument
 # when the user passes a relative path.
 fn _fsl_getcwd(): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     # agnos has no getcwd syscall (no per-process cwd concept in the
     # userland ABI). Its kernel does stage `PWD` into the init envp at
     # exec, so prefer that when it is absolute — it is the only source
@@ -196,7 +196,7 @@ fn _fsl_getcwd(): i64 {
     # RELATIVE path that flowed into the trail's `abs_source`, which
     # ADR 0002 requires to be absolute. The caller must refuse instead.
     return 0;
-#else
+    #else
     var buf = alloc(4096);
     var n = syscall(SYS_GETCWD, buf, 4096);
     if (n < 0) {
@@ -212,7 +212,7 @@ fn _fsl_getcwd(): i64 {
     memcpy(out, buf, len);
     store8(out + len, 0);
     return out;
-#endif
+    #endif
 }
 
 # Resolve `path` (cstring) to an absolute cstring. If already
@@ -389,7 +389,7 @@ fn fsl_lexical_normalize(path): i64 {
                 if (seg_len == 1 && load8(path + start) == 46) {
                     # "." segment — drop
                 } elif (seg_len == 2 && load8(path + start) == 46
-                                     && load8(path + start + 1) == 46) {
+                  && load8(path + start + 1) == 46) {
                     if (vec_len(parts) > 0) { vec_pop(parts); }
                 } else {
                     vec_push(parts, str_new(path + start, seg_len));

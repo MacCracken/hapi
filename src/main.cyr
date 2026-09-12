@@ -139,16 +139,16 @@ fn _hapi_apply_root(value): i64 {
         eprint("hapi: --root requires a path argument\n", 39);
         return 2;
     }
-    var cr = cap_check_root_r(value);
-    if (is_err_result(cr) == 1) {
-        var code = load64(cr + 8);
+    var cr_t, cr_v = cap_check_root_r(value);
+    if (is_err_result(cr_t) == 1) {
+        var code = cr_v;
         var msg = hapi_cap_err_msg(code);
         eprint("hapi: ", 6);
         eprint(msg, strlen(msg));
         eprint("\n", 1);
         return 1;
     }
-    var abs_root = load64(cr + 8);
+    var abs_root = cr_v;
     link_set_scope_root(abs_root);
     return 0;
 }

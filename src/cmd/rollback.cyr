@@ -73,11 +73,11 @@ fn _hrb_reverse_link(entry): i64 {
     if (hapi_dry_run() == 1) { return 1; }
     var urc = hapi_unlink(abs_tgt);
     if (urc < 0) { return 0 - 1; }
-    var ar = audit_append_unlink_r(
+    var ar_t, ar_v = audit_append_unlink_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         hae_source(entry), hae_target(entry),
         hae_abs_source(entry), hae_abs_target(entry));
-    if (is_err_result(ar) == 1) { return 0 - 1; }
+    if (is_err_result(ar_t) == 1) { return 0 - 1; }
     return 1;
 }
 
@@ -105,11 +105,11 @@ fn _hrb_reverse_unlink(entry): i64 {
     if (hapi_dry_run() == 1) { return 1; }
     var crc = link_create(rel, abs_tgt);
     if (crc < 0) { return 0 - 1; }
-    var ar = audit_append_link_r(
+    var ar_t, ar_v = audit_append_link_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         hae_source(entry), hae_target(entry),
         hae_abs_source(entry), hae_abs_target(entry), 0);
-    if (is_err_result(ar) == 1) { return 0 - 1; }
+    if (is_err_result(ar_t) == 1) { return 0 - 1; }
     return 1;
 }
 
@@ -172,10 +172,10 @@ fn _hrb_reverse_adopt(entry): i64 {
         _hrb_eputs("  (manifest row not found; filesystem reverted)\n");
     }
 
-    var ar = audit_append_unadopt_r(
+    var ar_t, ar_v = audit_append_unadopt_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         source, target, abs_src, abs_tgt);
-    if (is_err_result(ar) == 1) { return 0 - 1; }
+    if (is_err_result(ar_t) == 1) { return 0 - 1; }
     return 1;
 }
 
@@ -191,9 +191,9 @@ fn cmd_rollback(): i64 {
     # interior line, is a conflict with the user's own history — surface
     # it rather than acting on a partial view. An ABSENT trail is still
     # Ok(empty): that is the first-run case, not a failure.
-    var tr = audit_read_default_r();
-    if (is_err_result(tr) == 1) {
-        var trc = load64(tr + 8);
+    var tr_t, tr_v = audit_read_default_r();
+    if (is_err_result(tr_t) == 1) {
+        var trc = tr_v;
         _hrb_eputs("hapi: ");
         _hrb_eputs(hapi_ar_err_msg(trc));
         if (trc == HapiArCorrupt) {
@@ -204,7 +204,7 @@ fn cmd_rollback(): i64 {
         _hrb_eputs("\n  refusing to act on a partial view of the trail\n");
         return 1;
     }
-    var trail = load64(tr + 8);
+    var trail = tr_v;
     var n = vec_len(trail);
     if (n == 0) {
         _hrb_eputs("hapi: audit trail is empty — nothing to roll back\n");

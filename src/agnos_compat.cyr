@@ -19,21 +19,21 @@ include "lib/io.cyr"
 # unlink(path). Linux: unlink(path). agnos: unlink(path, pathlen) — the
 # path length is an explicit argument (no NUL-scan in the kernel).
 fn hapi_unlink(path): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     return sys_unlink(path, strlen(path));
-#else
+    #else
     return sys_unlink(path);
-#endif
+    #endif
 }
 
 # rename(old -> new). Linux: rename(old, new). agnos: rename(old, oldlen,
 # new, newlen) — 4-arg, a4 in r10.
 fn hapi_rename(old, new): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     return sys_rename(old, strlen(old), new, strlen(new));
-#else
+    #else
     return sys_rename(old, new);
-#endif
+    #endif
 }
 
 # fsync(fd). agnos has no per-fd fsync; SYS_SYNC (#12) flushes globally,
@@ -41,22 +41,22 @@ fn hapi_rename(old, new): i64 {
 # before the subsequent rename durability point. Linux keeps precise
 # per-fd fsync.
 fn hapi_fsync(fd): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     return sys_sync();
-#else
+    #else
     return sys_fsync(fd);
-#endif
+    #endif
 }
 
 # symlink(target, linkpath). Linux: symlink(target, linkpath). agnos:
 # symlink(target, targetlen, linkpath, linkpathlen) — the native peer
 # wrapper (agnos syscall #63, landed agnos 1.51.0 / cyrius 6.4.x stdlib).
 fn hapi_symlink(target, linkpath): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     return sys_symlink(target, strlen(target), linkpath, strlen(linkpath));
-#else
+    #else
     return sys_symlink(target, linkpath);
-#endif
+    #endif
 }
 
 # readlink(path, buf, buflen) → the symlink's TEXT target byte count (NOT
@@ -67,11 +67,11 @@ fn hapi_symlink(target, linkpath): i64 {
 # takes the path length explicitly (path, pathlen, buf, buflen) — the native peer
 # wrapper (cyrius 6.5.x stdlib), so the arity difference is the whole divergence.
 fn hapi_readlink(path, buf, buflen): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     return sys_readlink(path, strlen(path), buf, buflen);
-#else
+    #else
     return sys_readlink(path, buf, buflen);
-#endif
+    #endif
 }
 
 # Open `path` WITHOUT following a final-component symlink.
@@ -98,14 +98,14 @@ fn hapi_readlink(path, buf, buflen): i64 {
 # no-follow open flag; it is narrower than, and strictly better than,
 # following the link unconditionally.
 fn hapi_open_nofollow(path, flags): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     var probe = alloc(64);
     var n = hapi_readlink(path, probe, 64);
     if (n > 0) { return 0 - 40; }          # ELOOP — it is a symlink
     return file_open(path, flags, 0);
-#else
+    #else
     return file_open(path, flags | 131072, 0);   # O_NOFOLLOW
-#endif
+    #endif
 }
 
 # mkdir(path, mode). Linux: mkdir(path, mode). agnos: mkdir(path, pathlen)
@@ -121,16 +121,16 @@ fn hapi_open_nofollow(path, flags): i64 {
 # stat that the path is already a directory and report success — matching
 # the Linux idempotent-parents behavior on both real agnos and mirshi.
 fn hapi_mkdir(path, mode): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     var rc = sys_mkdir(path, strlen(path));
     if (rc >= 0) { return 0; }
     var st = alloc(STAT_BUFSZ);
     if (sys_stat(path, strlen(path), st) < 0) { return rc; }
     if ((load64(st + STAT_MODE) & 0xF000) == 0x4000) { return 0; }
     return rc;
-#else
+    #else
     return sys_mkdir(path, mode);
-#endif
+    #endif
 }
 
 # NOTE: `file_append_locked` is NOT shimmed here. As of the cyrius 6.4.x

@@ -23,9 +23,9 @@ include "src/cli.cyr"
 # returned Err(<expected>). `expected` is one of the HapiMf*
 # enum values.
 fn _expect_err(label, src, expected): i64 {
-    var r = hapi_mf_parse_header_r(src, strlen(src));
-    if (is_err_result(r) == 1) {
-        assert_eq(load64(r + 8), expected, label);
+    var t, v = hapi_mf_parse_header_r(src, strlen(src));
+    if (is_err_result(t) == 1) {
+        assert_eq(v, expected, label);
     } else {
         assert(0, label);
     }
@@ -33,8 +33,8 @@ fn _expect_err(label, src, expected): i64 {
 }
 
 fn _expect_ok(label, src): i64 {
-    var r = hapi_mf_parse_header_r(src, strlen(src));
-    assert_eq(is_ok(r), 1, label);
+    var t, v = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(t), 1, label);
     return 0;
 }
 
@@ -50,9 +50,9 @@ fn test_minimal_manifest() {
     test_group("manifest: minimal happy path");
 
     var src = "[package]\nname = \"pkg\"\nversion = \"0.1.0\"\n";
-    var r = hapi_mf_parse_header_r(src, strlen(src));
-    assert_eq(is_ok(r), 1, "minimal manifest parses");
-    var m = load64(r + 8);
+    var t, v = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(t), 1, "minimal manifest parses");
+    var m = v;
     _assert_str_eq_cstr(hapi_mf_name(m), "pkg", "name = pkg");
     _assert_str_eq_cstr(hapi_mf_version(m), "0.1.0", "version = 0.1.0");
     assert_eq(hapi_mf_description(m), 0, "description is absent");
@@ -82,9 +82,9 @@ target = \".zshenv\"
 source = \"config/zsh\"
 target = \".config/zsh\"
 ";
-    var r = hapi_mf_parse_header_r(src, strlen(src));
-    assert_eq(is_ok(r), 1, "parses cleanly");
-    var m = load64(r + 8);
+    var t, v = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(t), 1, "parses cleanly");
+    var m = v;
     _assert_str_eq_cstr(hapi_mf_name(m), "dotfiles-zsh", "package.name");
     _assert_str_eq_cstr(hapi_mf_version(m), "1.0.0", "package.version");
     _assert_str_eq_cstr(hapi_mf_description(m), "zsh", "package.description");
@@ -109,27 +109,27 @@ fn test_validation_errors() {
     test_group("manifest: validation errors");
 
     _expect_err("missing name",
-        "[package]\nversion = \"1.0\"\n",
-        HapiMfMissingName);
+      "[package]\nversion = \"1.0\"\n",
+      HapiMfMissingName);
 
     _expect_err("missing version",
-        "[package]\nname = \"x\"\n",
-        HapiMfMissingVersion);
+      "[package]\nname = \"x\"\n",
+      HapiMfMissingVersion);
 
     _expect_err("empty name",
-        "[package]\nname = \"\"\nversion = \"1.0\"\n",
-        HapiMfMissingName);
+      "[package]\nname = \"\"\nversion = \"1.0\"\n",
+      HapiMfMissingName);
 
     _expect_err("missing link source",
-        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\ntarget = \"a\"\n",
-        HapiMfMissingSource);
+      "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\ntarget = \"a\"\n",
+      HapiMfMissingSource);
 
     _expect_err("missing link target",
-        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\n",
-        HapiMfMissingTarget);
+      "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\n",
+      HapiMfMissingTarget);
 
     _expect_err("duplicate target",
-        "[package]
+      "[package]
 name = \"x\"
 version = \"1.0\"
 [[link]]
@@ -139,7 +139,7 @@ target = \".same\"
 source = \"b\"
 target = \".same\"
 ",
-        HapiMfDuplicateTarget);
+      HapiMfDuplicateTarget);
     return 0;
 }
 
@@ -147,24 +147,24 @@ fn test_path_traversal() {
     test_group("manifest: path traversal rejected");
 
     _expect_err("source has ..",
-        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"../etc\"\ntarget = \".x\"\n",
-        HapiMfPathTraversal);
+      "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"../etc\"\ntarget = \".x\"\n",
+      HapiMfPathTraversal);
 
     _expect_err("target has ..",
-        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \"../.bashrc\"\n",
-        HapiMfPathTraversal);
+      "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \"../.bashrc\"\n",
+      HapiMfPathTraversal);
 
     _expect_err(".. in middle of target",
-        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \"a/../b\"\n",
-        HapiMfPathTraversal);
+      "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \"a/../b\"\n",
+      HapiMfPathTraversal);
 
     # A leading dot file (not a `..` segment) is fine.
     _expect_ok("leading-dot target is fine",
-        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \".bashrc\"\n");
+      "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a\"\ntarget = \".bashrc\"\n");
 
     # `..` inside a path component is fine — only segment-`..` is rejected.
     _expect_ok("dotdot inside a component is fine",
-        "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a..b\"\ntarget = \"c..d\"\n");
+      "[package]\nname = \"x\"\nversion = \"1.0\"\n[[link]]\nsource = \"a..b\"\ntarget = \"c..d\"\n");
     return 0;
 }
 
@@ -179,18 +179,18 @@ name = \"x\"
 # another comment
 version = \"1.0\"
 ";
-    var r = hapi_mf_parse_header_r(src, strlen(src));
-    assert_eq(is_ok(r), 1, "comments do not break parsing");
+    var t, v = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(t), 1, "comments do not break parsing");
     return 0;
 }
 
 fn test_parse_example_from_disk() {
     test_group("manifest: parse the shipped example");
 
-    var r = hapi_mf_parse_file_r("docs/examples/dotfiles-zsh/hapi.cyml");
-    assert_eq(is_ok(r), 1, "example parses cleanly");
-    if (is_ok(r) == 1) {
-        var m = load64(r + 8);
+    var t, v = hapi_mf_parse_file_r("docs/examples/dotfiles-zsh/hapi.cyml");
+    assert_eq(is_ok(t), 1, "example parses cleanly");
+    if (is_ok(t) == 1) {
+        var m = v;
         _assert_str_eq_cstr(hapi_mf_name(m), "dotfiles-zsh", "name matches");
         assert_eq(vec_len(hapi_mf_links(m)), 3, "three links");
         assert_eq(vec_len(hapi_mf_ignore(m)), 3, "three ignore patterns");
@@ -201,9 +201,9 @@ fn test_parse_example_from_disk() {
 fn test_missing_file() {
     test_group("manifest: missing-file error");
 
-    var r = hapi_mf_parse_file_r("/nonexistent/path/hapi.cyml");
-    assert_eq(is_err_result(r), 1, "missing file returns Err");
-    assert_eq(load64(r + 8), HapiMfIoErr, "error code is HapiMfIoErr");
+    var t, v = hapi_mf_parse_file_r("/nonexistent/path/hapi.cyml");
+    assert_eq(is_err_result(t), 1, "missing file returns Err");
+    assert_eq(v, HapiMfIoErr, "error code is HapiMfIoErr");
     return 0;
 }
 
@@ -280,9 +280,9 @@ fn test_audit_format_link() {
 
     var buf = alloc(4096);
     var n = audit_format_link(buf, 4096,
-        "pkg", "1.0.0", "sha1:deadbeef",
-        "src", ".tgt",
-        "/abs/src", "/abs/tgt", 0);
+      "pkg", "1.0.0", "sha1:deadbeef",
+      "src", ".tgt",
+      "/abs/src", "/abs/tgt", 0);
     assert(n > 0, "format wrote bytes");
     assert_eq(load8(buf), 123, "starts with {");
     assert_eq(load8(buf + n - 1), 10, "ends with newline");
@@ -299,12 +299,12 @@ fn test_audit_format_link() {
     # And when it IS set, the field shows up at the tail.
     var buf2 = alloc(4096);
     var n2 = audit_format_link(buf2, 4096,
-        "pkg", "1.0.0", "sha1:deadbeef",
-        "src", ".tgt",
-        "/abs/src", "/abs/tgt",
-        "/var/backup/20260523-153042-pkg-foo");
+      "pkg", "1.0.0", "sha1:deadbeef",
+      "src", ".tgt",
+      "/abs/src", "/abs/tgt",
+      "/var/backup/20260523-153042-pkg-foo");
     assert(_test_substr(buf2, n2, "\"backup_path\":\"/var/backup/20260523-153042-pkg-foo\"") >= 0,
-           "backup_path present when set");
+      "backup_path present when set");
     return 0;
 }
 
@@ -324,9 +324,9 @@ fn test_audit_escapes_quotes() {
     test_group("audit: JSON escaping");
     var buf = alloc(4096);
     var n = audit_format_link(buf, 4096,
-        "pkg", "1.0", "h",
-        "src", "evil\"target",          # embedded quote
-        "/a/s", "/has\\back", 0);       # embedded backslash
+      "pkg", "1.0", "h",
+      "src", "evil\"target",          # embedded quote
+      "/a/s", "/has\\back", 0);       # embedded backslash
     assert(_test_substr(buf, n, "\\\"target") >= 0, "quote escaped");
     assert(_test_substr(buf, n, "\\\\back") >= 0, "backslash escaped");
     return 0;
@@ -515,11 +515,11 @@ fn test_audit_reader_roundtrip() {
     var audit_path = load64(env + 8);
 
     audit_append_link_r("pkgA", "1.0", "sha1:aaa",
-        "srcA", ".tgtA", "/abs/srcA", "/abs/tgtA", 0);
+      "srcA", ".tgtA", "/abs/srcA", "/abs/tgtA", 0);
     audit_append_link_r("pkgB", "2.0", "sha1:bbb",
-        "srcB", ".tgtB", "/abs/srcB", "/abs/tgtB", 0);
+      "srcB", ".tgtB", "/abs/srcB", "/abs/tgtB", 0);
     audit_append_unlink_r("pkgA", "1.0", "sha1:aaa",
-        "srcA", ".tgtA", "/abs/srcA", "/abs/tgtA");
+      "srcA", ".tgtA", "/abs/srcA", "/abs/tgtA");
 
     var entries = audit_read(audit_path);
     assert_eq(vec_len(entries), 3, "read back 3 entries");
@@ -574,9 +574,9 @@ fn test_audit_reader_refuses_interior_malformed() {
     file_write(fd, content, strlen(content));
     file_close(fd);
 
-    var r = audit_read_r(audit_path);
-    assert_eq(is_err_result(r), 1, "corrupt trail is an error, not a short read");
-    assert_eq(load64(r + 8), HapiArCorrupt, "reported as HapiArCorrupt");
+    var t, v = audit_read_r(audit_path);
+    assert_eq(is_err_result(t), 1, "corrupt trail is an error, not a short read");
+    assert_eq(v, HapiArCorrupt, "reported as HapiArCorrupt");
     assert_eq(audit_corrupt_line(), 2, "names the offending line");
 
     # Every destructive consumer must refuse rather than act on a
@@ -621,9 +621,9 @@ fn test_audit_reader_reads_past_256k() {
     var raw = _hmw_slurp(audit_path, &before);
     assert(before > 262144, "fixture really is past the old cap");
 
-    var r = audit_read_r(audit_path);
-    assert_eq(is_err_result(r), 0, "reads without error");
-    assert_eq(vec_len(load64(r + 8)), 1000, "every entry is visible, not just the first 256 KB");
+    var t, v = audit_read_r(audit_path);
+    assert_eq(is_err_result(t), 0, "reads without error");
+    assert_eq(vec_len(v), 1000, "every entry is visible, not just the first 256 KB");
 
     _test_clear_env();
     return 0;
@@ -639,9 +639,9 @@ fn test_audit_reader_absent_vs_unreadable() {
     var audit_path = load64(env + 8);
 
     # Absent: Ok(empty), and the verbs still succeed.
-    var r0 = audit_read_r(audit_path);
-    assert_eq(is_err_result(r0), 0, "absent trail is not an error");
-    assert_eq(vec_len(load64(r0 + 8)), 0, "absent trail reads as empty");
+    var r0_t, r0_v = audit_read_r(audit_path);
+    assert_eq(is_err_result(r0_t), 0, "absent trail is not an error");
+    assert_eq(vec_len(r0_v), 0, "absent trail reads as empty");
 
     # Present but unreadable: an error, not empty.
     audit_ensure_dir();
@@ -650,9 +650,9 @@ fn test_audit_reader_absent_vs_unreadable() {
     file_close(fd);
     assert_eq(sys_chmod(audit_path, 0), 0, "trail made unreadable");
 
-    var r1 = audit_read_r(audit_path);
-    assert_eq(is_err_result(r1), 1, "unreadable trail is an error");
-    assert_eq(load64(r1 + 8), HapiArOpenFailed, "reported as HapiArOpenFailed");
+    var r1_t, r1_v = audit_read_r(audit_path);
+    assert_eq(is_err_result(r1_t), 1, "unreadable trail is an error");
+    assert_eq(r1_v, HapiArOpenFailed, "reported as HapiArOpenFailed");
     assert_eq(cmd_rollback(), 1, "rollback refuses an unreadable trail");
 
     sys_chmod(audit_path, 0x1A4);
@@ -720,14 +720,14 @@ fn test_cmd_unlink_refuses_user_mutation() {
     assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "user-mutated symlink preserved");
     var probe = link_probe(zrc);
     assert_eq(_har_cstr_eq(link_probe_target(probe), "/tmp/elsewhere"), 1,
-              "still points where user pointed it");
+      "still points where user pointed it");
 
     # The OTHER two (unmutated) symlinks should be gone.
     var zenv = alloc(strlen(scope) + 16);
     memcpy(zenv, scope, strlen(scope));
     memcpy(zenv + strlen(scope), "/.zshenv\x00", 9);
     assert_eq(link_probe_kind(link_probe(zenv)), HAPI_LP_ABSENT,
-              "unmutated symlinks still removed");
+      "unmutated symlinks still removed");
 
     _test_clear_env();
     return 0;
@@ -774,7 +774,7 @@ fn test_cmd_rollback_through_link_unlink_link() {
 
     assert_eq(cmd_rollback(), 0, "rollback succeeds");
     assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT,
-              "symlink absent after rollback through link/unlink/link");
+      "symlink absent after rollback through link/unlink/link");
 
     _test_clear_env();
     return 0;
@@ -820,7 +820,7 @@ fn test_cmd_rollback_stops_at_marker() {
     # Should reverse only the unlink (back to linked state), not the
     # original link beyond the marker.
     assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK,
-              "rollback re-created link (stopped at marker)");
+      "rollback re-created link (stopped at marker)");
 
     _test_clear_env();
     return 0;
@@ -1148,7 +1148,7 @@ fn test_cmd_sync_idempotent_clean_tree() {
     assert_eq(cmd_sync("docs/examples/dotfiles-zsh"), 0, "second sync succeeds");
     var size_after_second = _test_file_size(audit_path);
     assert_eq(size_after_second, size_after_first,
-              "second sync on a clean tree produced zero audit entries");
+      "second sync on a clean tree produced zero audit entries");
 
     _test_clear_env();
     return 0;
@@ -1225,15 +1225,15 @@ fn test_strict_mode_rejects_unknown_section() {
     var src = "[package]\nname = \"x\"\nversion = \"1.0\"\n[weird]\nfoo = \"bar\"\n";
 
     # Lenient (default): parses cleanly.
-    var r1 = hapi_mf_parse_header_r(src, strlen(src));
-    assert_eq(is_ok(r1), 1, "lenient parser accepts unknown section");
+    var r1_t, r1_v = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(r1_t), 1, "lenient parser accepts unknown section");
 
     # Strict: rejected with HapiMfUnknownSection.
     hapi_mf_set_strict(1);
-    var r2 = hapi_mf_parse_header_r(src, strlen(src));
+    var r2_t, r2_v = hapi_mf_parse_header_r(src, strlen(src));
     hapi_mf_set_strict(0);
-    assert_eq(is_err_result(r2), 1, "strict parser returns Err");
-    assert_eq(load64(r2 + 8), HapiMfUnknownSection, "code is HapiMfUnknownSection");
+    assert_eq(is_err_result(r2_t), 1, "strict parser returns Err");
+    assert_eq(r2_v, HapiMfUnknownSection, "code is HapiMfUnknownSection");
     return 0;
 }
 
@@ -1242,14 +1242,14 @@ fn test_strict_mode_rejects_unknown_key() {
 
     var src = "[package]\nname = \"x\"\nversion = \"1.0\"\nauthor = \"me\"\n";
 
-    var r1 = hapi_mf_parse_header_r(src, strlen(src));
-    assert_eq(is_ok(r1), 1, "lenient parser tolerates `author`");
+    var r1_t, r1_v = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(r1_t), 1, "lenient parser tolerates `author`");
 
     hapi_mf_set_strict(1);
-    var r2 = hapi_mf_parse_header_r(src, strlen(src));
+    var r2_t, r2_v = hapi_mf_parse_header_r(src, strlen(src));
     hapi_mf_set_strict(0);
-    assert_eq(is_err_result(r2), 1, "strict parser returns Err");
-    assert_eq(load64(r2 + 8), HapiMfUnknownKey, "code is HapiMfUnknownKey");
+    assert_eq(is_err_result(r2_t), 1, "strict parser returns Err");
+    assert_eq(r2_v, HapiMfUnknownKey, "code is HapiMfUnknownKey");
     return 0;
 }
 
@@ -1265,14 +1265,14 @@ target = \".a\"
 mode = \"copy\"
 ";
 
-    var r1 = hapi_mf_parse_header_r(src, strlen(src));
-    assert_eq(is_ok(r1), 1, "lenient parser tolerates `mode`");
+    var r1_t, r1_v = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_ok(r1_t), 1, "lenient parser tolerates `mode`");
 
     hapi_mf_set_strict(1);
-    var r2 = hapi_mf_parse_header_r(src, strlen(src));
+    var r2_t, r2_v = hapi_mf_parse_header_r(src, strlen(src));
     hapi_mf_set_strict(0);
-    assert_eq(is_err_result(r2), 1, "strict parser returns Err");
-    assert_eq(load64(r2 + 8), HapiMfUnknownKey, "code is HapiMfUnknownKey");
+    assert_eq(is_err_result(r2_t), 1, "strict parser returns Err");
+    assert_eq(r2_v, HapiMfUnknownKey, "code is HapiMfUnknownKey");
     return 0;
 }
 
@@ -1290,9 +1290,9 @@ target = \".a\"
 ";
 
     hapi_mf_set_strict(1);
-    var r = hapi_mf_parse_header_r(src, strlen(src));
+    var t, v = hapi_mf_parse_header_r(src, strlen(src));
     hapi_mf_set_strict(0);
-    assert_eq(is_ok(r), 1, "strict accepts fully-known schema");
+    assert_eq(is_ok(t), 1, "strict accepts fully-known schema");
     return 0;
 }
 
@@ -1448,7 +1448,7 @@ fn test_cmd_checkpoint_marker_stops_rollback() {
 
     cmd_rollback();
     assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK,
-              "marker bounded rollback: link restored, not chased past marker");
+      "marker bounded rollback: link restored, not chased past marker");
 
     _test_clear_env();
     return 0;
@@ -1511,11 +1511,11 @@ fn test_cap_path_within_basics() {
 
     # Prefix-byte-collision but different path component — must not match.
     assert_eq(_cap_path_within("/etc/myprojectextra", "/etc/myproject"), 0,
-              "byte-prefix collision rejected (boundary on /)");
+      "byte-prefix collision rejected (boundary on /)");
 
     # Trailing slash on prefix is tolerated.
     assert_eq(_cap_path_within("/etc/myproject/foo", "/etc/myproject/"), 1,
-              "trailing slash on prefix tolerated");
+      "trailing slash on prefix tolerated");
 
     # Parent path, not within child prefix.
     assert_eq(_cap_path_within("/etc", "/etc/myproject"), 0, "parent != within child");
@@ -1530,9 +1530,9 @@ fn test_cap_check_denies_outside_home_and_allowlist() {
 
     cap_set_home("/home/macro");
     cap_set_allowlist(0);
-    var r = cap_check_root_r("/etc/myproject");
-    assert_eq(is_err_result(r), 1, "denied when no allowlist + outside home");
-    assert_eq(load64(r + 8), HapiCapDenied, "code is HapiCapDenied");
+    var t, v = cap_check_root_r("/etc/myproject");
+    assert_eq(is_err_result(t), 1, "denied when no allowlist + outside home");
+    assert_eq(v, HapiCapDenied, "code is HapiCapDenied");
     cap_set_home(0);
     return 0;
 }
@@ -1542,8 +1542,8 @@ fn test_cap_check_allows_inside_home() {
 
     cap_set_home("/home/macro");
     cap_set_allowlist(0);
-    var r = cap_check_root_r("/home/macro/projects/x");
-    assert_eq(is_ok(r), 1, "inside-home path allowed without allowlist entry");
+    var t, v = cap_check_root_r("/home/macro/projects/x");
+    assert_eq(is_ok(t), 1, "inside-home path allowed without allowlist entry");
     cap_set_home(0);
     return 0;
 }
@@ -1553,17 +1553,17 @@ fn test_cap_check_allows_listed_root() {
 
     cap_set_home("/home/macro");
     cap_set_allowlist("/etc/myproject:/srv/app");
-    var r = cap_check_root_r("/etc/myproject");
-    assert_eq(is_ok(r), 1, "exact-match allowlist entry passes");
+    var t, v = cap_check_root_r("/etc/myproject");
+    assert_eq(is_ok(t), 1, "exact-match allowlist entry passes");
 
-    var r2 = cap_check_root_r("/srv/app/sub/path");
-    assert_eq(is_ok(r2), 1, "subdir of allowlist entry passes");
+    var r2_t, r2_v = cap_check_root_r("/srv/app/sub/path");
+    assert_eq(is_ok(r2_t), 1, "subdir of allowlist entry passes");
 
-    var r3 = cap_check_root_r("/etc/myprojectextra");
-    assert_eq(is_err_result(r3), 1, "byte-prefix collision still denied");
+    var r3_t, r3_v = cap_check_root_r("/etc/myprojectextra");
+    assert_eq(is_err_result(r3_t), 1, "byte-prefix collision still denied");
 
-    var r4 = cap_check_root_r("/tmp/random");
-    assert_eq(is_err_result(r4), 1, "non-listed path denied");
+    var r4_t, r4_v = cap_check_root_r("/tmp/random");
+    assert_eq(is_err_result(r4_t), 1, "non-listed path denied");
 
     cap_set_home(0);
     cap_set_allowlist(0);
@@ -1751,16 +1751,16 @@ fn test_cap_check_rejects_dotdot_escape() {
 
     # The bypass case: /home/user/../etc looks like it starts
     # with /home/user but actually resolves to /etc.
-    var r = cap_check_root_r("/home/user/../etc");
-    assert_eq(is_err_result(r), 1, "escape via .. is denied");
+    var t, v = cap_check_root_r("/home/user/../etc");
+    assert_eq(is_err_result(t), 1, "escape via .. is denied");
 
     # Legitimate under-$HOME path still allowed.
-    var r2 = cap_check_root_r("/home/user/dotfiles");
-    assert_eq(is_ok(r2), 1, "honest subpath still allowed");
+    var r2_t, r2_v = cap_check_root_r("/home/user/dotfiles");
+    assert_eq(is_ok(r2_t), 1, "honest subpath still allowed");
 
     # And $HOME itself.
-    var r3 = cap_check_root_r("/home/user");
-    assert_eq(is_ok(r3), 1, "$HOME itself still allowed");
+    var r3_t, r3_v = cap_check_root_r("/home/user");
+    assert_eq(is_ok(r3_t), 1, "$HOME itself still allowed");
 
     cap_set_home(0);
     cap_set_allowlist(0);
@@ -1776,11 +1776,11 @@ fn test_cap_check_normalizes_allowlist_entries() {
     # The malformed entry must not gate access to /escape via
     # byte-prefix match — the entry normalizes to /escape, so
     # paths under /escape pass, but /etc/myproject paths do NOT.
-    var r1 = cap_check_root_r("/etc/myproject/anything");
-    assert_eq(is_err_result(r1), 1, "malformed allowlist entry no longer gates /etc/myproject");
+    var r1_t, r1_v = cap_check_root_r("/etc/myproject/anything");
+    assert_eq(is_err_result(r1_t), 1, "malformed allowlist entry no longer gates /etc/myproject");
 
-    var r2 = cap_check_root_r("/srv/legit/sub");
-    assert_eq(is_ok(r2), 1, "honest allowlist entry still works");
+    var r2_t, r2_v = cap_check_root_r("/srv/legit/sub");
+    assert_eq(is_ok(r2_t), 1, "honest allowlist entry still works");
 
     cap_set_home(0);
     cap_set_allowlist(0);
@@ -1857,7 +1857,7 @@ fn test_open_nofollow_refuses_symlink() {
     # And the backup copy, which rides it, still refuses a symlink source
     # (F-003's standing guarantee, now routed through the shim).
     assert(hapi_backup_copy(lnk, _fsl_path_join(scope, "snap")) < 0,
-           "backup_copy refuses a symlink source");
+      "backup_copy refuses a symlink source");
 
     _test_clear_env();
     return 0;
@@ -1884,7 +1884,7 @@ fn test_backup_tag_is_sanitized() {
     assert_eq(seps, 0, "no path separator survives");
     assert(load8(evil) != 46, "cannot begin with a dot");
     assert_eq(_har_cstr_eq(_hbk_safe_tag("plain-pkg_1.0"), "plain-pkg_1.0"), 1,
-              "an ordinary name is untouched");
+      "an ordinary name is untouched");
     assert_eq(_har_cstr_eq(_hbk_safe_tag(0), "pkg"), 1, "a null name falls back");
 
     # End to end: the composed path stays under the user's directory.
@@ -1892,7 +1892,7 @@ fn test_backup_tag_is_sanitized() {
     var scope = load64(env);
     var bk = _fsl_path_join(scope, "bk");
     var composed = hapi_backup_compose_path(bk, "../../../pwned",
-                                            _fsl_path_join(scope, ".f"));
+      _fsl_path_join(scope, ".f"));
     assert_eq(_fsl_within(composed, bk), 1, "snapshot stays inside the named directory");
     _test_clear_env();
     return 0;
@@ -1909,9 +1909,9 @@ fn test_canonical_arg_normalizes() {
     var messy = _fsl_path_join(scope, "./a/../b//c");
     var clean = fsl_canonical_arg(messy);
     assert_eq(_har_cstr_eq(clean, _fsl_path_join(scope, "b/c")), 1,
-              "`.`, `..` and `//` all collapse");
+      "`.`, `..` and `//` all collapse");
     assert_eq(_har_cstr_eq(fsl_canonical_arg(scope), scope), 1,
-              "an already-clean path is unchanged");
+      "an already-clean path is unchanged");
     _test_clear_env();
     return 0;
 }
@@ -1927,7 +1927,7 @@ fn test_link_create_refuses_trailing_slash() {
     var bad = _fsl_path_join(scope, "resid/");
     assert(link_create("../src", bad) < 0, "trailing slash refused");
     assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, "resid"))),
-              HAPI_LP_ABSENT, "no directory was created");
+      HAPI_LP_ABSENT, "no directory was created");
     _test_clear_env();
     return 0;
 }
@@ -1965,7 +1965,7 @@ fn test_mkdir_parents_mode_split() {
     assert_eq(link_create("../../../ref", viacreate), 0, "link_create makes parents");
     assert(xstat(_fsl_path_join(scope, "viacreate"), st) >= 0, "stat link_create dir");
     assert_eq(load64(st + STAT_MODE) & 0xFFF, ref_mode,
-              "link_create parents follow umask, not a hardcoded 0700");
+      "link_create parents follow umask, not a hardcoded 0700");
     _test_clear_env();
     return 0;
 }
@@ -2023,13 +2023,13 @@ fn test_resolve_path_follows_intermediate_symlinks() {
     var resolved = fsl_resolve_path(through);
     assert(resolved != 0, "resolution succeeds");
     assert_eq(_har_cstr_eq(resolved, _fsl_path_join(outside, "foo")), 1,
-              "resolves through the symlinked component");
+      "resolves through the symlinked component");
 
     # A component that does not exist yet is kept literally — hapi
     # creates parent directories, so an absent parent is routine.
     var absent = _fsl_path_join(scope, "nope/deeper");
     assert_eq(_har_cstr_eq(fsl_resolve_path(absent), absent), 1,
-              "absent components are kept literally");
+      "absent components are kept literally");
 
     _test_clear_env();
     return 0;
@@ -2094,12 +2094,12 @@ fn test_link_refuses_symlinked_component_escape() {
     # destroyed the file before 1.0.8.
     assert_eq(cmd_link(pkg, 1), 1, "--force does not override the escape");
     assert_eq(link_probe_kind(link_probe(precious)), HAPI_LP_FILE,
-              "the file outside the scope is untouched");
+      "the file outside the scope is untouched");
 
     # Nothing was recorded either.
-    var tr = audit_read_default_r();
-    assert_eq(is_err_result(tr), 0, "trail readable");
-    assert_eq(vec_len(load64(tr + 8)), 0, "no audit entry for a refused escape");
+    var tr_t, tr_v = audit_read_default_r();
+    assert_eq(is_err_result(tr_t), 0, "trail readable");
+    assert_eq(vec_len(tr_v), 0, "no audit entry for a refused escape");
 
     hapi_unlink(precious);
     cap_set_home(0);
@@ -2129,25 +2129,25 @@ fn test_manifest_write_refuses_unrepresentable() {
     memcpy(quoted, "ev", 2); store8(quoted + 2, 34);      # "
     memcpy(quoted + 3, "il", 2); store8(quoted + 5, 0);
     assert_eq(manifest_append_link_row(mpath, quoted, ".ok"),
-              0 - HapiMfwUnrepresentable, "quote in source refused");
+      0 - HapiMfwUnrepresentable, "quote in source refused");
     assert_eq(manifest_append_link_row(mpath, "ok", quoted),
-              0 - HapiMfwUnrepresentable, "quote in target refused");
+      0 - HapiMfwUnrepresentable, "quote in target refused");
 
     var backslash = alloc(6);
     memcpy(backslash, "a", 1); store8(backslash + 1, 92); # \
     memcpy(backslash + 2, "b", 1); store8(backslash + 3, 0);
     assert_eq(manifest_append_link_row(mpath, backslash, ".ok"),
-              0 - HapiMfwUnrepresentable, "backslash refused");
+      0 - HapiMfwUnrepresentable, "backslash refused");
 
     var newline = alloc(6);
     memcpy(newline, "a", 1); store8(newline + 1, 10);     # \n
     memcpy(newline + 2, "b", 1); store8(newline + 3, 0);
     assert_eq(manifest_append_link_row(mpath, newline, ".ok"),
-              0 - HapiMfwUnrepresentable, "newline refused");
+      0 - HapiMfwUnrepresentable, "newline refused");
 
     # An ordinary row still writes.
     assert_eq(manifest_append_link_row(mpath, "plain", ".plain"), 0,
-              "an ordinary row still appends");
+      "an ordinary row still appends");
 
     # And adopt refuses BEFORE moving anything.
     var scope = load64(env);
@@ -2164,7 +2164,7 @@ fn test_manifest_write_refuses_unrepresentable() {
     file_close(fd);
     assert_eq(cmd_adopt(evil, pkg), 1, "adopt refuses an unrepresentable name");
     assert_eq(link_probe_kind(link_probe(evil)), HAPI_LP_FILE,
-              "the file was not moved");
+      "the file was not moved");
 
     hapi_unlink(evil);
     _test_clear_env();
@@ -2312,9 +2312,9 @@ fn test_canonicalize_honours_cap() {
     test_group("canonical: canonicalize refuses rather than overflowing");
 
     var src = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"s\"\ntarget = \".t\"\n";
-    var r = hapi_mf_parse_header_r(src, strlen(src));
-    assert_eq(is_err_result(r), 0, "fixture manifest parses");
-    var m = load64(r + 8);
+    var t, v = hapi_mf_parse_header_r(src, strlen(src));
+    assert_eq(is_err_result(t), 0, "fixture manifest parses");
+    var m = v;
 
     # Full-size run establishes the true length.
     var big = alloc(65536);
@@ -2358,14 +2358,14 @@ fn test_audit_entry_honours_cap() {
 
     var buf = alloc(4096);
     var full = audit_format_link(buf, 4096, "pkg", "1.0", "h",
-                                 "src", ".tgt", "/abs/src", "/abs/tgt", 0);
+      "src", ".tgt", "/abs/src", "/abs/tgt", 0);
     assert(full > 0, "composes at full size");
 
     var small = alloc(full + 16);
     var i = 0;
     while (i < full + 16) { store8(small + i, 170); i = i + 1; }
     var n = audit_format_link(small, full - 1, "pkg", "1.0", "h",
-                              "src", ".tgt", "/abs/src", "/abs/tgt", 0);
+      "src", ".tgt", "/abs/src", "/abs/tgt", 0);
     assert_eq(n, 0 - 1, "refuses with -1 when the entry does not fit");
     var clean = 1;
     i = full - 1;
@@ -2388,7 +2388,7 @@ fn test_audit_entry_honours_cap() {
     var cap = audit_entry_size("pkg", "1.0", "h", "src", ctrl, "/a", "/b", 0);
     var wide = alloc(cap);
     var wn = audit_format_link(wide, cap, "pkg", "1.0", "h",
-                               "src", ctrl, "/a", "/b", 0);
+      "src", ctrl, "/a", "/b", 0);
     assert(wn > 0, "sized buffer composes an escape-heavy entry");
     assert(cap >= wn, "size hint bounds the escaped entry");
     return 0;
@@ -2401,9 +2401,9 @@ fn test_audit_entry_honours_cap() {
 # Hash the canonical form of a literal manifest source. Returns
 # a heap cstring "sha1c:" + 40 hex on success, 0 on parse failure.
 fn _test_canonical_hash_of(src): i64 {
-    var r = hapi_mf_parse_header_r(src, strlen(src));
-    if (is_err_result(r) == 1) { return 0; }
-    var m = load64(r + 8);
+    var t, v = hapi_mf_parse_header_r(src, strlen(src));
+    if (is_err_result(t) == 1) { return 0; }
+    var m = v;
     var buf = alloc(65536);
     var n = hapi_mf_canonicalize(m, buf, 65536);
     var digest[20];
@@ -2548,7 +2548,7 @@ fn test_backup_to_link_force_snapshots_file() {
 
     # Target should now be a symlink.
     assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_SYMLINK,
-              "target is now a symlink");
+      "target is now a symlink");
 
     # Find the backup_path in the audit trail and read it back.
     var entries = audit_read(audit_path);
@@ -2599,7 +2599,7 @@ fn test_backup_to_skips_symlink_conflict() {
     # No backup directory should have been created — symlink
     # conflicts skip the snapshot.
     assert_eq(link_probe_kind(link_probe(bdir)), HAPI_LP_ABSENT,
-              "backup dir untouched (no file conflict)");
+      "backup dir untouched (no file conflict)");
 
     _test_clear_env();
     return 0;
@@ -2629,9 +2629,9 @@ fn test_backup_to_dry_run_writes_no_backup() {
     # Backup dir not created under dry-run; the conflict file is
     # still in place (no unlink happened).
     assert_eq(link_probe_kind(link_probe(bdir)), HAPI_LP_ABSENT,
-              "no backup dir under dry-run");
+      "no backup dir under dry-run");
     assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_FILE,
-              "conflict file untouched under dry-run");
+      "conflict file untouched under dry-run");
 
     _test_clear_env();
     return 0;
@@ -2705,13 +2705,13 @@ fn test_link_refuses_missing_source() {
 
     var tgt = _fsl_path_join(scope, ".zshrc");
     assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_ABSENT,
-              "no dangling symlink was created");
+      "no dangling symlink was created");
     assert_eq(_test_file_size(audit_path), 0, "no audit entry for a refused row");
 
     # --force must not override it: the link would still point at nothing.
     assert_eq(cmd_link(pkg, 1), 1, "--force does not override a missing source");
     assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_ABSENT,
-              "--force created no dangling symlink either");
+      "--force created no dangling symlink either");
 
     # sync is cmd_link without --force, so it inherits the refusal.
     assert_eq(cmd_sync(pkg), 1, "sync refuses a missing source too");
@@ -2737,7 +2737,7 @@ fn test_status_reports_dangling_link() {
     var tgt = _fsl_path_join(scope, ".zshrc");
     hapi_unlink(_fsl_path_join(pkg, "zshrc"));
     assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_SYMLINK,
-              "the symlink itself is still on disk");
+      "the symlink itself is still on disk");
 
     assert_eq(cmd_status(pkg), 1, "a dangling link is drift -> exit 1");
 
@@ -2761,11 +2761,11 @@ fn test_link_refuses_source_through_a_file() {
 
     assert_eq(cmd_link(pkg, 0), 1, "link refuses a source through a file");
     assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, ".leaf"))),
-              HAPI_LP_ABSENT, "no dangling symlink for the ENOTDIR row");
+      HAPI_LP_ABSENT, "no dangling symlink for the ENOTDIR row");
     # ...and the healthy row in the same package was not written either:
     # the refusal is a whole-run refusal, like every other conflict.
     assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, ".zshrc"))),
-              HAPI_LP_ABSENT, "the run refused as a whole");
+      HAPI_LP_ABSENT, "the run refused as a whole");
 
     _test_clear_env();
     return 0;

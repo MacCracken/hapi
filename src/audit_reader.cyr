@@ -341,9 +341,9 @@ fn audit_read_r(path): Result {
 # Retained for call sites that genuinely cannot act on an error; the
 # three trail-consuming verbs use `audit_read_default_r` instead.
 fn audit_read(path): i64 {
-    var r = audit_read_r(path);
-    if (is_err_result(r) == 1) { return vec_new(); }
-    return load64(r + 8);
+    var r_t, r_v = audit_read_r(path);
+    if (is_err_result(r_t) == 1) { return vec_new(); }
+    return r_v;
 }
 
 # Convenience: read the default trail (audit_trail_path()).

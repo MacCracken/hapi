@@ -24,8 +24,8 @@ fn cmd_checkpoint(): i64 {
         _hck_puts("checkpoint (dry-run; no entry written)\n");
         return 0;
     }
-    var r = audit_append_rollback_marker_r();
-    if (is_err_result(r) == 1) {
+    var r_t, r_v = audit_append_rollback_marker_r();
+    if (is_err_result(r_t) == 1) {
         _hck_eputs("hapi: audit-trail write failed (could not append checkpoint)\n");
         return 1;
     }

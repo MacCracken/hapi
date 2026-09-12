@@ -90,8 +90,8 @@ fn _hlnk_resolve_manifest(arg): i64 {
     var n = strlen(arg);
     if (n >= 5) {
         if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
-            && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
-            && load8(arg + n - 1) == 108) {
+          && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
+          && load8(arg + n - 1) == 108) {
             return fsl_canonical_arg(arg);
         }
     }
@@ -220,9 +220,9 @@ fn cmd_link(pkg_arg, force): i64 {
     }
     var pkg_dir_abs = _fsl_path_dirname(manifest_path);
 
-    var mr = hapi_mf_parse_file_r(manifest_path);
-    if (is_err_result(mr) == 1) {
-        var code = load64(mr + 8);
+    var mr_t, mr_v = hapi_mf_parse_file_r(manifest_path);
+    if (is_err_result(mr_t) == 1) {
+        var code = mr_v;
         var msg = hapi_mf_err_msg(code);
         _hlnk_eputs("hapi: ");
         eprint(msg, strlen(msg));
@@ -231,7 +231,7 @@ fn cmd_link(pkg_arg, force): i64 {
         _hlnk_eputs(")\n");
         return 1;
     }
-    var m = load64(mr + 8);
+    var m = mr_v;
 
     var manifest_hash = audit_manifest_hash(manifest_path);
     if (manifest_hash == 0) {
@@ -382,8 +382,8 @@ fn cmd_link(pkg_arg, force): i64 {
         kw = kw + 1;
     }
     if (hapi_dry_run() == 0 && will_write > 0) {
-        var pf = audit_preflight_r();
-        if (is_err_result(pf) == 1) {
+        var pf_t, pf_v = audit_preflight_r();
+        if (is_err_result(pf_t) == 1) {
             _hlnk_eputs("hapi: audit trail is not writable; refusing to link\n  ");
             _hlnk_eputs(audit_trail_path());
             _hlnk_eputs("\n  every hapi write must be auditable; nothing was changed\n");
@@ -413,7 +413,7 @@ fn cmd_link(pkg_arg, force): i64 {
             # so the bytes survive without our help.
             if (act == LINK_ACT_CONFLICT_FILE && hapi_backup_dir() != 0) {
                 backup_path = hapi_backup_compose_path(
-                    hapi_backup_dir(), pkg_name_cstr, abs_tgt);
+                  hapi_backup_dir(), pkg_name_cstr, abs_tgt);
                 if (hapi_dry_run() == 0) {
                     var brc = hapi_backup_copy(abs_tgt, backup_path);
                     if (brc < 0) {
@@ -462,12 +462,12 @@ fn cmd_link(pkg_arg, force): i64 {
                 var lnk = load64(pl);
                 var src_cstr = _fsl_str_to_cstr(hapi_link_source(lnk));
                 var tgt_cstr = _fsl_str_to_cstr(hapi_link_target(lnk));
-                var ar = audit_append_link_r(pkg_name_cstr, pkg_ver_cstr,
-                                             manifest_hash,
-                                             src_cstr, tgt_cstr,
-                                             abs_src, abs_tgt,
-                                             backup_path);
-                if (is_err_result(ar) == 1) {
+                var ar_t, ar_v = audit_append_link_r(pkg_name_cstr, pkg_ver_cstr,
+                  manifest_hash,
+                  src_cstr, tgt_cstr,
+                  abs_src, abs_tgt,
+                  backup_path);
+                if (is_err_result(ar_t) == 1) {
                     # Undo exactly THIS link — never the earlier ones in
                     # the run. Those are in the trail and `unlink` /
                     # `rollback` can reverse them; unwinding them here

@@ -149,9 +149,9 @@ fn cmd_list(): i64 {
     # interior line, is a conflict with the user's own history — surface
     # it rather than acting on a partial view. An ABSENT trail is still
     # Ok(empty): that is the first-run case, not a failure.
-    var tr = audit_read_default_r();
-    if (is_err_result(tr) == 1) {
-        var trc = load64(tr + 8);
+    var tr_t, tr_v = audit_read_default_r();
+    if (is_err_result(tr_t) == 1) {
+        var trc = tr_v;
         _hls_eputs("hapi: ");
         _hls_eputs(hapi_ar_err_msg(trc));
         if (trc == HapiArCorrupt) {
@@ -162,7 +162,7 @@ fn cmd_list(): i64 {
         _hls_eputs("\n  refusing to act on a partial view of the trail\n");
         return 1;
     }
-    var trail = load64(tr + 8);
+    var trail = tr_v;
     var pkgs = _hls_unique_pkgs(trail);
     var npkg = vec_len(pkgs);
 

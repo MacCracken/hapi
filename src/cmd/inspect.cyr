@@ -143,9 +143,9 @@ fn cmd_inspect(path): i64 {
         return 2;
     }
     var mpath = _hapi_inspect_resolve(path);
-    var res = hapi_mf_parse_file_r(mpath);
-    if (is_err_result(res) == 1) {
-        var code = load64(res + 8);
+    var res_t, res_v = hapi_mf_parse_file_r(mpath);
+    if (is_err_result(res_t) == 1) {
+        var code = res_v;
         var msg = hapi_mf_err_msg(code);
         _hi_eputs("hapi: ");
         eprint(msg, strlen(msg));
@@ -154,7 +154,7 @@ fn cmd_inspect(path): i64 {
         _hi_eputs(")\n");
         return 1;
     }
-    var m = load64(res + 8);
+    var m = res_v;
     _hapi_inspect_print_manifest(m);
     return 0;
 }

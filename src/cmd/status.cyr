@@ -73,9 +73,9 @@ fn cmd_status(pkg_arg): i64 {
     }
     var pkg_dir_abs = _fsl_path_dirname(manifest_path);
 
-    var mr = hapi_mf_parse_file_r(manifest_path);
-    if (is_err_result(mr) == 1) {
-        var code = load64(mr + 8);
+    var mr_t, mr_v = hapi_mf_parse_file_r(manifest_path);
+    if (is_err_result(mr_t) == 1) {
+        var code = mr_v;
         var msg = hapi_mf_err_msg(code);
         _hst_eputs("hapi: ");
         eprint(msg, strlen(msg));
@@ -84,7 +84,7 @@ fn cmd_status(pkg_arg): i64 {
         _hst_eputs(")\n");
         return 1;
     }
-    var m = load64(mr + 8);
+    var m = mr_v;
 
     var scope_root = _hlnk_scope_root_override;
     if (scope_root == 0) { scope_root = getenv("HOME"); }
