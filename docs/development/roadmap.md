@@ -227,3 +227,170 @@ Items that don't earn a place no matter the version.
 - [`../adr/`](../adr/) — design records (all five frozen at v1.0)
 - [`../benchmarks.md`](../benchmarks.md) — `sync` baseline + trend
 - [`../../CHANGELOG.md`](../../CHANGELOG.md) — release history
+
+---
+
+## Moving the cyrius pin to 6.6.6
+
+**Current pin: `cyrius = "6.6.2"`** — four releases behind. Nothing must change first;
+this is a pin bump and a rebuild.
+
+### The O_APPEND question, answered first
+
+hapi **does** use `O_APPEND`, in the one place where 6.6.6's Windows defect would have been
+worst: `_audit_append_durable` (`src/audit.cyr:363`), the append-only audit trail. Before
+6.6.6 a PE build's `O_APPEND` did not append — it overwrote from offset 0 — which for this
+function would have meant each entry silently erasing the trail's head while
+`file_lock` + `fsync` + the torn-tail guard all reported success.
+
+**hapi is not exposed, and here is the check rather than the assumption.** hapi builds
+exactly three targets, all of them in `.github/workflows/ci.yml`: x86_64 Linux, aarch64
+Linux (compile-only), and agnos (compile-only, smoked under mirshi). There is no PE target,
+no `CYRIUS_TARGET_WIN` / `_TARGET_PE` branch anywhere in `src/` — the only conditional in
+the tree is `CYRIUS_TARGET_AGNOS`, at 11 sites — and no Windows runner in CI. The audit
+comment's *"portable across all three targets"* means those three, not Windows.
+
+So: not a live corruption, but **the reason to carry the fix anyway is that this repo is one
+Windows target away from it**, and `src/audit.cyr:363` is the line that would go first.
+
+### What else was checked
+
+- **Other open sites, all safe by construction.** `src/backup.cyr:230` and
+  `src/manifest_write.cyr:202` both open `O_WRONLY|O_CREAT|O_EXCL` — deliberately *not*
+  `O_TRUNC` (backup.cyr:221–224 records why: with `O_TRUNC` a second copy in the same second
+  silently overwrote the first). `O_EXCL` disposition behaviour is unchanged by 6.6.6.
+- **No shape the new refusals catch.** Zero `struct` declarations in `src/`, so no
+  struct/vector copy, no by-value struct parameter, no struct-valued return, no top-level
+  struct call. **All 8 `: Result` fns were walked** (`hapi_mf_parse_header_r`,
+  `hapi_mf_parse_file_r`, `audit_read_r`, `audit_read_default_r`, `cap_check_root_r`,
+  `audit_preflight_r`, `_audit_append_bytes`, `audit_append_rollback_marker_r`) and every
+  `return` in them is `Ok(…)`, `Err(…)` or a tail call to another `_r` — none returns a bare
+  scalar, so the new "a pair-return fn must return a same-shaped pair" refusal is satisfied.
+  No `async fn`, no `operator` fn, no SIMD-returning fn.
+- **The 6.6.6 `file_append_locked` fix does not reach hapi's trail, and that is by design.**
+  6.6.6 makes `lib/io.cyr`'s `file_append_locked` loop until the whole record lands — before
+  it, one `write` could append a **prefix** and return that count as success, so a caller
+  testing `< 0` logged a torn line and called it written. hapi does not use it (audit.cyr:343
+  records why), and `_audit_append_durable`'s own write is `var w = file_write(fd, buf, n);`
+  followed by `if (w != n) { return 0 - 5; }` — it does not loop, but it **detects** the short
+  write and reports it rather than claiming success, so the torn-line class cannot occur.
+  Worth knowing, because the stdlib's new looping behaviour is now the stronger of the two:
+  if F-018's two missing properties ever land upstream, hapi's hand-rolled path can retire.
+- **Also clean:** no `var` inside a top-level block (zero top-level `{` / `if (` / `while (`
+  at column 0), no raw `SYS_STATFS`, no `lib/regression.cyr` consumer, no `vec_*` of hapi's
+  own, no symlink in `lib/` (which matters here: 6.6.6 makes `cyrius deps` **fail** rather
+  than skip when a `lib/*.cyr` cannot be hashed, and a stale dangling symlink must be removed
+  rather than bypassed — hapi's `lib/` is 43 regular files, nothing to clear). The only
+  duplicate top-level global is `var r = main();` in `src/main.cyr` and `src/test.cyr`, two
+  entry files that are never co-linked.
+
+### ⚠ One new stdlib primitive to look at deliberately, not adopt by reflex
+
+6.6.6 adds **`file_replace_atomic`, which writes THROUGH a symlink**, and changes
+`file_write_atomic` to **keep an existing file's mode** (it was `0644 & ~umask`). hapi
+currently uses neither — `manifest_write.cyr` hand-rolls tmp-write-then-rename.
+
+- The `file_write_atomic` mode-preservation change is the behaviour hapi wants: a dotfile
+  manager that rewrites a user's file should not silently reset its mode to 0644.
+- **`file_replace_atomic`'s write-through-symlink semantics are the opposite of what a
+  symlink farm wants** in most paths. hapi's whole model is that `~/.zshrc` *is* a link into
+  the package tree; writing through it edits the package source instead of the link. If a
+  future slot reaches for it, that has to be a decision, not a default.
+
+### What it gains
+
+6.6.3's `#inline`-disarms-`#derive` fix; 6.6.4's ≥64 KB string-literal read-back fix (hapi's
+longest literal is 3,668 B in `src/manifest.cyr`, so not reachable today, but the manifest
+format is the part of hapi that grows); 6.6.5's aggregate-layout fix, silently wrong since
+5.8.17, and three corrected ENTRY stack bases; and 6.6.6's nine new refusals.
+
+### Verify after bumping
+
+`cyrius deps` → `cyrius build` → `cyrius test` → `cyrius build --aarch64` and
+`cyrius build --agnos` (both compile-only gates; the roadmap's own note that `--aarch64`
+silently stopped building at 1.0.2 and nothing noticed until 1.0.4 is exactly why these must
+be re-run, not assumed) → `scripts/concurrency-test.sh` (F-012, needs two racing processes)
+→ the agnos smoke under mirshi (F-027, F-031). Then re-run the audit-trail append path
+specifically and confirm the torn-tail guard still refuses a trail whose last byte is not
+`\n` — that guard reads the file's tail, and it is the one hapi behaviour that a change in
+open-flag handling would silently alter.
+
+---
+
+## Adopting cmdit (CLI parsing)
+
+**Demand-gated, not a forced sweep.** hapi is a Tier-2 verb tool in the 2026-06-25 ecosystem
+CLI review. Nothing here is owed; the v1.0 command surface stays frozen through it, so every
+delta below is identical or additive. Checked against the tree, not assumed.
+
+### What is hand-rolled, and where
+
+All of it is `src/main.cyr` — `argc(`/`argv(`/`flags_`/`FLAG_ERR_` appear nowhere else in `src/`,
+`tests/` or `scripts/`, and `cyrius.cyml` has no stdlib `"flags"`.
+
+- **Verbs** — a `_hapi_argeq` chain over `argv(1)`, ten verbs (`:197-386`); `--version`/`-v`/
+  `--help`/`-h` match only at `argv(1)` (`:192-195`). No args → usage, exit 2 (`:185-188`); unknown
+  verb → stderr `hapi: unknown command: X` + usage on stdout, exit 2 (`:388-392`).
+- **Per-verb flag loops** re-walk `argv(2..)` with each verb's subset of `--force`, `--strict`,
+  `--dry-run`, `--root <path>`, `--backup-to <dir>`. The usage text calls the last three "global";
+  they are per-verb subsets, and nothing is accepted before the verb.
+- **Helpers** — `_hapi_flag_value` refuses a flag-shaped value (`:114-119`, F-019); three message
+  helpers render the exit-2 errors (`:124-178`); `_hapi_apply_root` cap-checks mid-walk (`:137-154`).
+- **Positionals** are capped at 1, 2 (adopt) or 0 (rollback/checkpoint/list); a *missing* one is
+  each `cmd_*`'s own usage line (e.g. `src/cmd/link.cyr:205`). Help: `hapi_print_usage` (`:58-87`, stdout).
+
+### Site → cmdit
+
+- `argv(1)` chain → `cmdit_new("hapi")` + ten `cmdit_verb` + `cmdit_dispatch` on
+  `cmdit_verb_matched`; `-v` → `cmdit_version_short(h, 118)`. Ids are registration order, so future
+  verbs (`merge`, `fmt` above) append at the end (stiva's `src/main.cyr:77` warning).
+- Per-verb loops → one child handle per verb + `cmdit_parse_verb`, registering only that verb's
+  subset. **Not** cmdit globals — those bind on every verb and would break the exit-2 rejections in
+  `guides/dry-run.md:23`, `guides/backup-to.md:18` and `guides/capability.md:30-32`.
+- Bools → `cmdit_bool`; `--root`/`--backup-to` → `cmdit_str` + `cmdit_metavar`; the setters and
+  `_hapi_apply_root` run after parse. Extra positional → `cmdit_require_positionals_max` (the token
+  is `cmdit_positional(vh, N)`); missing value → `CMDIT_ERR_MISSING_VALUE` + `cmdit_err_flag`. Both
+  existing messages survive verbatim.
+- Delete `args_init()` (`:182`): `cmdit_argv` calls it, and each Linux call allocates a fresh 2 MB
+  buffer (`lib/args.cyr:132-143`).
+
+### Gaps (none block)
+
+- [ ] **F-019 returns without a guard.** cmdit takes the next token as the value whatever it looks
+  like, so `link --root --dry-run pkg` would again set root = `--dry-run`. Re-check
+  `load8(v) == 45` after parse. One-consumer evidence for an opt-in "no flag-shaped value" modifier.
+- [ ] **Unknown-flag text.** cmdit exposes no accessor for the offending token, so
+  ``unexpected flag for `link`: --x`` becomes `<prog>: unknown flag` unless the caller re-walks
+  `cmdit_verb_argv(h)`. Exit 2 either way; pick one and record it.
+- [ ] **Help stays hand-written** — cmdit's renderers write stderr, `hapi --help` writes stdout,
+  and the frozen verb set keeps the drift risk low.
+- [ ] **CHANGELOG as additive:** `--root=PATH`/`--backup-to=DIR`, `--` (an alternative to the
+  `./-name` advice at `:129`), lone `-` as a positional, `hapi <verb> --help`/`--version` (exit 2
+  today). Error precedence shifts on multi-error lines: unknown flags beat extra positionals, and
+  parse errors (2) beat a cap denial (1).
+
+### The manifest change
+
+Append after `[deps]` (`cyrius.cyml:14-21`). `"args"` and `"io"` are listed, there is no `"flags"`
+to drop, and no pin bump is needed (the dist compiles on 6.6.2):
+
+```
+[deps.cmdit]
+git = "https://github.com/MacCracken/cmdit.git"
+tag = "1.3.0"
+modules = ["dist/cmdit.cyr"]
+```
+
+### Tests and the output-identity bar
+
+- [ ] **No argv-level test exists** — `tests/hapi.tcyr` drives `cmd_*` and cannot include
+  `main.cyr`. Move the dispatcher into `src/cli.cyr` (already included, `tests/hapi.tcyr:20`) and
+  drive the pure `cmdit_dispatch_argv` with synthetic argv.
+- [ ] No golden either: capture `(stdout, stderr, exit)` from the current binary for every verb ×
+  {each accepted/rejected flag, extra positional, missing and flag-shaped value, `--help`/`-h`/
+  `--version`/`-v`}, plus no args and an unknown verb. It must diff clean but for the deltas above.
+- [ ] Must pass unmodified: `scripts/agnos-smoke.sh:44-48,85-87` (`--version`; unknown verb exits 2
+  on agnos), `scripts/concurrency-test.sh` (`adopt`), `release.yml:143-150` (`hapi ${VERSION}`).
+
+Pointers: cmdit's `README.md` (API reference) and `docs/adr/0002-verb-dispatch.md`; stiva's
+`src/main.cyr` is the worked verb-tool migration.
