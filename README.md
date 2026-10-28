@@ -84,7 +84,8 @@ file with `hapi adopt ~/.somerc somepackage`.
 - [`docs/development/state.md`](docs/development/state.md) — live
   state snapshot.
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) —
-  post-v1.0 plan (v1.x patches + v2.0 candidates).
+  the plan: 1.2.0 (cmdit) through 1.7.0, upstream-gated work, and
+  v2.0 candidates.
 
 ## License
 

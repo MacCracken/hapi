@@ -3,6 +3,7 @@
 **Discovered:** 2026-05-20 during M7 dotfile dogfooding (zsh package figlet-row removal)
 **Severity:** Low — ergonomic papercut with a working rotation
 **Affects:** hapi 0.6.0 through 0.7.0 (and forward until a sync-prune surface lands)
+**Scheduled:** 1.3.0, with no-arg sync — [`../roadmap.md`](../roadmap.md) § *1.3.0 — sync: no argument, and `--prune`*
 
 ## Summary
 

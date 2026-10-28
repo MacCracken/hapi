@@ -2,6 +2,7 @@
 
 **Discovered:** 2026-05-24 during a drive-move / system-restart dotfile recovery
 **Severity:** Low — ergonomic; a known post-v1.0 roadmap item, now with dogfood pressure
+**Scheduled:** 1.3.0, with `sync --prune` — [`../roadmap.md`](../roadmap.md) § *1.3.0 — sync: no argument, and `--prune`*
 **Affects:** hapi 1.0.0 — `hapi sync` requires a `<package-dir|hapi.cyml>` argument; there is no no-arg form that syncs every tracked package.
 
 ## Summary

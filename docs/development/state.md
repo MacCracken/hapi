@@ -362,11 +362,14 @@ means downstream packagers (zugot recipes) and user manifests.
 The 2026-10-28 P(-1) pass is **closed** in 1.1.1. Every finding is
 fixed except F-059, accepted as an agnos kernel gap
 ([`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)).
-Two upstream follow-ups came out of it, neither filed here: mirshi's
-four divergences from the kernel, and agnos ext2's missing
-rename-over-existing.
+Two upstream follow-ups came out of it, both filed upstream on
+2026-10-28: mirshi's divergences from the kernel (its roadmap, § *Open
+defects — kernel fidelity*) and agnos ext2's missing
+rename-over-existing (an agnos issue file). [`roadmap.md`](roadmap.md)
+§ *Upstream pendings* has the paths.
 
 Forward-looking work is **not** listed here — it lives in
 [`roadmap.md`](roadmap.md), which carries only work that has not
-shipped. Open dogfood papercuts are in
+shipped. **Next is 1.2.0, adopting cmdit**; 1.3.0 – 1.7.0 are planned
+there one theme per minor, with upstream-gated work listed apart. Open dogfood papercuts are in
 [`issues/`](issues/) (4 open, 7 archived).

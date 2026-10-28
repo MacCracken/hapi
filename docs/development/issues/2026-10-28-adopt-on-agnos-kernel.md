@@ -47,13 +47,15 @@ clean refusal for a corruption window, which is the wrong direction.
 
 ## What closes it
 
-- **agnos kernel**: rename#31 replacing an existing destination on ext2
-  (file upstream, in the agnos repo).
+- **agnos kernel**: rename#31 replacing an existing destination on ext2 —
+  filed 2026-10-28 as agnos
+  `docs/development/issues/2026-10-28-ext2-rename-cannot-replace-an-existing-file.md`.
 - **hapi**, once that lands: open the lock with `O_DIRECTORY`, and decide
   how to lock on agnos — flock#59 on a directory, if the kernel adds it, or a
   regular lock file.
-- **mirshi** (file upstream): match the kernel on the four calls, so the CI
-  run can see this class at all.
+- **mirshi**: match the kernel on the four calls, so the CI run can see
+  this class at all — filed 2026-10-28 in mirshi's
+  `docs/development/roadmap.md`, § *Open defects — kernel fidelity*.
 
 ## Stopgap
 

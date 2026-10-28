@@ -114,7 +114,7 @@ format, and **always** before a major-version cut:
 - [`docs/guides/`](docs/guides/) — Task-oriented how-tos
 - [`docs/examples/`](docs/examples/) — Runnable example manifests
 - [`docs/development/state.md`](docs/development/state.md) — Live state snapshot
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Forward-looking plan (post-v1.0 buckets; shipped work is deleted from it, not struck through)
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Forward-looking plan: the 1.x releases one theme per minor, upstream-gated work, and the v2.0 bucket (shipped work is deleted from it, not struck through)
 - [`docs/development/issues/`](docs/development/issues/) — Open dogfood papercuts + design-gap reports (one file per issue; archived on close)
 - [`docs/audit/`](docs/audit/) — Completed P(-1) security/hardening passes, one dated file per pass; findings carry stable `F-NNN` ids
 - [`docs/benchmarks.md`](docs/benchmarks.md) — `sync` scaling trend + the acceptance gates a release must not regress
