@@ -5,22 +5,23 @@
 
 ## Version
 
-**1.1.0** (2026-10-28) — the cyrius 6.7 toolchain line: pin `6.6.20`
-→ `6.7.18`, `lib/` resynced. The previous release, 1.0.12, fixed an
-aarch64 hole: the `O_NOFOLLOW` in `hapi_open_nofollow` was the x86_64
-literal, which on arm64 is `O_LARGEFILE`, so F-003's TOCTOU defence was
-absent on aarch64 from 0.9.0 through 1.0.11. 1.1.0 also realigns the
-manifest writer with bayan 1.11.1's `---` delimiter rule (see
-`manifest_write.cyr` below). The suite passes 387 / 387 on x86_64 and
-on aarch64 under qemu. **Next is 1.1.1, the P(-1) audit
-and repairs** ([`roadmap.md`](roadmap.md)). The 1.0.x
-hardening arc closed at 1.0.10 — all twenty findings of the 2026-08-25
-P(-1) sweep are fixed. The v1.0 contract (command surface, manifest
-schema, audit-trail format) stayed frozen across the whole arc.
+**1.1.1** (2026-10-28) — the P(-1) audit and repairs, on the cyrius 6.7
+line (pin `6.7.18`). The pass,
+[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md), filed
+F-035 – F-059. Twenty-two are fixed here, four of them HIGH and all four
+on the capability boundary: `link --force` deleting a row's own source,
+`--root` through a symlink, `..` collapsed before its symlink, and an
+adopt that crashed outside the scope root. Two are retroactive and one
+is accepted (F-059, `adopt` on a real agnos kernel). The v1.0 contract
+(command surface, manifest schema, audit-trail line shape) is unchanged.
+Both suites pass on x86_64 and on aarch64 under qemu, and
+`tests/agnos.tcyr` also passes on agnos under mirshi.
 
 Release-by-release detail lives in
 [`../../CHANGELOG.md`](../../CHANGELOG.md), and the findings with their
-resolutions in [`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md).
+resolutions in [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)
+(and [`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md) for
+F-007 – F-034).
 This file is the *snapshot*, not a second changelog — it says what is
 true now, not how it got here.
 
@@ -38,8 +39,8 @@ v0.2.0 = M1, M0 scaffold 2026-05-19.
   pin exactly — nothing hand-edited, nothing left over from an
   earlier snapshot. Verify with
   `diff -rq lib ~/.cyrius/versions/6.7.18/lib`.
-- **Binary size**: the `CYRIUS_DCE=1` release binary is ~540 KB at
-  6.7.18 (195 KB at 6.6.20). The code segment is flat; the growth is
+- **Binary size**: the `CYRIUS_DCE=1` release binary is ~550 KB at
+  1.1.1 (543 KB at 1.1.0; 195 KB at 6.6.20). The code segment is flat; the growth is
   **data**. 6.7.18's `bayan` unconditionally includes the Unicode
   casefold / category / normalization tables, and DCE drops dead code
   but not data. hapi reaches none of it, and `sync` timing is
@@ -115,7 +116,12 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   `fsync`, `mkdir`'s length-not-mode second argument). Every
   wrapper now rides a native cyrius peer — the last locally
   declared syscall number, `AGNOS_SYS_READLINK`#70, went away in
-  1.0.4 when the 6.5.35 snapshot shipped `sys_readlink`.
+  1.0.4 when the 6.5.35 snapshot shipped `sys_readlink`. Also
+  `hapi_open_nofollow` (atomic on every target since 1.1.1 — the agnos
+  arm passes `O_NOFOLLOW` and keeps a 4096-byte readlink pre-check for
+  kernels before 1.56.53), and the two errno-free predicates agnos
+  needs: `hapi_excl_exists` and `hapi_open_absent` (stat-based there,
+  `-EEXIST` / `-ENOENT` on Linux).
 - `src/manifest.cyr` — `hapi.cyml` parser + canonical
   re-serializer. `hapi_mf_canonicalize(m, out, cap)` emits
   the fixed byte form used by the v0.8.0 `sha1c:`
@@ -129,7 +135,10 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   LF, or end of file), append inserts above it, and remove searches
   only above it. The bodies below it are markdown and never edited.
   The two sides are pinned against each other by the `1.1.0` section of
-  `tests/hapi.tcyr`; a bayan bump that moves the rule fails there. Uses the stdlib `sys_rename` /
+  `tests/hapi.tcyr`; a bayan bump that moves the rule fails there.
+  An appended row matches the file's line ending; a symlinked
+  `hapi.cyml` is refused (an atomic rename would replace the link); a
+  leftover `hapi.cyml.<pid>.tmp` is reported as such. Uses the stdlib `sys_rename` /
   `sys_fsync` wrappers (landed in cyrius 6.2.x) — shared by
   `adopt` / `rollback`. The 1.0.1-era `HapiSysno` enum
   (`HAPI_SYS_RENAME` / `HAPI_SYS_FSYNC`, x86_64-only literal
@@ -145,7 +154,12 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 - `src/audit_reader.cyr` — JSONL reader; hand-rolled scanner
   over the ADR 0002 field set
 - `src/fs_link.cyr` — symlink primitives (probe / compute
-  relative / create with mkdir-parents)
+  relative / create with mkdir-parents) and the physical-path layer:
+  `fsl_resolve_path` (every component followed, `..` popped against the
+  resolved prefix), `fsl_link_text` (ADR 0003's text, from the parent
+  the link physically sits in), and `fsl_lands_in` (does a target
+  resolve into a given directory — the package guard). `link_probe`
+  classifies with `stat`.
 - `src/cmd/inspect.cyr` — manifest dump
 - `src/cmd/link.cyr` — pre-flight + create + audit
 - `src/cmd/unlink.cyr` — trail-driven removal
@@ -165,20 +179,14 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 - `src/cmd/sync.cyr` — thin wrapper over `cmd_link` (link
   without `--force`); the verb communicates intent while
   the engine is shared
-- `src/cap.cyr` — `--root` capability check. Owns
-  `cap_check_root_r(path)`; resolves the arg to absolute,
-  lex-normalizes via `fsl_lexical_normalize` (collapses `.`
-  / `..`; closes the F-001 bypass — see
-  [`docs/audit/2026-05-23-audit.md`](../audit/2026-05-23-audit.md)),
-  implicitly allows `$HOME`, otherwise prefix-matches
-  against `HAPI_ALLOWED_ROOTS` (path-component boundary,
-  not byte boundary; each entry also lex-normalized). Test
-  hooks `cap_set_home` and `cap_set_allowlist` for unit tests.
-  Symlink-aware resolution is still open as F-002 — hapi-owned
-  work as of the 2026-08-25 audit, not a kavach dep gate. Also
-  owns `cap_within_scope(path, scope_root)`, the containment
-  predicate for a path hapi is about to WRITE (added 1.0.5 for
-  F-011; `adopt`'s `<file>` argument is a write target).
+- `src/cap.cyr` — the capability boundary. `cap_check_root_r(path)`
+  vets `--root` on the PHYSICALLY resolved root (1.1.1, F-051): inside
+  the resolved `$HOME`, or inside a resolved `HAPI_ALLOWED_ROOTS` entry
+  (path-component boundary; `/` contains everything). The spelling it
+  returns is lexically normalized, as before. `cap_target_allowed(path,
+  scope)` is the per-write check — resolved target inside resolved
+  scope, or allowlisted. Test hooks `cap_set_home` and
+  `cap_set_allowlist`.
 - `src/cli.cyr` — owns the process-wide `_hapi_dry_run`
   flag. Setter `hapi_set_dry_run(0|1)` and getter
   `hapi_dry_run()`. Every mutating cmd checks the flag
@@ -240,7 +248,7 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. **387 assertions across 95 test
+- `tests/hapi.tcyr` — primary suite. **469 assertions across 112 test
   groups.** Re-derive rather than recount by hand — these figures have
   rotted twice, and the per-tier breakdown below drifted 16 groups
   short before the 2026-08-26 sweep:
@@ -252,10 +260,17 @@ in-source magic-number `syscall(N, ...)` calls.)_
     | sort | uniq -c | sort -rn                 # per-tier breakdown
   ```
 
-  Groups by tier, as measured at 1.1.0: manifest 8, cap 7, backup 7,
-  rollback 6, manifest_write 6, link 6, dry-run 6, adopt 6, status 5,
-  canonical 5, audit_reader 5, fs_link 4, check 4+2, audit-repair 4,
-  audit 4, sync 3, list 3, unlink 2, checkpoint 1, agnos_compat 1.
+  Groups by tier, as measured at 1.1.1: link 10, cap 9, rollback 8,
+  manifest 8, manifest_write 8, check 8, backup 7, adopt 7, fs_link 6,
+  dry-run 6, status 5, canonical 5, audit_reader 5, audit-repair 4,
+  audit 4, unlink 4, sync 3, list 3, checkpoint 1, agnos_compat 1.
+- `tests/agnos.tcyr` — **55 assertions across 8 groups**, all
+  target-neutral: the agnos-conditional paths (no-follow open,
+  exclusive create, absent trail, trail and manifest round trips,
+  backup copy, the fs shims, and `link` / `status` / `unlink` with the
+  scope at `/`). `cyrius test` runs it on x86_64 and aarch64; the agnos
+  smoke builds it with `--agnos` and runs it under mirshi. Absolute
+  paths only, no chmod, no environment — what an agnos run allows.
 
 ### Harnesses
 
@@ -263,7 +278,7 @@ in-source magic-number `syscall(N, ...)` calls.)_
 beside it as shell harnesses. **CI runs both.**
 
 The suite itself also runs on aarch64 — `cyrius test --aarch64` under
-`qemu-aarch64` (387 / 387 at 1.1.0). **CI runs it** as of 1.0.12
+`qemu-aarch64` (469 / 469 and 55 / 55 at 1.1.1). **CI runs it** as of 1.0.12
 (`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
 qemu fails the step, it never skips). Before that the aarch64 step was
 compile-only, which is how the `O_NOFOLLOW` literal went unseen from
@@ -276,11 +291,20 @@ too.
   concurrent adopts → 16 files moved, 16 symlinks, 16 trail entries and
   **1** manifest row; 16/16 after.
 - `scripts/agnos-smoke.sh` — runs the `--agnos` build under mirshi.
-  Four checks: the binary loads and the agnos arg reader delivers argv,
+  Five checks: the binary loads and the agnos arg reader delivers argv,
   the envp gap is asserted rather than assumed, a relative package
-  argument is refused rather than silently mis-resolved (F-027,
-  verified on-target), and the exit-code contract holds there too. A
-  missing mirshi exits **2 = SKIP** and CI warns — never green.
+  argument is refused rather than silently mis-resolved (F-027), the
+  exit-code contract holds, and `tests/agnos.tcyr`'s agnos build passes
+  with zero failures. A missing prerequisite exits **2 = SKIP**, for dev
+  boxes; **CI fails on it** (F-043 — through 1.1.0 the runner had no
+  mirshi, so every run skipped).
+- `scripts/build-mirshi.sh` — how CI gets a mirshi: clones the pinned
+  tag (1.11.3) and builds it with hapi's own cyrius pin. ⚠ mirshi
+  differs from the real agnos kernel on four calls (readlink of an
+  over-long body, a directory open without `AO_DIRECTORY`, flock on a
+  directory fd, rename onto an existing file — the 2026-10-28 audit's
+  *Harness gap*), so a pass that touches the agnos arm should also run
+  on a QEMU-booted kernel.
 
 ## Dependencies
 
@@ -335,17 +359,14 @@ means downstream packagers (zugot recipes) and user manifests.
 
 ## Next
 
-The 1.0.x hardening arc is **closed** — all twenty findings of the
-2026-08-25 P(-1) sweep are fixed (1.0.5 → 1.0.10).
-
-**1.1.1 is the P(-1) audit and repairs** — the re-walk over the
-repaired write paths that the arc still owes (1.0.9, 1.0.10 and 1.0.12
-between them touched a path argument, a syscall and the audit-trail
-write path — all three of CLAUDE.md's re-run triggers), with aarch64 in
-scope and the repair candidates the 1.0.12 / 1.1.0 toolchain work
-turned up. Scope is in [`roadmap.md`](roadmap.md) § 1.1.1.
+The 2026-10-28 P(-1) pass is **closed** in 1.1.1. Every finding is
+fixed except F-059, accepted as an agnos kernel gap
+([`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)).
+Two upstream follow-ups came out of it, neither filed here: mirshi's
+four divergences from the kernel, and agnos ext2's missing
+rename-over-existing.
 
 Forward-looking work is **not** listed here — it lives in
 [`roadmap.md`](roadmap.md), which carries only work that has not
 shipped. Open dogfood papercuts are in
-[`issues/`](issues/) (3 open, 7 archived).
+[`issues/`](issues/) (4 open, 7 archived).

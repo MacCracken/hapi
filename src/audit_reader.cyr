@@ -273,12 +273,12 @@ fn audit_read_r(path): Result {
     _har_corrupt_line = 0;
     var entries = vec_new();
 
-    var fd = file_open(path, 0, 0);
+    var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) {
         # ENOENT is the legitimate "no trail yet" case. Anything else —
         # EACCES, EIO, EMFILE — is a real failure and must not read as
-        # an empty trail.
-        if (fd == 0 - 2) { return Ok(entries); }
+        # an empty trail. Through the shim: agnos has no errno (F-044).
+        if (hapi_open_absent(path, fd) == 1) { return Ok(entries); }
         return Err(HapiArOpenFailed);
     }
 

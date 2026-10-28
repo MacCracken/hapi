@@ -12,10 +12,10 @@
 #     what it created, by design)
 #
 # The trail's `link` entries record both `abs_source` and
-# `abs_target`. We recompute the expected relative-target via
-# fsl_compute_relative and compare to the symlink's actual
-# value — that's the "current state matches what we wrote"
-# check.
+# `abs_target`. We recompute the text `hapi link` would have
+# written (fsl_link_text_matches — today's, or 1.1.0's lexical
+# one) and compare to the symlink's actual value — that's the
+# "current state matches what we wrote" check.
 #
 # Exit codes:
 #   0  all in-scope symlinks removed (or none were live)
@@ -113,15 +113,14 @@ fn _hul_live_entries_for(trail, pkg_cstr): i64 {
     return live_entries;
 }
 
-# Compute the relative target that `hapi link` would have written
-# for this audit entry, so we can compare against the current
-# symlink and prove "this is the link we created."
-fn _hul_expected_rel(entry): i64 {
+# Is `current` a symlink text `hapi link` wrote for this audit entry?
+# That is the proof of "this is the link we created" — today's text or
+# the lexical-parent text of 1.1.0 and earlier (fsl_link_text_matches).
+fn _hul_is_ours(entry, current): i64 {
     var abs_tgt = hae_abs_target(entry);
     var abs_src = hae_abs_source(entry);
     if (abs_tgt == 0 || abs_src == 0) { return 0; }
-    var parent = _fsl_path_dirname(abs_tgt);
-    return fsl_compute_relative(parent, abs_src);
+    return fsl_link_text_matches(current, abs_tgt, abs_src);
 }
 
 # Remove one live entry. Returns:
@@ -143,8 +142,7 @@ fn _hul_remove_one(entry): i64 {
         return 1;
     }
     var current = link_probe_target(probe);
-    var expected = _hul_expected_rel(entry);
-    if (expected == 0 || _hul_cstr_eq(current, expected) == 0) {
+    if (_hul_is_ours(entry, current) == 0) {
         return 1;
     }
     if (hapi_dry_run() == 1) { return 0; }
@@ -202,6 +200,20 @@ fn cmd_unlink(pkg_arg): i64 {
         _hul_puts(pkg_arg);
         _hul_puts("` in the audit trail\n");
         return 0;
+    }
+
+    # Prove the trail takes a write before removing anything (F-055).
+    # Through 1.1.0 only `link` checked; unlink removed each symlink and
+    # THEN appended, so a torn tail or an unwritable trail left every link
+    # gone and none recorded — "unlinked 0 / 3", the links deleted anyway.
+    if (hapi_dry_run() == 0) {
+        var pf_t, pf_v = audit_preflight_r();
+        if (is_err_result(pf_t) == 1) {
+            _hul_eputs("hapi: audit trail is not writable; refusing to unlink\n  ");
+            _hul_eputs(audit_trail_path());
+            _hul_eputs("\n  every hapi write must be auditable; nothing was changed\n");
+            return 1;
+        }
     }
 
     var removed = 0;

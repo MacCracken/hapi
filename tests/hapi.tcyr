@@ -228,7 +228,7 @@ fn _test_scratch_dir(): i64 {
     store8(&buf + p, 0);
     var out = alloc(p + 1);
     memcpy(out, &buf, p + 1);
-    sys_mkdir(out, 0x1C0);
+    hapi_mkdir(out, 0x1C0);
     return out;
 }
 
@@ -369,7 +369,7 @@ fn test_link_probe() {
     var sp = alloc(dlen + 16);
     memcpy(sp, dir, dlen);
     memcpy(sp + dlen, "/symlink\x00", 9);
-    sys_symlink("target/x", sp);
+    hapi_symlink("target/x", sp);
     var fsym = link_probe(sp);
     assert_eq(link_probe_kind(fsym), HAPI_LP_SYMLINK, "symlink");
     assert_eq(memeq(link_probe_target(fsym), "target/x", 8), 1, "symlink target captured");
@@ -710,8 +710,8 @@ fn test_cmd_unlink_refuses_user_mutation() {
     var zrc = alloc(strlen(scope) + 16);
     memcpy(zrc, scope, strlen(scope));
     memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
-    sys_unlink(zrc);
-    sys_symlink("/tmp/elsewhere", zrc);
+    hapi_unlink(zrc);
+    hapi_symlink("/tmp/elsewhere", zrc);
 
     var rc = cmd_unlink("dotfiles-zsh");
     assert_eq(rc, 1, "unlink exits 1 when one entry refused");
@@ -1026,7 +1026,7 @@ fn test_cmd_adopt_refuses_symlink() {
     var src_file = alloc(strlen(scope) + 16);
     memcpy(src_file, scope, strlen(scope));
     memcpy(src_file + strlen(scope), "/.zshrc\x00", 8);
-    sys_symlink("/tmp/something", src_file);
+    hapi_symlink("/tmp/something", src_file);
 
     assert_eq(cmd_adopt(".zshrc", pkg), 1, "adopt of a symlink exits 1");
     # Symlink untouched
@@ -1168,7 +1168,7 @@ fn test_cmd_sync_creates_missing_links() {
     var zrc = alloc(strlen(scope) + 16);
     memcpy(zrc, scope, strlen(scope));
     memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
-    sys_unlink(zrc);
+    hapi_unlink(zrc);
     assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_ABSENT, "zshrc gone");
 
     assert_eq(cmd_sync("docs/examples/dotfiles-zsh"), 0, "sync exits 0");
@@ -1195,7 +1195,7 @@ fn test_cmd_sync_recovery_after_trail_loss() {
     # Simulate a drive move that carried $HOME + the package forward
     # but wiped $XDG_STATE_HOME: the relative symlinks survive, the
     # trail is gone.
-    sys_unlink(audit_path);
+    hapi_unlink(audit_path);
     assert_eq(_test_file_size(audit_path), 0, "audit trail wiped");
 
     var zrc = alloc(strlen(scope) + 16);
@@ -1378,7 +1378,7 @@ fn test_cmd_status_detects_missing() {
     var zrc = alloc(strlen(scope) + 16);
     memcpy(zrc, scope, strlen(scope));
     memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
-    sys_unlink(zrc);
+    hapi_unlink(zrc);
 
     assert_eq(cmd_status("docs/examples/dotfiles-zsh"), 1, "drift -> exit 1");
     _test_clear_env();
@@ -1395,8 +1395,8 @@ fn test_cmd_status_detects_wrong_target() {
     var zrc = alloc(strlen(scope) + 16);
     memcpy(zrc, scope, strlen(scope));
     memcpy(zrc + strlen(scope), "/.zshrc\x00", 8);
-    sys_unlink(zrc);
-    sys_symlink("/tmp/elsewhere", zrc);
+    hapi_unlink(zrc);
+    hapi_symlink("/tmp/elsewhere", zrc);
 
     assert_eq(cmd_status("docs/examples/dotfiles-zsh"), 1, "wrong target -> exit 1");
     _test_clear_env();
@@ -1805,7 +1805,7 @@ fn test_backup_copy_refuses_symlink_source() {
     var link = alloc(strlen(scratch) + 16);
     memcpy(link, scratch, strlen(scratch));
     memcpy(link + strlen(scratch), "/link\x00", 6);
-    sys_symlink(real, link);
+    hapi_symlink(real, link);
 
     var dst = alloc(strlen(scratch) + 16);
     memcpy(dst, scratch, strlen(scratch));
@@ -1818,6 +1818,531 @@ fn test_backup_copy_refuses_symlink_source() {
     var rc2 = hapi_backup_copy(real, dst);
     assert_eq(rc2, 0, "regular-file copy succeeds");
 
+    return 0;
+}
+
+# ============================================================
+# 1.1.1 — P(-1) audit repairs (docs/audit/2026-10-28-audit.md)
+# ============================================================
+
+# F-037: `hapi check` listed the package with `dir_list`, which answers an
+# empty vec for a directory it cannot read. A package dir with its read bit
+# cleared still opens its manifest by name (the search bit is enough), so
+# the F-028 orphan walk saw nothing and the verb printed `ok`, exit 0, with
+# an unclaimed file sitting in the package. Not meaningful as root (DAC is
+# bypassed), like the unreadable-trail test above.
+fn test_check_refuses_unlistable_package() {
+    test_group("check: an unlistable package dir is an error, not clean");
+
+    var env = _test_fresh_env();
+    var pkg = _test_make_package("zshrc", ".zshrc");
+    var orphan = _fsl_path_join(pkg, "orphaned-by-crash");
+    var fd = file_open(orphan, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    file_write(fd, "stranded", 8);
+    file_close(fd);
+    assert_eq(cmd_check(pkg, 0), 1, "the orphan is reported while the dir is readable");
+
+    assert_eq(sys_chmod(pkg, 0x0C9), 0, "package dir made unlistable (0311)");
+    assert_eq(cmd_check(pkg, 0), 1, "an unlistable package dir does not check clean");
+
+    sys_chmod(pkg, 0x1ED);
+    hapi_unlink(orphan);
+    assert_eq(cmd_check(pkg, 0), 0, "the restored package checks clean again");
+
+    _test_clear_env();
+    return 0;
+}
+
+# Bare `\n`s not preceded by `\r` in the file at `path` (-1 if unreadable),
+# and, through *crs, the number of `\r`s.
+fn _t111_bare_lf(path, crs): i64 {
+    var n = 0;
+    var buf = _hmw_slurp(path, &n);
+    if (buf == 0) { return 0 - 1; }
+    var bare = 0;
+    var cr = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(buf + i);
+        if (c == 13) { cr = cr + 1; }
+        if (c == 10) {
+            var prev = 0;
+            if (i > 0) { prev = load8(buf + i - 1); }
+            if (prev != 13) { bare = bare + 1; }
+        }
+        i = i + 1;
+    }
+    store64(crs, cr);
+    return bare;
+}
+
+# F-041: the appended row's template was LF-only, so `adopt` left a CRLF
+# manifest with mixed endings. Matching the ending needs the remove's
+# blank-line trim to understand CR too — without it, every adopt →
+# rollback on a CRLF manifest left one more blank line behind.
+fn test_manifest_append_matches_line_ending() {
+    test_group("manifest_write: an appended row matches the file's line ending");
+
+    var cr = 0;
+    var crlf = _tdl_manifest(_tdl_hdr_crlf(), "---\r\n# notes\r\n");
+    assert_eq(manifest_append_link_row(crlf, "n", ".n"), 0, "CRLF: append succeeds");
+    assert_eq(_t111_bare_lf(crlf, &cr), 0, "CRLF: no bare LF after the append");
+    assert_eq(_tdl_links(crlf), 2, "CRLF: the appended row is read");
+
+    var lf = _tdl_manifest(_TDL_HDR, "---\n# notes\n");
+    assert_eq(manifest_append_link_row(lf, "n", ".n"), 0, "LF: append succeeds");
+    _t111_bare_lf(lf, &cr);
+    assert_eq(cr, 0, "LF: no CR introduced");
+
+    # Round trips converge: the second cycle leaves exactly what the first did.
+    assert_eq(manifest_remove_link_row(crlf, "n", ".n"), 0, "CRLF: remove succeeds");
+    assert_eq(_t111_bare_lf(crlf, &cr), 0, "CRLF: no bare LF after the remove");
+    var n1 = _test_file_size(crlf);
+    manifest_append_link_row(crlf, "n", ".n");
+    manifest_remove_link_row(crlf, "n", ".n");
+    assert_eq(_test_file_size(crlf), n1, "CRLF: a second adopt/rollback cycle adds nothing");
+    assert_eq(_tdl_links(crlf), 1, "CRLF: the original row survives");
+    return 0;
+}
+
+# Plant `<manifest>.<our pid>.tmp` — the staging name this process's next
+# manifest write will try to create O_EXCL.
+fn _t111_plant_staging(manifest_path): i64 {
+    var pids = _hmw_itoa(sys_getpid());
+    var ml = strlen(manifest_path);
+    var pl = strlen(pids);
+    var stage = alloc(ml + 1 + pl + 5);
+    memcpy(stage, manifest_path, ml);
+    store8(stage + ml, 46);
+    memcpy(stage + ml + 1, pids, pl);
+    memcpy(stage + ml + 1 + pl, ".tmp\x00", 5);
+    _test_write_file(stage, "left by a crashed run");
+    return stage;
+}
+
+# F-038: rollback printed "manifest row not found" for EVERY failed row
+# removal and exited 0. When the rewrite itself failed — here a crashed
+# run's staging file holding this pid's name — the row stayed in the
+# manifest, its source had just been moved out of the package, and the
+# verb reported `rolled back 1 / 1`.
+fn test_rollback_reports_unremoved_manifest_row() {
+    test_group("rollback: a manifest row it could not remove is an error");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _test_make_package(0, 0);
+    var mpath = _fsl_path_join(pkg, "hapi.cyml");
+    var home_file = _fsl_path_join(scope, ".zshrc");
+    _test_write_file(home_file, "user content");
+    assert_eq(cmd_adopt(".zshrc", pkg), 0, "adopt succeeds");
+
+    var stage = _t111_plant_staging(mpath);
+    assert_eq(manifest_append_link_row(mpath, "x", ".x"), 0 - HapiMfwStagingExists,
+        "the writer names a staging leftover");
+    assert_eq(cmd_rollback(), 1, "rollback exits 1 when the row stays behind");
+    assert_eq(link_probe_kind(link_probe(home_file)), HAPI_LP_FILE, "the file is still restored");
+    assert_eq(_tdl_links(mpath), 1, "the row is still there, as reported");
+
+    hapi_unlink(stage);
+    _test_clear_env();
+    return 0;
+}
+
+fn _t111_cat(a, b): i64 {
+    var al = strlen(a);
+    var bl = strlen(b);
+    var out = alloc(al + bl + 1);
+    memcpy(out, a, al);
+    memcpy(out + al, b, bl);
+    store8(out + al + bl, 0);
+    return out;
+}
+
+# A package dir whose hapi.cyml is the `p` header plus `rows`.
+fn _t111_pkg(rows): i64 { return _t111_pkg_at(_test_scratch_dir(), rows); }
+
+fn _t111_pkg_at(pkg, rows): i64 {
+    hapi_mkdir(pkg, 0x1ED);
+    var hdr = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n";
+    var hl = strlen(hdr);
+    var rl = strlen(rows);
+    var body = alloc(hl + rl + 1);
+    memcpy(body, hdr, hl);
+    memcpy(body + hl, rows, rl);
+    store8(body + hl + rl, 0);
+    _test_write_file(_fsl_path_join(pkg, "hapi.cyml"), body);
+    return pkg;
+}
+
+# F-045: scope containment was decided on the resolved path (F-015), but
+# nothing asked whether the target resolves into the PACKAGE. With
+# `~/.ssh -> <pkg>/ssh`, the row `ssh/config -> .ssh/config` names the
+# row's own source as its target. `link` called it an existing regular
+# file; `link --force` deleted the user's only copy, planted a symlink to
+# itself, and reported `linked 1 / 1`. `adopt ~/.ssh/config` moved the
+# package's file to a second name and left a dangling link in the package.
+fn test_link_refuses_target_inside_package() {
+    test_group("link / adopt: a target that resolves into the package is refused");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    # The package lives INSIDE the scope, as a dotfiles repo in $HOME does —
+    # otherwise the scope check refuses first and this test proves nothing.
+    var pkg = _t111_pkg_at(_fsl_path_join(scope, "dotfiles"),
+        "\n[[link]]\nsource = \"ssh/config\"\ntarget = \".ssh/config\"\n");
+    hapi_mkdir(_fsl_path_join(pkg, "ssh"), 0x1ED);
+    var src = _fsl_path_join(pkg, "ssh/config");
+    _test_write_file(src, "only copy");
+    assert_eq(hapi_symlink(_fsl_path_join(pkg, "ssh"), _fsl_path_join(scope, ".ssh")), 0,
+        "~/.ssh is a symlink to the package's ssh/");
+
+    assert_eq(cmd_link(pkg, 0), 1, "link refuses");
+    assert_eq(cmd_link(pkg, 1), 1, "link --force refuses too");
+    assert_eq(link_probe_kind(link_probe(src)), HAPI_LP_FILE, "the source is still a regular file");
+    assert_eq(_test_file_size(src), 9, "with every byte");
+
+    # Header only, so a duplicate-row refusal cannot stand in for this one.
+    _test_write_file(_fsl_path_join(pkg, "hapi.cyml"), "[package]\nname = \"p\"\nversion = \"1.0.0\"\n");
+    assert_eq(cmd_adopt(".ssh/config", pkg), 1, "adopt refuses the package's own file");
+    assert_eq(link_probe_kind(link_probe(src)), HAPI_LP_FILE, "and leaves it where it was");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(pkg, "config"))), HAPI_LP_ABSENT,
+        "no second copy in the package");
+
+    _test_clear_env();
+    return 0;
+}
+
+# `<scope>/.config -> data/deep/config`, one level deeper than `.config`
+# itself, and a package with the row `rc -> .config/rc`.
+fn _t111_deep_config(scope): i64 {
+    var pkg = _t111_pkg("\n[[link]]\nsource = \"rc\"\ntarget = \".config/rc\"\n");
+    _test_write_file(_fsl_path_join(pkg, "rc"), "rc-content");
+    hapi_mkdir(_fsl_path_join(scope, "data"), 0x1ED);
+    hapi_mkdir(_fsl_path_join(scope, "data/deep"), 0x1ED);
+    hapi_mkdir(_fsl_path_join(scope, "data/deep/config"), 0x1ED);
+    hapi_symlink("data/deep/config", _fsl_path_join(scope, ".config"));
+    return pkg;
+}
+
+# F-046: the link text was computed from the target's LEXICAL parent. Under
+# a symlinked parent at a different depth the link dangled, while `link`
+# reported success, `status` said OK and a re-run said up to date.
+fn test_link_text_from_physical_parent() {
+    test_group("link: the link text is computed from where the link physically sits");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _t111_deep_config(scope);
+    var tgt = _fsl_path_join(scope, ".config/rc");
+
+    assert_eq(cmd_link(pkg, 0), 0, "link succeeds");
+    assert_eq(_test_file_size(tgt), 10, "the link resolves to the source");
+    assert_eq(cmd_status(pkg), 0, "status agrees");
+    assert_eq(cmd_link(pkg, 0), 0, "a re-run is a no-op");
+    assert_eq(cmd_unlink("p"), 0, "unlink succeeds");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_ABSENT, "and removes it");
+
+    _test_clear_env();
+    return 0;
+}
+
+# The other half of F-046: a link 1.1.0 wrote under a symlinked parent
+# carries the lexical text. It is broken, `status` must now say so, and it
+# is still hapi's — unlink removes it.
+fn test_unlink_removes_a_legacy_link() {
+    test_group("unlink: a link 1.1.0 wrote under a symlinked parent is still ours");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _t111_deep_config(scope);
+    var tgt = _fsl_path_join(scope, ".config/rc");
+    var abs_src = _fsl_path_join(pkg, "rc");
+    var legacy = fsl_compute_relative(_fsl_path_dirname(tgt), abs_src);
+    assert(_hlnk_cstr_eq(legacy, fsl_link_text(tgt, abs_src)) == 0, "the two texts differ here");
+    assert_eq(hapi_symlink(legacy, tgt), 0, "a 1.1.0-shaped link is planted");
+    var a_t, a_v = audit_append_link_r("p", "1.0.0", "sha1:0", "rc", ".config/rc", abs_src, tgt, 0);
+    assert_eq(is_err_result(a_t), 0, "and recorded in the trail");
+
+    assert_eq(cmd_status(pkg), 1, "status does not call the dangling link OK");
+    assert_eq(cmd_unlink("p"), 0, "unlink accepts it as ours");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_ABSENT, "and removes it");
+
+    _test_clear_env();
+    return 0;
+}
+
+# `rows` naming one link whose target is `abs_target` written relative to
+# the root "/" — what a manifest under `--root /` (or agnos's HOME=/) says.
+fn _t111_root_row(source, abs_target): i64 {
+    var a = "\n[[link]]\nsource = \"";
+    var b = "\"\ntarget = \"";
+    var c = "\"\n";
+    var sl = strlen(source);
+    var tl = strlen(abs_target) - 1;               # drop the leading '/'
+    var out = alloc(strlen(a) + sl + strlen(b) + tl + strlen(c) + 1);
+    var p = 0;
+    memcpy(out + p, a, strlen(a)); p = p + strlen(a);
+    memcpy(out + p, source, sl); p = p + sl;
+    memcpy(out + p, b, strlen(b)); p = p + strlen(b);
+    memcpy(out + p, abs_target + 1, tl); p = p + tl;
+    memcpy(out + p, c, strlen(c)); p = p + strlen(c);
+    store8(out + p, 0);
+    return out;
+}
+
+# F-047: both containment helpers skipped their trailing-slash strip for a
+# prefix of "/" (it would empty it) and then required a second '/' at
+# path[1], so "/" contained nothing: `--root /` with HAPI_ALLOWED_ROOTS=/
+# refused every row, and agnos — which stages HOME=/ — every row of every
+# verb.
+fn test_root_prefix_contains_everything() {
+    test_group("cap: `/` as a scope or allowlist root contains every absolute path");
+
+    assert_eq(_cap_path_within("/p", "/"), 1, "/p is inside /");
+    assert_eq(_cap_path_within("/", "/"), 1, "/ is inside itself");
+    assert_eq(_fsl_within("/p/q", "/"), 1, "the resolved-path helper agrees");
+    assert_eq(_cap_path_within("p", "/"), 0, "a relative path is not");
+
+    var env = _test_fresh_env();
+    var home = load64(env);
+    link_set_scope_root("/");
+    var tgt = _fsl_path_join(home, ".rc");
+    var pkg = _t111_pkg(_t111_root_row("rc", tgt));
+    _test_write_file(_fsl_path_join(pkg, "rc"), "rc-content");
+    assert_eq(cmd_link(pkg, 0), 0, "link under scope / succeeds");
+    assert_eq(_test_file_size(tgt), 10, "and the link resolves");
+    assert_eq(cmd_unlink("p"), 0, "unlink under scope / succeeds");
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-048: `check` tested a row's source for ABSENT alone, while `link` and
+# `status` share fsl_source_present, which also refuses ERROR. A source
+# that runs through a regular file (`f/sub`: ENOTDIR) passed `check` and
+# was refused by `link` — whose message sends the user to `check`.
+fn test_check_reports_source_through_a_file() {
+    test_group("check: a row source through a regular file is reported");
+
+    var pkg = _t111_pkg("\n[[link]]\nsource = \"f/sub\"\ntarget = \".sub\"\n");
+    _test_write_file(_fsl_path_join(pkg, "f"), "a file, not a directory");
+    assert_eq(cmd_check(pkg, 0), 1, "check reports it");
+    return 0;
+}
+
+# F-049: link_probe split file from directory by opening the path O_RDONLY
+# and trying getdents. A FIFO at a target blocked that open until a writer
+# came — `link` and `status` hung — and any failed open read as FILE, so a
+# mode-000 directory was reported as a regular file. Against the old probe
+# the first assertion does not fail; it never returns.
+fn test_link_probe_fifo_and_unreadable_dir() {
+    test_group("fs_link: link_probe classifies a FIFO and a mode-000 directory");
+
+    var d = _test_scratch_dir();
+    var fifo = _fsl_path_join(d, "fifo");
+    assert_eq(sys_mknodat(AT_FDCWD, fifo, 0x1000 | 0x1A4, 0), 0, "FIFO planted");
+    assert_eq(link_probe_kind(link_probe(fifo)), HAPI_LP_FILE, "a FIFO is classified, without blocking");
+
+    var locked = _fsl_path_join(d, "locked");
+    hapi_mkdir(locked, 0x1ED);
+    assert_eq(sys_chmod(locked, 0), 0, "directory made mode 000");
+    assert_eq(link_probe_kind(link_probe(locked)), HAPI_LP_DIRECTORY, "still a directory");
+    sys_chmod(locked, 0x1ED);
+    return 0;
+}
+
+# F-051: `cap_check_root_r` granted `--root` on its spelling. `~/trap`
+# with `trap -> /outside` read as "within $HOME"; every later check then
+# resolved the target AND the scope root through `trap`, found the target
+# contained, and wrote into /outside — `--force` deleted a file there.
+fn test_root_grant_is_decided_physically() {
+    test_group("cap: a --root reached through a symlink is granted where it resolves");
+
+    var home = _test_scratch_dir();
+    var outside = _test_scratch_dir();
+    cap_set_home(home);
+    cap_set_allowlist("");
+    var trap = _fsl_path_join(home, "trap");
+    hapi_symlink(outside, trap);
+    var real = _fsl_path_join(home, "real");
+    hapi_mkdir(real, 0x1ED);
+
+    var r1_t, r1_v = cap_check_root_r(trap);
+    assert_eq(is_err_result(r1_t), 1, "a symlinked --root leading out of $HOME is denied");
+    var r2_t, r2_v = cap_check_root_r(real);
+    assert_eq(is_err_result(r2_t), 0, "a real directory in $HOME is granted");
+    cap_set_allowlist(outside);
+    var r3_t, r3_v = cap_check_root_r(trap);
+    assert_eq(is_err_result(r3_t), 0, "and the symlinked one is granted once its destination is");
+
+    cap_set_allowlist(0);
+    cap_set_home(0);
+    return 0;
+}
+
+# F-052: the resolver lexically collapsed `..` before following symlinks,
+# so `a/..` with `a -> /outside/deep` came out as the directory holding
+# `a`; the kernel goes to `/outside`.
+fn test_resolver_walks_dotdot_physically() {
+    test_group("fs_link: `..` after a symlink resolves to the link target's parent");
+
+    var home = _test_scratch_dir();
+    var outside = _test_scratch_dir();
+    var deep = _fsl_path_join(outside, "deep");
+    hapi_mkdir(deep, 0x1ED);
+    hapi_symlink(deep, _fsl_path_join(home, "a"));
+    var r = fsl_resolve_path(_fsl_path_join(home, "a/../c.conf"));
+    var want = _fsl_path_join(fsl_resolve_path(outside), "c.conf");
+    assert(r != 0, "it resolves");
+    if (r != 0) { assert_eq(_hlnk_cstr_eq(r, want), 1, "to the outside directory, as the kernel does"); }
+    return 0;
+}
+
+# F-052 / F-054 at the verb: adopt took `a/../c.conf` (outside $HOME
+# through `a`), and a granted path outside the scope root was sliced at the
+# root's length — a SIGSEGV when shorter, a garbled row when longer.
+fn test_adopt_refuses_dotdot_and_out_of_scope() {
+    test_group("adopt: refuses a `..` path and a file outside the scope root");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var outside = _test_scratch_dir();
+    var pkg = _t111_pkg("");
+    var deep = _fsl_path_join(outside, "deep");
+    hapi_mkdir(deep, 0x1ED);
+    hapi_symlink(deep, _fsl_path_join(scope, "a"));
+    var victim = _fsl_path_join(outside, "c.conf");
+    _test_write_file(victim, "OUTSIDE");
+
+    assert_eq(cmd_adopt("a/../c.conf", pkg), 1, "a `..` component is refused");
+    assert_eq(link_probe_kind(link_probe(victim)), HAPI_LP_FILE, "the outside file is untouched");
+
+    cap_set_allowlist(outside);
+    assert_eq(cmd_adopt(victim, pkg), 1, "a granted path outside the scope root is refused, not sliced");
+    assert_eq(link_probe_kind(link_probe(victim)), HAPI_LP_FILE, "and is untouched");
+    cap_set_allowlist(0);
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-055: only `link` proved the trail writable before mutating. unlink,
+# rollback and adopt mutated first and appended after, so a torn tail (or
+# an unwritable trail) left the change made and unrecorded.
+fn test_reversal_verbs_preflight_the_trail() {
+    test_group("unlink / rollback / adopt: an unwritable trail refuses before any change");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var trail = load64(env + 8);
+    var pkg = _t111_pkg("\n[[link]]\nsource = \"a\"\ntarget = \".a\"\n");
+    _test_write_file(_fsl_path_join(pkg, "a"), "a");
+    var tgt = _fsl_path_join(scope, ".a");
+    assert_eq(cmd_link(pkg, 0), 0, "linked");
+
+    var fd = file_open(trail, O_WRONLY | O_APPEND, 0);
+    file_write(fd, "{\"ts\":\"torn", 11);
+    file_close(fd);
+
+    assert_eq(cmd_unlink("p"), 1, "unlink refuses on a torn tail");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_SYMLINK, "and the link is still there");
+    assert_eq(cmd_rollback(), 1, "rollback refuses on a torn tail");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_SYMLINK, "and the link is still there");
+
+    var dot = _fsl_path_join(scope, ".zz");
+    _test_write_file(dot, "user content");
+    assert_eq(cmd_adopt(".zz", pkg), 1, "adopt refuses on a torn tail");
+    assert_eq(link_probe_kind(link_probe(dot)), HAPI_LP_FILE, "and the file was not moved");
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-056: with no marker, every rollback re-reversed the previous one's
+# entries — 2, 4, 8 … reversals and a trail doubling per run.
+fn test_rollback_is_idempotent() {
+    test_group("rollback: a second run does nothing");
+
+    var env = _test_fresh_env();
+    var trail = load64(env + 8);
+    var pkg = _t111_pkg("\n[[link]]\nsource = \"a\"\ntarget = \".a\"\n");
+    _test_write_file(_fsl_path_join(pkg, "a"), "a");
+    assert_eq(cmd_link(pkg, 0), 0, "linked");
+    assert_eq(cmd_rollback(), 0, "first rollback");
+    var n1 = _test_file_size(trail);
+    assert_eq(cmd_rollback(), 0, "second rollback");
+    assert_eq(_test_file_size(trail), n1, "wrote nothing");
+    assert_eq(cmd_rollback(), 0, "third rollback");
+    assert_eq(_test_file_size(trail), n1, "still nothing");
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-057: containment is planned before any row is written, so a row
+# beneath another row's target was judged while both were absent — then
+# written through the outer row's freshly planted symlink.
+fn test_link_refuses_nested_targets() {
+    test_group("link: a target beneath another row's target is refused");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var outside = _test_scratch_dir();
+    var outer = "\n[[link]]\nsource = \"escape\"\ntarget = \".x\"\n";
+    var inner = "\n[[link]]\nsource = \"payload\"\ntarget = \".x/inner\"\n";
+    var pkg = _t111_pkg(_t111_cat(outer, inner));
+    _test_write_file(_fsl_path_join(pkg, "payload"), "payload");
+    hapi_symlink(outside, _fsl_path_join(pkg, "escape"));
+
+    assert_eq(cmd_link(pkg, 0), 1, "link refuses");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, ".x"))), HAPI_LP_ABSENT, "nothing was planted");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(outside, "inner"))), HAPI_LP_ABSENT,
+        "and nothing landed outside");
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-053: a `./`-prefixed target kept its `.` in the lexical parent, so
+# the link text climbed one directory too far and dangled — with `status`
+# calling it OK. Computing from the resolved parent (F-046) drops it.
+fn test_dot_slash_target_links_correctly() {
+    test_group("link: a `./` target links to the source");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _t111_pkg("\n[[link]]\nsource = \"rc\"\ntarget = \"./.rc\"\n");
+    _test_write_file(_fsl_path_join(pkg, "rc"), "rc-content");
+    assert_eq(cmd_link(pkg, 0), 0, "link succeeds");
+    assert_eq(_test_file_size(_fsl_path_join(scope, ".rc")), 10, "and the link resolves");
+    assert_eq(cmd_status(pkg), 0, "status agrees");
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-058: the manifest rewrite renames a staging file over hapi.cyml, which
+# replaces a symlinked manifest with a private copy — the shared file it
+# pointed to never got the row.
+fn test_symlinked_manifest_is_not_rewritten() {
+    test_group("manifest_write / adopt: a symlinked hapi.cyml is refused, not replaced");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var common = _t111_pkg("");
+    var pkg = _test_scratch_dir();
+    var mpath = _fsl_path_join(pkg, "hapi.cyml");
+    hapi_symlink(_fsl_path_join(common, "hapi.cyml"), mpath);
+
+    assert_eq(manifest_append_link_row(mpath, "n", ".n"), 0 - HapiMfwManifestIsSymlink,
+        "the writer refuses a symlinked manifest");
+    var dot = _fsl_path_join(scope, ".zz");
+    _test_write_file(dot, "user content");
+    assert_eq(cmd_adopt(".zz", pkg), 1, "adopt refuses it");
+    assert_eq(link_probe_kind(link_probe(dot)), HAPI_LP_FILE, "before moving anything");
+    assert_eq(link_probe_kind(link_probe(mpath)), HAPI_LP_SYMLINK, "and the manifest is still a link");
+
+    _test_clear_env();
     return 0;
 }
 
@@ -2703,7 +3228,7 @@ fn test_backup_to_skips_symlink_conflict() {
     var tgt = alloc(strlen(scope) + 16);
     memcpy(tgt, scope, strlen(scope));
     memcpy(tgt + strlen(scope), "/.zshrc\x00", 8);
-    sys_symlink("/tmp/elsewhere", tgt);
+    hapi_symlink("/tmp/elsewhere", tgt);
 
     var bdir = alloc(strlen(scope) + 16);
     memcpy(bdir, scope, strlen(scope));
@@ -2985,6 +3510,23 @@ fn main() {
     test_manifest_body_delimiter_reader();
     test_manifest_append_lands_in_header();
     test_manifest_remove_ignores_body();
+    test_check_refuses_unlistable_package();
+    test_manifest_append_matches_line_ending();
+    test_rollback_reports_unremoved_manifest_row();
+    test_link_refuses_target_inside_package();
+    test_link_text_from_physical_parent();
+    test_unlink_removes_a_legacy_link();
+    test_root_prefix_contains_everything();
+    test_check_reports_source_through_a_file();
+    test_link_probe_fifo_and_unreadable_dir();
+    test_root_grant_is_decided_physically();
+    test_resolver_walks_dotdot_physically();
+    test_adopt_refuses_dotdot_and_out_of_scope();
+    test_reversal_verbs_preflight_the_trail();
+    test_rollback_is_idempotent();
+    test_link_refuses_nested_targets();
+    test_dot_slash_target_links_correctly();
+    test_symlinked_manifest_is_not_rewritten();
     return assert_summary();
 }
 

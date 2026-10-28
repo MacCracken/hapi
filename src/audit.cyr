@@ -5,10 +5,13 @@
 # (or `$HOME/.local/state/hapi/audit.jsonl` when unset).
 #
 # Write path: single `write(2)` per entry, gated by flock so two
-# concurrent hapi processes don't interleave half-lines. Lines
-# are <1 KB in practice (well under PIPE_BUF=4096), so POSIX
-# atomicity holds and a torn write leaves either zero or one
-# complete line at EOF — never a partial.
+# concurrent hapi processes don't interleave half-lines. PIPE_BUF is
+# not the guarantee here — it bounds atomic writes to PIPES, not regular
+# files (and is 512 on agnos). What holds is O_APPEND plus the flock on
+# Linux, and the flock plus an explicit SEEK_END on agnos, whose kernel
+# does not honour AO_APPEND. A crash mid-write can still leave a torn
+# final line: the reader drops it, and the next append refuses to write
+# onto it (see _audit_append_durable).
 #
 # M3 (`unlink`, `rollback`) layers the *reader* on top of this
 # same file; nothing in this module needs to change for M3.
@@ -364,7 +367,13 @@ fn _audit_append_durable(path, buf, n): i64 {
     #endif
     var fd = file_open(path, flags, 0x1A4);
     if (fd < 0) { return fd; }
-    file_lock(fd);
+    # The lock is what makes the append atomic on agnos (no AO_APPEND
+    # there), so an append without it is refused, not attempted. agnos's
+    # flock#59 can fail: a non-ext2 fd, or a full 16-slot lock table.
+    if (file_lock(fd) < 0) {
+        file_close(fd);
+        return 0 - 5;
+    }
 
     var end = xlseek(fd, 0, 2);                 # SEEK_END
     if (end > 0) {

@@ -88,6 +88,11 @@ loop.
 | source name occupied in package    | refused — would clobber                      |
 | target already in manifest         | refused — duplicate row                      |
 | source already in manifest         | refused — duplicate row                      |
+| a `..` component in `<file>`       | refused — a `[[link]]` target cannot hold one (1.1.1) |
+| outside the scope root             | refused — there is no relative target to record, even when `HAPI_ALLOWED_ROOTS` grants the location (1.1.1; through 1.1.0 this crashed or wrote a garbled row) |
+| already inside the package         | refused — e.g. `~/.ssh -> dotfiles/pkg/ssh`; the file is package content (1.1.1) |
+| `hapi.cyml` is a symlink           | refused — the atomic rewrite would replace the link with a copy (1.1.1) |
+| audit trail not writable           | refused before anything moves (1.1.1) |
 
 Every refusal is non-destructive: the target file (or whatever
 is at the target path) is untouched on refusal.

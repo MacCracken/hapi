@@ -9,10 +9,12 @@
 
 ## Status
 
-- **Current line: 1.1.x.** 1.1.0 is the cyrius 6.7 toolchain line; the
+- **Current line: 1.1.x.** 1.1.0 is the cyrius 6.7 toolchain line and
+  1.1.1 its P(-1) audit and repairs
+  ([`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)); the
   v1.0 contract — command surface, ADR 0001 manifest schema, ADR 0002
-  audit-trail format — stays frozen. **Next: 1.1.1, the P(-1) audit and
-  repairs** (below).
+  audit-trail format — stays frozen. Nothing is scheduled next; the
+  next P(-1) pass fires on CLAUDE.md's standing triggers.
 - **v1.x** — additive growth, internal swaps, doc commitments; no
   caller-visible breaking change. Nothing blocks it.
 - **v2.0** — candidates that *must* earn a major bump because they
@@ -20,85 +22,6 @@
 
 Future work is sized in terms of *what bucket it belongs to*, not which
 sprint it runs in.
-
-## 1.1.1 — P(-1) audit and repairs
-
-One release: the full CLAUDE.md P(-1) checklist, filed as
-`../audit/YYYY-MM-DD-audit.md`, plus the repairs it lands. The findings
-ship together in 1.1.1, not as one patch release each. New findings
-continue from **F-035**.
-
-**Why it is owed.** Thirteen fixes landed across 1.0.9 and 1.0.10, and
-between them they touched a path argument, a syscall and the audit-trail
-write path — all three of CLAUDE.md's re-run triggers. 1.0.12 touched a
-syscall again (`hapi_open_nofollow`). The newest pass on file,
-[`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md), scanned
-1.0.5.
-
-**Scope — the walk itself.**
-
-- [ ] The repaired write paths of 1.0.9 / 1.0.10 / 1.0.12, re-walked
-  against the current tree (cyrius 6.7.18).
-- [ ] **aarch64 as a first-class target in the walk.** 1.0.12 found that
-  the x86_64 `O_NOFOLLOW` literal had silently disabled F-003's defence on
-  arm64 since 0.9.0, and that the test harness was x86-only. That needs an
-  F-id and an entry in the audit doc, which it never got. The re-walk
-  should also sweep every remaining numeric constant in `src/` and
-  `tests/` for per-arch meaning, not just the ones that have already
-  bitten. CI now runs `cyrius test --aarch64` under qemu, so a new
-  finding can get a test that runs there.
-- [ ] Step 6, the two accepted boundaries from the 2026-08-25 pass that
-  were never written down: `hapi checkpoint` is not idempotent (three
-  runs append three markers, undocumented in
-  [`../guides/checkpoint.md`](../guides/checkpoint.md)), and 1.0.9's
-  writer-side torn-tail refusal is absent from ADR 0002's *Crash
-  semantics*.
-- [ ] **ADR 0001 never states the `---` delimiter rule.** It says only
-  that an optional markdown body follows `---`. 1.1.0 found that the
-  rule moved under hapi when bayan changed (CRLF and an unterminated
-  final `---` became delimiters), and that the writer had its own,
-  older copy. Write the rule into the ADR as a clarification, not a
-  schema change: a whole `---` line, at the start of the file or after
-  a `\n`, ending in `\n`, CR LF, or end of file. Then the tests in
-  `tests/hapi.tcyr`'s `1.1.0` section pin a documented contract rather
-  than an observed one.
-
-**Known repair candidates going in** (found during the 1.0.12 / 1.1.0
-toolchain work; each gets an F-id and a test if the walk confirms it):
-
-- [ ] **F-031's residual race can now close on agnos.** cyrius 6.6.4's
-  `file_open` bridges `O_NOFOLLOW` → `AO_NOFOLLOW`, which the agnos kernel
-  has honoured since 1.56.53. `hapi_open_nofollow`'s agnos arm still uses
-  only the readlink pre-check. Passing the flag as well makes the refusal
-  atomic. It needs a decision on the minimum agnos kernel (behaviour on a
-  kernel without the bit is unverified), and a mirshi ≥ 1.11.2 axis in
-  `scripts/agnos-smoke.sh` that asserts a symlink is refused.
-- [ ] **`hapi check` passes silently on an unreadable package
-  directory.** `src/cmd/check.cyr` lists the package with `dir_list`,
-  which returns an empty list for a directory it cannot read, so the
-  F-028 orphan check finds nothing and reports clean. `dir_list_checked`
-  (cyrius 6.6.10) reports the error, and `check` should exit 1 on it.
-- [ ] **On agnos, `O_EXCL` now means exclusive.** Since cyrius 6.6.4
-  `file_open` bridges it to `AO_EXCL` (agnos ≥ 1.56.56). Before that,
-  `backup.cyr`'s and `manifest_write.cyr`'s exclusive creates opened an
-  existing file and overwrote it in place. Check whether either path ever
-  relied on the old behaviour (e.g. a retried backup in the same second),
-  and add the `O_CREAT|O_EXCL`-on-existing case to the agnos smoke.
-- [ ] **Nothing runs hapi's agnos code in CI.** The `agnos smoke` step
-  always exits 2 (SKIP) on the runner, because there is no mirshi there,
-  and cyrius 6.7.16 dropped its own run-under-mirshi gates. So the agnos
-  arm — F-027, F-031, and the two candidates above — is exercised only
-  when the smoke runs on a dev box. Either build mirshi in CI, or record
-  the skip as an accepted boundary in the audit doc.
-- [ ] **Appending to a CRLF manifest writes LF lines.** The writer's row
-  template is LF-only, so `adopt` leaves a CRLF manifest with mixed line
-  endings. The reader and `check --strict` accept it; an editor or a
-  diff may not. Low — match the file's own ending when appending.
-- [ ] **Supply chain: CI fetches the toolchain installer from `main`.**
-  Both workflows `curl` `scripts/install.sh` from the cyrius repo's
-  mutable `main` branch. Upstream's compiled `install` stopped doing that
-  at 6.6.20 and fetches `…/cyrius/<version>/scripts/install.sh`. Fetch
-  from the `cyrius.cyml` pin's tag the same way.
 
 ## v1.x — maintenance & additive growth
 
@@ -183,18 +106,23 @@ ordering is driven by upstream readiness + dogfood pressure.
 Items hapi needs from siblings; QoL patches when they land,
 not blockers.
 
-- **A no-follow open flag on agnos.** agnos's `AO_*` set has no
-  no-follow bit, so `hapi_open_nofollow` (`src/agnos_compat.cyr`)
-  pre-checks with `readlink` there (1.0.10, F-031). Between the
-  readlink and the open nothing proves the two saw the same inode;
-  the residual race is an accepted boundary until the kernel grows the
-  flag, at which point the agnos arm collapses to the atomic
-  Linux/macOS shape. File against agnos, not hapi.
+- **Rename over an existing file on agnos ext2.** `hapi adopt` cannot
+  commit its manifest rewrite on a real agnos kernel, which refuses
+  rename#31 onto an existing destination (F-059, accepted —
+  [`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)).
+  When it lands, hapi's half is a directory open with `O_DIRECTORY` and
+  a lock agnos flock#59 accepts. File against agnos, not hapi.
+- **mirshi fidelity to the kernel.** mirshi answers differently from
+  agnos 1.57.14 on four calls: readlink of a body longer than the
+  buffer, a directory open without `AO_DIRECTORY`, flock on a directory
+  fd, and rename onto an existing file (the 2026-10-28 audit's *Harness
+  gap*). CI's agnos run therefore cannot see F-059 or F-039's long-link
+  half. File against mirshi, not hapi.
 - **envp for mirshi's child process.** mirshi passes none, so `getenv`
-  returns null under it and no scope-rooted verb is reachable — which
-  bounds what `scripts/agnos-smoke.sh` can exercise. Real agnos stages
-  `HOME=/ PWD=/` at exec, so this is a supervisor gap. File against
-  mirshi, not hapi.
+  returns null under it and the shipped binary's scope-rooted verbs are
+  unreachable there. Real agnos stages `HOME=/ PWD=/` at exec, so this
+  is a supervisor gap. `tests/agnos.tcyr` works around it by setting
+  the scope and trail directly. File against mirshi, not hapi.
 
 ## v2.0 — Breaking-candidate bucket
 

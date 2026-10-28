@@ -45,6 +45,7 @@ Per CLAUDE.md Process P(-1), re-run the checklist:
 
 | Pass | Version at scan | Outcome |
 |------|-----------------|---------|
+| [`2026-10-28-audit.md`](2026-10-28-audit.md) | 1.1.0 → repaired in 1.1.1 | ⚠ **The capability boundary, again.** F-035 – F-059: four HIGH, all on the boundary — `link --force` deleting a row's own source through a symlinked parent (F-045), `--root` through a symlink (F-051, so F-002 was live for `--root`), `..` collapsed before its symlink (F-052), an out-of-scope adopt crashing (F-054). 22 fixed in 1.1.1, 2 retroactive (F-035, F-036), F-059 accepted (adopt on a real agnos kernel). First pass to run the agnos target for real: under mirshi in CI and on a QEMU-booted kernel. |
 | [`2026-05-23-audit.md`](2026-05-23-audit.md) | 0.8.0 → v1.0 hardening | F-001 (HIGH, `..` bypass) **fixed**; F-003 (LOW, backup-copy TOCTOU) **fixed**; F-002 (MEDIUM, symlink escape) **deferred** to kavach; F-004 / F-005 **accepted** boundaries. Closed P(-1) Step 5 for the v1.0 cut. |
 | [`2026-08-25-audit.md`](2026-08-25-audit.md) | 1.0.5 | ⚠ **The pass that broke the streak.** Nine HIGH findings where the two prior passes found none — the earlier lens checked the validators, not the writers. Twenty findings total; **all twenty are now closed** across 1.0.5 – 1.0.10 (see the arc note below). F-002 re-scoped off its void kavach dep gate and fixed at 1.0.8. |
 | [`2026-05-24-audit.md`](2026-05-24-audit.md) | 1.0.0 (1.0.x-final) | Re-walk over the unchanged v1.0 surface. F-001/F-003 still fixed (test-asserted), F-002 still deferred (no kavach yet), F-004/F-005 still accepted. New F-006 (LOW, audit trail lost on state-dir wipe) **accepted** boundary. Reviewed the syscall-naming cleanup (behavior-neutral). |
@@ -154,6 +155,10 @@ dated audit file written and linked from the index above.
 
 The next P(-1) arc fires on the standing rule — before a v2.0 cut,
 or on the next change to a path argument, syscall, capability
-surface, or audit-trail format. None scheduled; the v1.0 contract
-is frozen and the open findings (F-002 kavach, F-006 boundary) are
+surface, or audit-trail format. None scheduled. Open items: F-006
+(accepted, state-dir wipe) and F-059 (accepted, adopt on agnos), both
 tracked in [`../development/issues/`](../development/issues/).
+
+Carry forward from the 2026-10-28 pass: **mirshi is not the kernel.**
+A pass that touches hapi's agnos arm should also run on a QEMU-booted
+agnos kernel — two of that pass's findings were invisible under mirshi.

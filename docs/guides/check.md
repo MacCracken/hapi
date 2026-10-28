@@ -31,8 +31,14 @@ hapi check <package-dir|hapi.cyml> [--strict]
    - a `[[link]]` row whose `source` is missing from the package;
    - a file in the package that **no row claims** — the signature of an
      `adopt` interrupted between the rename and the manifest write.
-   Staging leftovers (`hapi.cyml.<pid>.tmp`) are not orphans. Any
-   divergence exits 1.
+   Staging leftovers (`hapi.cyml.<pid>.tmp`) are not orphans, but each
+   one is named on a `note:` line: it refuses every later manifest write
+   by a process that draws the same pid, so delete it once no hapi is
+   running. A row source that runs through a regular file (`f/sub`) is
+   reported as missing, matching `link` (1.1.1). Any divergence exits 1,
+   and so does a package directory that cannot be listed (1.1.1 —
+   through 1.1.0 a mode-0311 directory checked clean with an orphan in
+   it).
 4. Appends `ok` (or `ok (strict)`).
 
 ## Example: lenient vs strict

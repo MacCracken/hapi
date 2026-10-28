@@ -6,6 +6,135 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.1.1] - 2026-10-28
+
+> **The P(-1) audit and its repairs.** One pass over the 1.1.0 tree, filed as
+> [`docs/audit/2026-10-28-audit.md`](docs/audit/2026-10-28-audit.md): findings
+> F-035 – F-059, every repair landing here, each with a test that fails against the
+> unfixed code. The pass found the capability boundary open again. 1.0.8 decided
+> containment on the resolved path, but only for the scope, only at plan time, and
+> with `..` collapsed before symlinks were followed. Four HIGH findings came out of
+> that, one of which (`link --force` deleting a row's own source) loses data. Command
+> surface, manifest schema (ADR 0001) and audit-trail line shape (ADR 0002) are
+> unchanged; ADRs 0001, 0002, 0003 and 0005 gain clarifying addenda.
+
+### Security
+
+- **F-045 [HIGH] — `link --force` deleted the package's own file.** With
+  `~/.ssh -> dotfiles/pkg/ssh`, the row `ssh/config -> .ssh/config` names its source
+  as its target. `link` called it an existing regular file, and `--force` deleted the
+  only copy and planted a symlink to itself (`linked 1 / 1`, exit 0). `adopt
+  ~/.ssh/config` moved the package's file to a second name and left a dangling link
+  inside the package. A target that resolves into the package is now refused by
+  `link` and `adopt`; `--force` does not override it.
+- **F-051 [HIGH] — `--root` through a symlink escaped `$HOME` with no grant.**
+  `--root ~/trap` with `trap -> /outside` passed on its spelling, after which every
+  check resolved both sides through `trap` and agreed. `link` wrote into `/outside`,
+  and `--force` deleted a file there. The grant is now decided on the resolved root,
+  against the resolved `$HOME` and resolved `HAPI_ALLOWED_ROOTS` entries.
+- **F-052 [HIGH] — `..` was collapsed before the symlink in front of it was
+  followed.** `adopt 'a/../c.conf'` with `a -> /outside/deep` moved `/outside/c.conf`
+  into the package. The resolver now walks `.` and `..` against the resolved prefix,
+  as the kernel does, and `adopt` refuses a `..` component outright.
+- **F-054 [HIGH] — `adopt` of a granted path outside the scope root crashed or
+  garbled the row.** The manifest target was sliced at the scope root's length
+  without checking the prefix: SIGSEGV (exit 139) when the path was shorter, a
+  truncated target in the manifest and the trail when longer. It is now refused, since
+  a file outside the scope root has no relative target to record.
+- **F-057 — a row beneath another row's target escaped at execute time.** Both were
+  planned as absent; the outer row then planted a symlink to an outside directory and
+  the inner row was written through it. Nested targets are now refused.
+- **F-047 — `/` contained nothing.** `--root /` with `HAPI_ALLOWED_ROOTS=/` refused
+  every row, and so did agnos's default `HOME=/`, for every verb.
+- **F-042 — CI fetched the toolchain installer from cyrius's mutable `main`.** It now
+  fetches `scripts/install.sh` from the pin's tag, to a file, then runs it.
+- **F-039 — the agnos no-follow open is atomic.** It passes `O_NOFOLLOW` (bridged to
+  `AO_NOFOLLOW`, kernel ≥ 1.56.53), closing F-031's residual race. The readlink
+  pre-check stays for older kernels, which ignore the bit, and its buffer grew from 64
+  to 4096 bytes. agnos readlink answers -1 for a link body that does not fit, so any
+  link body of 65 bytes or more had been followed. A real kernel shows this; mirshi
+  does not.
+
+### Fixed
+
+- **F-046 — links under a symlinked parent dangled while `status` said OK.** The link
+  text was computed from the spelled parent. It now comes from the directory the link
+  physically sits in; the text is byte-identical whenever no parent is a symlink.
+  Links 1.1.0 wrote there stay removable by `unlink` / `rollback`; `link` reports them
+  as a conflict.
+- **F-053 — a `./` target produced a dangling link, reported OK.** Fixed by F-046 for
+  manifest targets; `adopt` now normalizes `.` and `//` in its `<file>` argument.
+- **F-055 — `unlink`, `rollback` and `adopt` mutated before proving the trail
+  writable.** With a torn tail, `unlink` removed every symlink and recorded none. All
+  three now run `link`'s preflight first.
+- **F-056 — `rollback` doubled the trail every run.** With no marker, each run
+  re-reversed the previous one's entries (1, 2, 4 … 512). A clean rollback that
+  changed something now closes its window with a `rollback-marker`; a second run
+  does nothing, as the guide always said.
+- **F-038 — `rollback` called a failed manifest rewrite "row not found" and exited
+  0.** The row stayed, with its source just moved out of the package. Only a missing
+  row is a warning now; any other failure names its reason and exits 1. The writer
+  reports a leftover `hapi.cyml.<pid>.tmp` as such, `adopt` prints the writer's
+  reason, and `check` lists leftovers on a `note:` line.
+- **F-037 — `check` passed a package directory it could not list.** A mode-0311
+  directory checked clean with an orphan in it. A failed listing is now an error.
+- **F-048 — `check` let through a row source that runs through a regular file
+  (`f/sub`).** `link` refused that row and pointed the user to `check`. `check` now
+  uses the same predicate as `link` and `status`.
+- **F-049 — `link_probe` hung on a FIFO and misread unreadable directories.** A FIFO
+  at a target hung `link`, `status` and `--dry-run`. A mode-000 or mode-0300
+  directory read as a file, so `adopt` moved a whole directory tree into the package.
+  It is now classified with `stat`.
+- **F-058 — a symlinked `hapi.cyml` was replaced by a private copy.** The atomic
+  rewrite renamed over the link. The writer and `adopt` now refuse it.
+- **F-041 — appending to a CRLF manifest wrote LF lines.** The row now matches the
+  file's ending. The remove's blank-line trim now handles CR, so CRLF manifests get
+  the same tidy-up LF ones do.
+- **F-044 — on agnos, an absent audit trail was refused as unreadable.** `list`,
+  `unlink` and `rollback` failed on a first run. "Absent" is now decided by stat
+  there.
+- **F-050 — on agnos, every stat failure read as "absent".** A path through a regular
+  file now probes as an error, as it does on Linux.
+- The trail append refuses when its lock fails instead of writing unlocked. On agnos
+  the lock is what makes the append atomic. (Hardening; not constructed.)
+
+### Changed
+
+- **Rollback appends a marker** after a clean run that changed something (F-056).
+  This is additive, and is the same entry `checkpoint` writes.
+- **The CI agnos step runs for real (F-043).** `scripts/build-mirshi.sh` builds mirshi
+  at a pinned tag with hapi's own toolchain pin. A new target-neutral
+  `tests/agnos.tcyr` exercises every agnos-conditional path. The smoke step runs that
+  suite under mirshi and fails on any non-zero exit, SKIP included.
+- `hapi check` prints a `note:` line for each staging leftover; the exit code is
+  unchanged.
+- Error text: `adopt` says why a manifest edit failed. New refusals: target in the
+  package, nested target, `..` in an adopt path, adopt outside the scope root, and a
+  symlinked `hapi.cyml`.
+
+### Tests
+
+- `tests/hapi.tcyr` 387 → **469** assertions (95 → 112 groups). The new `1.1.1`
+  section covers every repair above; each test was run against the reverted code and
+  fails there (F-049's hangs instead; confirmed with a timeout). The harness routes
+  `symlink` / `unlink` / `mkdir` through hapi's shims, so it compiles for agnos.
+- **New `tests/agnos.tcyr`, 55 assertions in 8 groups.** It is target-neutral and
+  passes on x86_64, on aarch64 under qemu, and on agnos under mirshi. It includes a
+  full `link` / `status` / `unlink` round trip with the scope at `/`.
+
+### Notes
+
+- Retroactive ids: **F-035** is 1.0.12's aarch64 `O_NOFOLLOW` literal and x86-only
+  harness; **F-036** is 1.1.0's `---` writer fixes.
+- **F-059 is accepted, not fixed: `adopt` cannot succeed on a real agnos kernel.** The
+  kernel's ext2 rename refuses an existing destination, and its flock refuses a
+  directory fd. It fails closed. See
+  [`docs/development/issues/2026-10-28-adopt-on-agnos-kernel.md`](docs/development/issues/2026-10-28-adopt-on-agnos-kernel.md).
+- **mirshi differs from the agnos kernel on four calls** (the audit's *Harness gap*),
+  so CI's agnos run cannot see F-059 or the long-link half of F-039.
+- Benchmarks: +6 % cold / +7 % warm against 1.1.0, from the extra per-row resolution.
+  The trail is byte-identical and warm growth is 0.
+
 ## [1.1.0] - 2026-10-28
 
 > **The cyrius 6.7 line.** Pin `6.6.20` → `6.7.18`. The code compiled cleanly on all

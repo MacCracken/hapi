@@ -140,3 +140,22 @@ package, the target inside the scoped root.
   *package directory*, not the *link's parent directory*. They
   match only when the link's parent is the package directory,
   which it almost never is.
+
+## Addendum — 2026-10-28 (1.1.1): "the link's parent directory" is where the link physically sits
+
+**The decision stands: relative links, from the link's parent directory to
+the source.** Step 2 of *The computation* above spelled the parent
+lexically — `<abs(scope_root)>/<dirname(target)>` — and that is only the
+link's parent when no component of it is a symlink. When one is, the kernel
+resolves the link's text from the directory the link is actually in, and a
+lexical text can name nothing: with `~/.config -> data/deep/config`, the row
+`.config/rc` was written `../dotfiles/pkg/rc`, which dangles (F-046,
+[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)). This ADR's
+own claim — computed links are correct by construction — failed there.
+
+From 1.1.1 step 2 resolves the parent through every symlink. The source in
+step 1 stays as spelled, so a package reached through a symlink keeps
+portable links, which is this ADR's rationale. For every target without a
+symlinked parent the text is byte-identical to 1.1.0. `unlink` and
+`rollback` also accept the lexical text, so links an older hapi planted
+under a symlinked parent remain hapi's to remove.

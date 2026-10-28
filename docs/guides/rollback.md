@@ -76,16 +76,25 @@ state but acts as a stopping boundary for `rollback`:
 {"ts":"...","op":"rollback-marker"}
 ```
 
-Markers are appended by [`hapi checkpoint`](checkpoint.md).
-When present, `hapi rollback` reverses only entries after the
-most recent marker, leaving everything before it untouched.
+Markers are appended by [`hapi checkpoint`](checkpoint.md), and —
+since 1.1.1 — by `hapi rollback` itself, at the end of a run that
+reversed at least one entry without an error. When present,
+`hapi rollback` reverses only entries after the most recent marker,
+leaving everything before it untouched.
+
+The closing marker is what makes a second run a no-op. Without it the
+next run's window included the entries this run had just appended,
+so every run re-reversed the last one — the same end state, but 2, 4,
+8 … reversals and a trail that doubled each time (F-056). A run that
+hit an error writes no marker, so it can be re-run once the cause is
+fixed.
 
 ## Exit codes
 
 | code | meaning                                                       |
 |------|---------------------------------------------------------------|
 | 0    | rollback completed (any per-entry skips were silent)          |
-| 1    | at least one entry hit an IO error mid-reversal               |
+| 1    | at least one entry hit an IO error mid-reversal; an adopt was reverted but its manifest row could not be removed (the reason is printed); the closing marker could not be written; or the trail is not writable (nothing was changed) |
 
 ## See also
 

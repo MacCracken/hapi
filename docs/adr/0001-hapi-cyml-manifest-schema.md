@@ -229,3 +229,27 @@ Out for v1.0 (track for v2.0 or later):
   audit-trail hashing (the hash changes when the source directory
   contents change, even if the manifest didn't). `ignore` is glob;
   `link` is explicit. We may revisit for v2.0.
+
+## Addendum — 2026-10-28 (1.1.1): the `---` delimiter rule
+
+**A clarification, not a schema change.** This ADR says only that an
+optional markdown body follows `---`. The rule for *what counts as that
+line* was never written down, and 1.1.0 found that it had moved under hapi:
+bayan 1.7 / 1.8 widened it, while hapi's manifest writer kept an older copy
+and appended rows below the delimiter (F-036,
+[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)). The rule,
+as bayan 1.11.1 implements it and both hapi's reader and writer now apply:
+
+- The delimiter is a **whole `---` line**: three hyphens at byte 0 of the
+  file, or immediately after a `\n`.
+- It ends in `\n`, in CR LF, in a lone CR that is the last byte of the
+  file, or at end of file.
+- The **first** such line ends the header. Everything after it is body —
+  free-form markdown that no verb reads or edits, including any `[[link]]`
+  written there as an example.
+- `--- notes`, ` ---` and `----` are not delimiters; they are header text.
+- A delimiter at byte 0 leaves an empty header, which fails the
+  `[package].name` requirement, as before.
+
+`tests/hapi.tcyr`'s `1.1.0` section pins this rule; with it written here,
+those tests pin a documented contract rather than an observed one.

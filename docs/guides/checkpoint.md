@@ -24,6 +24,13 @@ The marker writer (`audit_append_rollback_marker_r`) and the
 walk-to-marker logic in `hapi rollback` use the same audit-trail
 shape; `hapi checkpoint` is the user-facing entry point.
 
+**It is not idempotent, by design.** Three consecutive checkpoints
+append three markers — journal semantics: each call records that you
+asked for a boundary, at that moment. Consecutive markers behave
+exactly like one for `rollback`, and each costs one short line of
+trail. Since 1.1.1 `hapi rollback` also appends a marker after a run
+that changed something, so consecutive markers are normal.
+
 ## Example: bracketing a risky session
 
 ```sh

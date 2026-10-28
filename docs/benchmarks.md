@@ -63,6 +63,8 @@ real HDD or under cgroup-throttled IO.
 
 | 1.1.0   | 90        | 72        | 0 bytes           | 2026-10-28 | Toolchain refresh (cyrius `6.6.20` → `6.7.18`). Interleaved A/B against 1.0.12-on-6.6.20, three pairs — old 91–92 / 73–74, new 90 / 72–73. Flat. Trail byte-identical at 101,150 bytes / 350 entries. ⚠ **DCE binary 194,744 → 542,520 bytes (2.8×), all of it data**: the code segment is flat (+2.5 KB), the data segment went 38.7 KB → 382 KB because 6.7.18's `bayan` unconditionally includes the Unicode casefold / category / normalization tables, which DCE cannot drop. hapi never touches those pages, which is why the timings do not move. |
 
+| 1.1.1   | —         | —         | 0 bytes           | 2026-10-28 | P(-1) repairs. **Relative row**: the harness ran under a deeper scratch path than `/tmp/hapi-bench`, which lengthens every path and puts both builds near 120 / 95 ms, so the absolute numbers are not comparable to the rows above. Interleaved A/B against 1.1.0 at the same path, three pairs — old 118 / 94–95, new 125–127 / 101–102: **+6 % cold, +7 % warm**, attributable and expected. Each row now does three more path resolutions: F-045's into-the-package guard resolves the target's parent and the package directory, and F-046's link text resolves the parent again. Trail byte-identical between the two builds (153,650 bytes / 350 entries at that path). DCE binary 542,520 → 552,488 bytes. |
+
 ⚠ **On the 0.9.0 → 1.0.4 delta.** Three things changed at once between
 the two rows: the compiler (6.0.1 → 6.5.35), the kernel (7.0.9 → 7.1.9),
 and hapi's own `link_probe`. The 0.9.0 row is a single run; the 1.0.4 row
@@ -86,8 +88,9 @@ Per-link cost rolls up (1.0.4 row):
 - 350 entries / 101,150 bytes ⇒ **289 bytes per entry average**
 
 Falls in the ADR 0002 expected range (typical ~250 bytes, max
-~1 KB) — well under PIPE_BUF (4096 bytes) so POSIX append
-atomicity holds.
+~1 KB). Entry size is not what makes the append atomic, though —
+PIPE_BUF bounds pipes, not regular files; `O_APPEND` plus the trail's
+`flock` does (ADR 0002, 1.1.1 addendum).
 
 ## Acceptance gates
 

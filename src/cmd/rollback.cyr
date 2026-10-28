@@ -65,10 +65,7 @@ fn _hrb_reverse_link(entry): i64 {
     var probe = link_probe(abs_tgt);
     if (link_probe_kind(probe) != HAPI_LP_SYMLINK) { return 0; }
 
-    var parent = _fsl_path_dirname(abs_tgt);
-    var expected = fsl_compute_relative(parent, abs_src);
-    if (expected == 0) { return 0; }
-    if (_hrb_cstr_eq(link_probe_target(probe), expected) == 0) { return 0; }
+    if (fsl_link_text_matches(link_probe_target(probe), abs_tgt, abs_src) == 0) { return 0; }
 
     if (hapi_dry_run() == 1) { return 1; }
     var urc = hapi_unlink(abs_tgt);
@@ -98,8 +95,7 @@ fn _hrb_reverse_unlink(entry): i64 {
     var probe = link_probe(abs_tgt);
     if (link_probe_kind(probe) != HAPI_LP_ABSENT) { return 0; }
 
-    var parent = _fsl_path_dirname(abs_tgt);
-    var rel = fsl_compute_relative(parent, abs_src);
+    var rel = fsl_link_text(abs_tgt, abs_src);
     if (rel == 0) { return 0; }
 
     if (hapi_dry_run() == 1) { return 1; }
@@ -120,7 +116,8 @@ fn _hrb_reverse_unlink(entry): i64 {
 #
 # Manifest path is derived from the package dir (dirname of
 # abs_source) — the audit entry doesn't carry it explicitly.
-# Returns 1 applied, 0 skipped (state diverged), -1 IO error.
+# Returns 1 applied, 0 skipped (state diverged), -1 IO error, 2 applied
+# but the manifest row could not be removed (an error for the exit code).
 fn _hrb_reverse_adopt(entry): i64 {
     var abs_tgt = hae_abs_target(entry);
     var abs_src = hae_abs_source(entry);
@@ -131,10 +128,8 @@ fn _hrb_reverse_adopt(entry): i64 {
     # Symlink at target must still point where adopt would have written.
     var probe_t = link_probe(abs_tgt);
     if (link_probe_kind(probe_t) != HAPI_LP_SYMLINK) { return 0; }
-    var parent = _fsl_path_dirname(abs_tgt);
-    var expected = fsl_compute_relative(parent, abs_src);
-    if (expected == 0) { return 0; }
-    if (_hrb_cstr_eq(link_probe_target(probe_t), expected) == 0) { return 0; }
+    var found = link_probe_target(probe_t);
+    if (fsl_link_text_matches(found, abs_tgt, abs_src) == 0) { return 0; }
 
     # Source must still be a regular file in the package.
     var probe_s = link_probe(abs_src);
@@ -157,25 +152,39 @@ fn _hrb_reverse_adopt(entry): i64 {
     var rrc = hapi_rename(abs_src, abs_tgt);
     if (rrc < 0) {
         # Re-attach what we just broke so the world is at least
-        # consistent with the trail again.
-        link_create(expected, abs_tgt);
+        # consistent with the trail again — byte for byte what was there.
+        link_create(found, abs_tgt);
         return 0 - 1;
     }
 
     var mrc = manifest_remove_link_row(manifest_path,
         _fsl_str_to_cstr_helper(source), _fsl_str_to_cstr_helper(target));
-    if (mrc < 0) {
+    var row_left = 0;
+    if (mrc == 0 - HapiMfwRowNotFound) {
         # Manifest row already gone or never present. Filesystem
         # changes already committed; treat as warning-level.
         _hrb_eputs("  ! ");
         _hrb_eputs(abs_tgt);
         _hrb_eputs("  (manifest row not found; filesystem reverted)\n");
+    } elif (mrc < 0) {
+        # The row IS there and the rewrite failed (F-038). Through 1.1.0
+        # this branch printed "manifest row not found" and the verb exited
+        # 0, leaving a row whose source had just been moved out of the
+        # package. The filesystem revert is real, so it is still recorded
+        # below; the row is the user's to remove, and the exit says so.
+        _hrb_eputs("  ! ");
+        _hrb_eputs(abs_tgt);
+        _hrb_eputs("  (file restored, but its manifest row was NOT removed: ");
+        _hrb_eputs(hapi_mfw_err_msg(0 - mrc));
+        _hrb_eputs(")\n");
+        row_left = 1;
     }
 
     var ar_t, ar_v = audit_append_unadopt_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         source, target, abs_src, abs_tgt);
     if (is_err_result(ar_t) == 1) { return 0 - 1; }
+    if (row_left == 1) { return 2; }
     return 1;
 }
 
@@ -217,6 +226,18 @@ fn cmd_rollback(): i64 {
     if (start >= n) {
         _hrb_puts("nothing to roll back (already at most recent marker)\n");
         return 0;
+    }
+
+    # Prove the trail takes a write before reversing anything (F-055) —
+    # the reversals append after they mutate, as `link` once did.
+    if (hapi_dry_run() == 0) {
+        var pf_t, pf_v = audit_preflight_r();
+        if (is_err_result(pf_t) == 1) {
+            _hrb_eputs("hapi: audit trail is not writable; refusing to roll back\n  ");
+            _hrb_eputs(audit_trail_path());
+            _hrb_eputs("\n  every hapi write must be auditable; nothing was changed\n");
+            return 1;
+        }
     }
 
     var applied = 0;
@@ -267,7 +288,8 @@ fn cmd_rollback(): i64 {
             }
         } elif (_hrb_cstr_eq(op, "adopt") == 1) {
             rc = _hrb_reverse_adopt(entry);
-            if (rc == 1) {
+            if (rc == 2) { errored = errored + 1; }
+            if (rc == 1 || rc == 2) {
                 _hrb_puts("  ~ ");
                 _hrb_puts(hae_abs_target(entry));
                 _hrb_puts("  (was adopt; file restored");
@@ -304,6 +326,22 @@ fn cmd_rollback(): i64 {
         _hrb_puts(" already at expected state)");
     }
     _hrb_puts("\n");
+
+    # Seal the window (F-056). With no marker the window is the whole
+    # trail — including the entries a previous rollback appended — so a
+    # second run reversed those too, then a third the second's: the same
+    # end state, but 2, 4, 8 … reversals and a trail doubling every run.
+    # The guide promised "a second run … does nothing". A marker here,
+    # the entry `checkpoint` writes, makes that true. Only after a clean
+    # run that changed something: an errored one is meant to be re-run.
+    if (hapi_dry_run() == 0 && applied > 0 && errored == 0) {
+        var mk_t, mk_v = audit_append_rollback_marker_r();
+        if (is_err_result(mk_t) == 1) {
+            _hrb_eputs("hapi: rolled back, but could not append the closing marker\n");
+            _hrb_eputs("  (a later rollback would re-reverse this run's entries)\n");
+            return 1;
+        }
+    }
     if (errored > 0) { return 1; }
     return 0;
 }

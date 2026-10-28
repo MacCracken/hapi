@@ -24,6 +24,8 @@ enum HapiMfWriteError {
     HapiMfwRenameFailed = 3;
     HapiMfwRowNotFound = 4;
     HapiMfwUnrepresentable = 5;
+    HapiMfwStagingExists = 6;
+    HapiMfwManifestIsSymlink = 7;
 }
 
 # Can `s` be written into a `hapi.cyml` string value and read back as
@@ -68,6 +70,12 @@ fn hapi_mfw_err_msg(code): i64 {
     if (code == HapiMfwUnrepresentable) {
         return "path contains a byte hapi.cyml cannot represent (a quote, a backslash, or a control character)";
     }
+    if (code == HapiMfwManifestIsSymlink) {
+        return "hapi.cyml is a symlink; a rewrite would replace the link with a private copy";
+    }
+    if (code == HapiMfwStagingExists) {
+        return "a staging file from an interrupted write is in the way (hapi.cyml.<pid>.tmp)";
+    }
     return "unknown manifest-write error";
 }
 
@@ -105,13 +113,13 @@ fn _hmw_lock(manifest_path): i64 {
     var dir = _hmw_dirname(manifest_path);
     var fd = file_open(dir, O_RDONLY, 0);
     if (fd < 0) { return 0 - 1; }
-    if (xflock(fd, 2) < 0) { file_close(fd); return 0 - 1; }    # LOCK_EX
+    if (xflock(fd, LOCK_EX) < 0) { file_close(fd); return 0 - 1; }
     return fd;
 }
 
 fn _hmw_unlock(fd): i64 {
     if (fd < 0) { return 0; }
-    xflock(fd, 8);                                              # LOCK_UN
+    xflock(fd, LOCK_UN);
     return file_close(fd);
 }
 
@@ -150,7 +158,7 @@ fn _hmw_itoa(n): i64 {
 # long markdown body below the `---` separator, so that size is
 # reachable without the user doing anything unusual.
 fn _hmw_slurp(path, out_len): i64 {
-    var fd = file_open(path, 0, 0);
+    var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) { return 0; }
     var size = xlseek(fd, 0, 2);              # SEEK_END
     if (size < 0) { file_close(fd); return 0; }
@@ -200,7 +208,15 @@ fn _hmw_write_atomic(path, buf, n): i64 {
     memcpy(tmp + pos, ".tmp\x00", 5);
 
     var fd = file_open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0x1A4);
-    if (fd < 0) { return 0 - HapiMfwWriteFailed; }
+    if (fd < 0) {
+        # Say so when it is a leftover in the way (F-038): the pid in the
+        # name is reused, so a crashed run's staging file refuses every
+        # later run that draws the same pid — rarely on Linux, often on
+        # agnos's small pid space, where O_EXCL has been real since cyrius
+        # 6.6.4 / kernel 1.56.56. `hapi check` lists any it finds.
+        if (hapi_excl_exists(tmp, fd) == 1) { return 0 - HapiMfwStagingExists; }
+        return 0 - HapiMfwWriteFailed;
+    }
     var wrc = file_write(fd, buf, n);
     if (wrc != n) { file_close(fd); hapi_unlink(tmp); return 0 - HapiMfwWriteFailed; }
     hapi_fsync(fd);
@@ -263,16 +279,59 @@ fn _hmw_find_separator(buf, n): i64 {
 # filesystem mutation committed while the row recording it vanished.
 # Measured on a 3 MB manifest with 16 concurrent adopts: 16 files moved,
 # 16 symlinks planted, 16 trail entries — and ONE manifest row (F-012).
+# 1 when the manifest at `path` is a symlink. The rewrite is a rename of a
+# staging file over `path`, which replaces a symlink with a regular file
+# (F-058): through 1.1.0 adopting into a package whose hapi.cyml linked to
+# a shared manifest turned it into a private copy holding the new row,
+# while the shared file — the one every other checkout reads — never got
+# it. 4096 is the readlink buffer link_probe uses; on agnos a shorter one
+# answers -1 for a longer body and would miss the link.
+fn hapi_mfw_manifest_is_symlink(path): i64 {
+    var buf = alloc(4096);
+    if (hapi_readlink(path, buf, 4096) > 0) { return 1; }
+    return 0;
+}
+
 fn manifest_append_link_row(manifest_path, source, target): i64 {
     # Refuse before taking the lock: a row we cannot represent must
     # never reach the file (F-021).
     if (_hmw_representable(source) == 0) { return 0 - HapiMfwUnrepresentable; }
     if (_hmw_representable(target) == 0) { return 0 - HapiMfwUnrepresentable; }
+    if (hapi_mfw_manifest_is_symlink(manifest_path) == 1) { return 0 - HapiMfwManifestIsSymlink; }
     var lk = _hmw_lock(manifest_path);
     if (lk < 0) { return 0 - HapiMfwWriteFailed; }
     var rc = _hmw_append_unlocked(manifest_path, source, target);
     _hmw_unlock(lk);
     return rc;
+}
+
+# 1 when the manifest's line ending is CR LF, judged by its first line.
+# The appended row matches it (F-041): through 1.1.0 the row template was
+# LF-only, so `adopt` left a CRLF manifest with mixed endings — the reader
+# and `check --strict` accept that, but an editor or a diff need not.
+fn _hmw_crlf(buf, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (load8(buf + i) == 10) {
+            if (i > 0) {
+                if (load8(buf + i - 1) == 13) { return 1; }
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Write the line ending at buf+at; returns its length.
+fn _hmw_put_eol(buf, at, crlf): i64 {
+    if (crlf == 1) {
+        store8(buf + at, 13);
+        store8(buf + at + 1, 10);
+        return 2;
+    }
+    store8(buf + at, 10);
+    return 1;
 }
 
 fn _hmw_append_unlocked(manifest_path, source, target): i64 {
@@ -281,21 +340,26 @@ fn _hmw_append_unlocked(manifest_path, source, target): i64 {
     if (buf == 0) { return 0 - HapiMfwReadFailed; }
 
     var sep = _hmw_find_separator(buf, len);
+    var crlf = _hmw_crlf(buf, len);
 
     var slen = strlen(source);
     var tlen = strlen(target);
-    # Block: "\n[[link]]\nsource = \"S\"\ntarget = \"T\"\n"
-    var block_len = 1 + 10 + 11 + slen + 2 + 11 + tlen + 2;
+    # Block: EOL "[[link]]" EOL "source = \"S\"" EOL "target = \"T\"" EOL,
+    # four line endings of one or two bytes each.
+    var block_len = 8 + 10 + slen + 1 + 10 + tlen + 1 + 4 * 2;
     var block = alloc(block_len + 1);
     var bp = 0;
-    store8(block + bp, 10); bp = bp + 1;
-    memcpy(block + bp, "[[link]]\n", 9); bp = bp + 9;
+    bp = bp + _hmw_put_eol(block, bp, crlf);
+    memcpy(block + bp, "[[link]]", 8); bp = bp + 8;
+    bp = bp + _hmw_put_eol(block, bp, crlf);
     memcpy(block + bp, "source = \"", 10); bp = bp + 10;
     memcpy(block + bp, source, slen); bp = bp + slen;
-    memcpy(block + bp, "\"\n", 2); bp = bp + 2;
+    store8(block + bp, 34); bp = bp + 1;
+    bp = bp + _hmw_put_eol(block, bp, crlf);
     memcpy(block + bp, "target = \"", 10); bp = bp + 10;
     memcpy(block + bp, target, tlen); bp = bp + tlen;
-    memcpy(block + bp, "\"\n", 2); bp = bp + 2;
+    store8(block + bp, 34); bp = bp + 1;
+    bp = bp + _hmw_put_eol(block, bp, crlf);
 
     var out_cap = len + bp + 16;
     var out = alloc(out_cap);
@@ -449,6 +513,7 @@ fn _hmw_find_link_block(buf, end, from): i64 {
 # Trims the preceding blank line(s) along with the block so the
 # manifest doesn't grow blank-line clutter from churn.
 fn manifest_remove_link_row(manifest_path, source, target): i64 {
+    if (hapi_mfw_manifest_is_symlink(manifest_path) == 1) { return 0 - HapiMfwManifestIsSymlink; }
     var lk = _hmw_lock(manifest_path);
     if (lk < 0) { return 0 - HapiMfwWriteFailed; }
     var rc = _hmw_remove_unlocked(manifest_path, source, target);
@@ -489,15 +554,26 @@ fn _hmw_remove_unlocked(manifest_path, source, target): i64 {
 
     if (found_start < 0) { return 0 - HapiMfwRowNotFound; }
 
-    # Trim preceding blank lines (one or more `\n` immediately
-    # before `found_start`) so the manifest stays tidy.
+    # Trim preceding blank lines (the run of line endings immediately
+    # before `found_start`), keeping the one that ends the previous line,
+    # so the manifest stays tidy. CR counts as part of the run (F-041):
+    # matching `\n` alone stopped at the first CR, so on a CRLF manifest
+    # nothing was trimmed and each adopt → rollback grew a blank line.
     var cut_start = found_start;
     var pgo = 1;
     while (cut_start > 0 && pgo == 1) {
-        if (load8(buf + cut_start - 1) == 10) { cut_start = cut_start - 1; }
+        var pc = load8(buf + cut_start - 1);
+        if (pc == 10 || pc == 13) { cut_start = cut_start - 1; }
         else { pgo = 0; }
     }
-    if (cut_start < found_start) { cut_start = cut_start + 1; }
+    if (cut_start < found_start) {
+        if (load8(buf + cut_start) == 13 && cut_start + 1 < found_start
+            && load8(buf + cut_start + 1) == 10) {
+            cut_start = cut_start + 2;
+        } else {
+            cut_start = cut_start + 1;
+        }
+    }
 
     var out_cap = len + 1;
     var out = alloc(out_cap);

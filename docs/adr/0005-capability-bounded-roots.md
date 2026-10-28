@@ -247,3 +247,25 @@ F-015 are fixed. The decision above is unchanged: `$HOME` by default,
 and `cap_check_root_r(path) -> Result` still frozen. What changed is
 that the boundary now holds against a symlinked parent directory, which
 it did not from v1.0 through 1.0.7.
+
+## Addendum — 2026-10-28 (1.1.1 P(-1) pass)
+
+**The decision and the frozen interface stand.** Three gaps in how the
+boundary was enforced, all found and fixed in
+[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md):
+
+1. **The `--root` grant is decided on the resolved root (F-051).**
+   `cap_check_root_r` compared spellings, so `--root ~/trap` with
+   `trap -> /outside` read as inside `$HOME`, and every later check — which
+   resolves the scope root too — then agreed. The 2026-08-25 addendum's
+   "F-002 is fixed" was true for targets, not for this. Allowlist entries are
+   resolved as well; one that cannot be resolved grants nothing.
+2. **`..` is resolved after the symlink before it (F-052)**, as the kernel
+   does, not collapsed lexically first.
+3. **`/` contains every absolute path (F-047).** It contained nothing, so
+   `--root /` with `HAPI_ALLOWED_ROOTS=/` was useless, and agnos — which
+   stages `HOME=/` — refused every row.
+
+Two refusals sit beside the scope check and are not overridden by
+`--force`: a target that resolves into the package itself (F-045), and a
+target beneath another row's target (F-057).

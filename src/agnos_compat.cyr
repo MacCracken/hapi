@@ -84,35 +84,37 @@ fn hapi_readlink(path, buf, buflen): i64 {
 # O_LARGEFILE — so the aarch64 build followed symlinks here and F-003's
 # defence was absent there (cyrius 6.6.4 named hapi as carrying it).
 #
-# agnos had no equivalent when this was written. Its AO_* set was RDONLY/
-# WRONLY/RDWR/CREAT/TRUNC/APPEND/DIRECTORY and nothing else, so
-# `lib/io.cyr`'s bridge silently DROPPED the O_NOFOLLOW bit. (The kernel
-# gained AO_NOFOLLOW at agnos 1.56.53 and cyrius 6.6.4 bridges it; this
-# arm does not rely on it yet — see the race note below.)
-# That meant F-003's backup-copy TOCTOU defence did not exist on agnos:
-# an attacker who swapped the regular file for a symlink got the
-# symlink's target content written into the "snapshot", and
-# `hapi_backup_copy` returned 0 as though it had worked (F-031).
+# agnos had no equivalent when this was first written: its AO_* set ended
+# at AO_DIRECTORY, and `lib/io.cyr`'s bridge silently DROPPED the
+# O_NOFOLLOW bit. So F-003's backup-copy TOCTOU defence did not exist on
+# agnos — a swapped-in symlink's target content went into the "snapshot"
+# and `hapi_backup_copy` returned 0 (F-031). 1.0.10 added a pre-check with
+# the `readlink`#70 peer: if the path IS a symlink, refuse. That closed the
+# realistic case but left the race between the readlink and the open.
 #
-# What hapi can do there is check first, with the `readlink`#70 peer it
-# gained in 1.0.4: if the path IS a symlink, refuse. That closes the
-# realistic case — a symlink already sitting at the path — and turns
-# silent wrong-content into an explicit ELOOP.
+# 1.1.1 closes the race (F-039). The kernel gained AO_NOFOLLOW at agnos
+# 1.56.53, and since cyrius 6.6.4 `file_open` bridges O_NOFOLLOW to it, so
+# the agnos arm now passes the flag too and the kernel refuses inside the
+# open itself. The pre-check stays, for kernels older than 1.56.53: their
+# open#7 looks at no bit it does not know (there is no flag validation), so
+# the flag is a no-op there and the pre-check is still the whole defence —
+# the residual race survives only on those kernels. No minimum kernel is
+# needed. On agnos either refusal is a bare negative (-1 from the kernel,
+# -40 from the pre-check); callers test `< 0`.
 #
-# ⚠ It does NOT close the race, and cannot: between the readlink and the
-# open, agnos offers no way to prove the two saw the same inode. The
-# residual window is an accepted agnos boundary until the kernel grows a
-# no-follow open flag; it is narrower than, and strictly better than,
-# following the link unconditionally.
+# The pre-check's buffer is the agnos link-body maximum (symlink#63:
+# 4096). It was 64 through 1.1.0, and agnos readlink#70 answers -1 — not
+# a truncated count — for a body longer than the buffer, so any link
+# with a body of 65 bytes or more read as "not a symlink" and was
+# followed. mirshi truncates like Linux and hid it; a real 1.57.14 kernel
+# showed it.
 fn hapi_open_nofollow(path, flags): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    var probe = alloc(64);
-    var n = hapi_readlink(path, probe, 64);
+    var probe = alloc(4096);
+    var n = hapi_readlink(path, probe, 4096);
     if (n > 0) { return 0 - 40; }          # ELOOP — it is a symlink
-    return file_open(path, flags, 0);
-    #else
-    return file_open(path, flags | O_NOFOLLOW, 0);
     #endif
+    return file_open(path, flags | O_NOFOLLOW, 0);
 }
 
 # mkdir(path, mode). Linux: mkdir(path, mode). agnos: mkdir(path, pathlen)
@@ -137,6 +139,38 @@ fn hapi_mkdir(path, mode): i64 {
     return rc;
     #else
     return sys_mkdir(path, mode);
+    #endif
+}
+
+# 1 when an O_CREAT|O_EXCL open that failed with `err` failed because the
+# name already exists. Linux reports -EEXIST (17 on x86_64 and arm64 alike —
+# both use the asm-generic errno table). agnos reports a bare -1 for every
+# failure (no errno; userland ABI §1), so ask stat whether the name resolves.
+fn hapi_excl_exists(path, err): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var st = alloc(STAT_BUFSZ);
+    if (sys_stat(path, strlen(path), st) >= 0) { return 1; }
+    return 0;
+    #else
+    if (err == 0 - 17) { return 1; }
+    return 0;
+    #endif
+}
+
+# 1 when an open of `path` that failed with `err` failed because nothing is
+# there (ENOENT), as opposed to a path that exists and will not open. Linux
+# says so in the errno. agnos returns a bare -1 for both, so ask stat: the
+# audit-trail reader's "no trail yet is an empty trail" rule (F-017) keyed
+# on -ENOENT alone, and on agnos refused every absent trail as unreadable
+# (F-044) — `hapi list` and `hapi rollback` failed before the first link.
+fn hapi_open_absent(path, err): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var st = alloc(STAT_BUFSZ);
+    if (sys_stat(path, strlen(path), st) < 0) { return 1; }
+    return 0;
+    #else
+    if (err == 0 - 2) { return 1; }
+    return 0;
     #endif
 }
 

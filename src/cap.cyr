@@ -42,6 +42,16 @@ fn _cap_path_within(path, prefix): i64 {
     var pn = strlen(path);
     var fn_ = strlen(prefix);
     if (fn_ == 0) { return 0; }
+    # The root contains every absolute path (F-047). Without this arm the
+    # trailing-slash strip below is skipped for "/" (it must be, or the
+    # prefix would be empty) and the boundary test then asked for a
+    # second '/' at path[1], so `--root /` and HAPI_ALLOWED_ROOTS=/
+    # contained nothing — and agnos, which stages HOME=/, refused every
+    # row of every verb.
+    if (fn_ == 1 && load8(prefix) == 47) {
+        if (pn > 0 && load8(path) == 47) { return 1; }
+        return 0;
+    }
     # Drop a trailing slash on the prefix (treat
     # "/etc/myproject/" as "/etc/myproject").
     if (fn_ > 1 && load8(prefix + fn_ - 1) == 47) { fn_ = fn_ - 1; }
@@ -75,10 +85,16 @@ fn _cap_in_allowlist(path): i64 {
                 var seg = alloc(seg_len + 1);
                 memcpy(seg, raw + start, seg_len);
                 store8(seg + seg_len, 0);
-                # Only absolute paths can be allowlist entries.
+                # Only absolute paths can be allowlist entries. Each is
+                # resolved, like the path it is matched against (F-051):
+                # an entry that is itself reached through a symlink grants
+                # where it physically is. An entry that cannot be resolved
+                # grants nothing.
                 if (load8(seg) == 47) {
-                    var norm = fsl_lexical_normalize(seg);
-                    if (_cap_path_within(path, norm) == 1) { hit = 1; }
+                    var norm = fsl_resolve_path(seg);
+                    if (norm != 0) {
+                        if (_cap_path_within(path, norm) == 1) { hit = 1; }
+                    }
                 }
             }
             start = i + 1;
@@ -90,14 +106,10 @@ fn _cap_in_allowlist(path): i64 {
 
 # Resolve `--root` to an absolute cstring and verify capability.
 # Returns Ok(absolute_root_cstr) on success, Err(HapiCap*) on
-# denial. Caller passes the user-supplied flag value verbatim
-# (may be relative; we canonicalize via fsl_to_absolute, then
-# lexically normalize so `..` segments cannot escape the cap-
-# checked prefix). Symlink-following resolution is deliberately not
-# done here — see F-002 in docs/audit/2026-08-25-audit.md and
-# docs/development/issues/2026-05-23-cap-check-symlink-escape.md for
-# the re-scoped owner (hapi itself, via per-component readlink; the
-# 1.0.5 audit established that kavach will not supply this).
+# denial. Caller passes the user-supplied flag value verbatim (may be
+# relative; it is absolutized and lexically normalized for the spelling
+# hapi records). The capability decision itself is made on the
+# PHYSICALLY resolved root — see the body (F-051).
 # Is `path` contained by `scope_root`? Both are lexically normalized
 # first, so a `..` segment in either cannot smuggle a non-prefix past
 # the component-boundary match.
@@ -146,21 +158,35 @@ fn cap_check_root_r(root_arg): Result {
     if (root_arg == 0 || strlen(root_arg) == 0) {
         return Err(HapiCapInvalidPath);
     }
-    var abs_root = fsl_lexical_normalize(fsl_to_absolute(root_arg));
+    var abs_root = fsl_to_absolute(root_arg);
+    if (abs_root == 0) { return Err(HapiCapDenied); }   # cwd unknowable (F-027)
+    abs_root = fsl_lexical_normalize(abs_root);
 
-    # $HOME is always implicitly allowed. Compare against the
-    # lexically-normalized $HOME — same canonicalization as the
-    # candidate path so prefix-match is meaningful.
+    # The grant is decided on where the root PHYSICALLY is (F-051).
+    # Through 1.1.0 this compared spellings, so `--root ~/trap` with
+    # `trap -> /outside` passed as "within $HOME" — and every later
+    # check then resolved BOTH the target and this scope root through
+    # `trap`, found the target contained, and linked into /outside with
+    # no grant; `--force` deleted a file there. Every containment check
+    # downstream resolves the scope root it is handed, so resolving it
+    # here is what makes the grant and the writes agree. The spelling
+    # returned is unchanged, so trail entries keep their shape.
+    var phys_root = fsl_resolve_path(abs_root);
+    if (phys_root == 0) { return Err(HapiCapDenied); }   # unprovable => refuse
+
+    # $HOME is always implicitly allowed — where it physically is, too.
     var home = _cap_home_override;
     if (home == 0) { home = getenv("HOME"); }
     if (home != 0 && strlen(home) > 0) {
-        var abs_home = fsl_lexical_normalize(fsl_to_absolute(home));
-        if (_cap_path_within(abs_root, abs_home) == 1) {
-            return Ok(abs_root);
+        var phys_home = fsl_resolve_path(home);
+        if (phys_home != 0) {
+            if (_cap_path_within(phys_root, phys_home) == 1) {
+                return Ok(abs_root);
+            }
         }
     }
 
-    if (_cap_in_allowlist(abs_root) == 1) {
+    if (_cap_in_allowlist(phys_root) == 1) {
         return Ok(abs_root);
     }
     return Err(HapiCapDenied);

@@ -41,14 +41,16 @@ Third leg of the terminal-aesthetics set:
 
 ## Status
 
-**v1.1.0** — the v1.0 contract, frozen 2026-05-23, still holds:
+**v1.1.1** — the v1.0 contract, frozen 2026-05-23, still holds:
 command surface (ten verbs plus five global flags), `hapi.cyml`
 manifest schema (ADR 0001), and audit-trail format (ADR 0002) are all
-contractual, and the 1.0.x line has added no surface. What it added
-instead is teeth: 1.0.5 → 1.0.10 is a hardening arc that closed all
-twenty findings of the
-[2026-08-25 P(-1) audit](docs/audit/2026-08-25-audit.md) — see
-[`CHANGELOG.md`](CHANGELOG.md) for the per-release record and
+contractual, and no release since has added surface. What they added
+instead is teeth: 1.0.5 → 1.0.10 closed all twenty findings of the
+[2026-08-25 P(-1) audit](docs/audit/2026-08-25-audit.md), and 1.1.1
+repairs the [2026-10-28 pass](docs/audit/2026-10-28-audit.md), which
+found the capability boundary still deciding some paths on their
+spelling — see [`CHANGELOG.md`](CHANGELOG.md) for the per-release
+record and
 [`docs/development/release-notes/1.0.0.md`](docs/development/release-notes/1.0.0.md)
 for the v1.0 surface.
 
@@ -58,7 +60,7 @@ for the v1.0 surface.
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/hapi   # compile
 ./build/hapi --help                    # see the verb set
-cyrius test                            # 387 assertions across 95 groups
+cyrius test                            # 469 + 55 assertions, two suites
 ```
 
 A worked example lives at
@@ -74,9 +76,9 @@ file with `hapi adopt ~/.somerc somepackage`.
 - [`docs/adr/`](docs/adr/) — five Architecture Decision Records.
   All frozen at v1.0.
 - [`docs/audit/`](docs/audit/) — the P(-1) security audit passes
-  (index + three dated passes). The
-  [2026-08-25 pass](docs/audit/2026-08-25-audit.md) is the current one;
-  its twenty findings drove the 1.0.5 → 1.0.10 hardening arc.
+  (index + four dated passes). The
+  [2026-10-28 pass](docs/audit/2026-10-28-audit.md) is the current one;
+  its findings F-035 – F-059 are repaired in 1.1.1.
 - [`docs/benchmarks.md`](docs/benchmarks.md) — sync over a 100-pkg
   synthetic home.
 - [`docs/development/state.md`](docs/development/state.md) — live

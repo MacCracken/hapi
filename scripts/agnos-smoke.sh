@@ -2,33 +2,47 @@
 # agnos-smoke.sh — run hapi's `--agnos` build under mirshi.
 #
 # WHY THIS EXISTS
-# Three audit findings (F-027, F-031, and ADR 0002's append-atomicity
-# rationale) are target-conditional: they are properties of the agnos
-# syscall ABI and cannot be observed from a Linux build. The 2026-08-25
+# Several audit findings (F-027, F-031/F-039, F-038, F-040, F-044, and
+# ADR 0002's append-atomicity rationale) are target-conditional: they are
+# properties of the agnos syscall ABI and cannot be observed from a Linux
+# build. The 2026-08-25
 # audit recorded them as "blocked on an agnos runner" — which was wrong.
 # mirshi, the AGNOS->Linux syscall-translation supervisor, builds in this
 # tree and runs an agnos-compiled static ELF as a native Linux process.
 # There was no missing runner; nobody had wired it up.
 #
-# Usage:  sh scripts/agnos-smoke.sh [path-to-mirshi] [path-to-agnos-elf]
+# Usage:  sh scripts/agnos-smoke.sh [mirshi] [agnos-elf] [agnos-tests-elf]
 # Exit:   0 all checks pass, 1 otherwise, 2 prerequisites missing (skip).
 #
-# Exit 2 is a SKIP, not a pass: CI should surface it as a warning rather
-# than green, so a missing mirshi cannot quietly mean "agnos is fine".
+# Exit 2 is a SKIP, not a pass. Through 1.1.0 CI accepted it as a warning,
+# and since the runner had no mirshi that meant every run skipped (F-043).
+# CI now builds mirshi (scripts/build-mirshi.sh) and fails on any non-zero
+# exit; the SKIP exists for dev boxes without a mirshi checkout.
+#
+# The tests ELF is tests/agnos.tcyr built with `--agnos` — the target-
+# neutral suite that exercises hapi's agnos-conditional code paths directly.
+# The verbs themselves cannot run here (see check 2), so that suite is where
+# F-031/F-039, F-038, F-040 and F-044 are proven on this target.
 
 set -e
 
 MIRSHI="${1:-/home/macro/Repos/mirshi/build/mirshi}"
 ELF="${2:-./build/hapi-agnos}"
+TESTS="${3:-./build/hapi-agnos-tests}"
 
 if [ ! -x "$MIRSHI" ]; then
     echo "SKIP: no mirshi at $MIRSHI"
-    echo "  build it with: cd <mirshi repo> && cyrius build src/main.cyr build/mirshi"
+    echo "  build it with: sh scripts/build-mirshi.sh <work-dir>   (as CI does)"
     exit 2
 fi
 if [ ! -x "$ELF" ]; then
     echo "SKIP: no agnos build at $ELF"
     echo "  build it with: cyrius build --agnos src/main.cyr build/hapi-agnos"
+    exit 2
+fi
+if [ ! -x "$TESTS" ]; then
+    echo "SKIP: no agnos test build at $TESTS"
+    echo "  build it with: cyrius build --agnos tests/agnos.tcyr build/hapi-agnos-tests"
     exit 2
 fi
 
@@ -85,6 +99,21 @@ esac
 "$MIRSHI" "$ELF" bogusverb > /dev/null 2>&1 && rc=0 || rc=$?
 if [ "$rc" = "2" ]; then echo "  ok    unknown verb exits 2 on agnos"
 else echo "  FAIL  unknown verb exited $rc, expected 2"; FAIL=1; fi
+
+# 5. The agnos-conditional code paths, run on the target (tests/agnos.tcyr).
+#    The summary line must report zero failures AND the binary must exit 0;
+#    a crash mid-suite prints no summary, so neither alone is enough.
+"$MIRSHI" "$TESTS" > "${TMPDIR:-/tmp}/hapi-agnos-tests.$$" 2>&1 && trc=0 || trc=$?
+summary=$(grep -E '^[0-9]+ passed, [0-9]+ failed' "${TMPDIR:-/tmp}/hapi-agnos-tests.$$" | tail -1)
+case "$trc:$summary" in
+    "0:"*" passed, 0 failed"*)
+        echo "  ok    agnos-conditional paths on agnos: $summary" ;;
+    *)
+        echo "  FAIL  tests/agnos.tcyr under mirshi (exit $trc): '${summary:-no summary}'"
+        grep -E 'FAIL:' "${TMPDIR:-/tmp}/hapi-agnos-tests.$$" | sed 's/^/        /'
+        FAIL=1 ;;
+esac
+rm -f "${TMPDIR:-/tmp}/hapi-agnos-tests.$$"
 
 if [ $FAIL -eq 0 ]; then echo "PASS: agnos smoke"; else echo "FAIL: agnos smoke"; fi
 exit $FAIL

@@ -52,6 +52,25 @@ fn _hap_resolve_target(arg, scope_root_abs): i64 {
     return _fsl_path_join(scope_root_abs, arg);
 }
 
+# 1 when `path` has a `..` component.
+fn _hap_has_dotdot(path): i64 {
+    var n = strlen(path);
+    var i = 0;
+    while (i + 1 < n) {
+        if (load8(path + i) == 46 && load8(path + i + 1) == 46) {
+            var at_start = 0;
+            if (i == 0) { at_start = 1; }
+            elif (load8(path + i - 1) == 47) { at_start = 1; }
+            var at_end = 0;
+            if (i + 2 == n) { at_end = 1; }
+            elif (load8(path + i + 2) == 47) { at_end = 1; }
+            if (at_start == 1 && at_end == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Derive the in-package source name from a target path's
 # basename, stripping one leading `.`. Returns a heap cstring.
 fn _hap_derive_source(target_abs): i64 {
@@ -120,9 +139,48 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
         _hap_eputs("hapi: $HOME is unset; cannot resolve scope root\n");
         return 1;
     }
+    # Normalized once, here: the target slice below measures it, so it
+    # must be spelled exactly as abs_target's prefix is.
     var scope_root_abs = fsl_to_absolute(scope_root);
+    if (scope_root_abs == 0) {
+        _hap_eputs("hapi: cannot resolve a relative scope root — the working\n");
+        _hap_eputs("  directory is not knowable on this target\n");
+        return 1;
+    }
+    scope_root_abs = fsl_lexical_normalize(scope_root_abs);
 
-    var abs_target = _hap_resolve_target(file_arg, scope_root_abs);
+    # A `..` in <file> is refused, not collapsed (F-052). Collapsing it
+    # lexically pops the name before it, while the kernel follows that
+    # name first if it is a symlink — `a/../c.conf` with `a -> /outside`
+    # named a file outside $HOME, and the row recorded `a/../c.conf`, which
+    # the manifest parser itself rejects. The manifest cannot say `..`, so
+    # adopt cannot either.
+    if (_hap_has_dotdot(file_arg) == 1) {
+        _hap_eputs("hapi: refusing a `..` component in the file to adopt: ");
+        _hap_eputs(file_arg);
+        _hap_eputs("\n  (spell the path without `..` — a [[link]] target cannot hold one)\n");
+        return 1;
+    }
+    # With no `..` left, normalizing only drops `.` and `//` — no-ops to
+    # the kernel, but not to the target this records (F-053: `./.bashrc`
+    # gave a link computed one directory too high).
+    var abs_target = fsl_lexical_normalize(_hap_resolve_target(file_arg, scope_root_abs));
+
+    # The row's `target` is <file> relative to the scope root, so <file>
+    # must be under it by spelling (F-054). Through 1.1.0 a path outside
+    # it that HAPI_ALLOWED_ROOTS let through was sliced at the scope
+    # root's length regardless: shorter than the root it read before the
+    # buffer and crashed (SIGSEGV, exit 139), longer it recorded a
+    # garbled target in the manifest and the trail.
+    if (_cap_path_within(abs_target, scope_root_abs) == 0) {
+        _hap_eputs("hapi: refusing to adopt a file outside the scope root: ");
+        _hap_eputs(abs_target);
+        _hap_eputs("\n  (scope: ");
+        _hap_eputs(scope_root_abs);
+        _hap_eputs(")\n  a [[link]] target is relative to the scope root, so a file\n");
+        _hap_eputs("  outside it has no row to record — pass --root to adopt there\n");
+        return 1;
+    }
 
     # The <file> argument is a write target: adopt renames it away and
     # plants a symlink where it stood. It must therefore be inside the
@@ -181,6 +239,23 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
         return 1;
     }
 
+    # A file that is already package content, reached through a symlinked
+    # parent (`~/.ssh -> dotfiles/pkg/ssh`), is not the user's to adopt
+    # (F-045): adopt moved it to a second name in the package and planted
+    # a dangling symlink where it had been — inside the package itself.
+    if (fsl_lands_in(abs_target, pkg_dir_abs) == 1) {
+        var phys = fsl_physical_target(abs_target);
+        _hap_eputs("hapi: file is already inside the package: ");
+        _hap_eputs(abs_target);
+        if (phys != 0) {
+            _hap_eputs("\n  (it resolves to ");
+            _hap_eputs(phys);
+            _hap_eputs(")");
+        }
+        _hap_eputs("\n");
+        return 1;
+    }
+
     # Parse the manifest (must exist).
     var mr_t, mr_v = hapi_mf_parse_file_r(manifest_path);
     if (is_err_result(mr_t) == 1) {
@@ -233,8 +308,7 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
         return 1;
     }
 
-    var tgt_parent = _fsl_path_dirname(abs_target);
-    var rel = fsl_compute_relative(tgt_parent, abs_source);
+    var rel = fsl_link_text(abs_target, abs_source);
 
     # --backup-to: opt-in pre-rename snapshot. The original
     # bytes are recoverable from the package after the move,
@@ -261,6 +335,30 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
         _hap_puts(manifest_path);
         _hap_puts("\n");
         return 0;
+    }
+
+    # The manifest edit at the end would refuse a symlinked hapi.cyml
+    # (F-058); refuse it here, before anything moves.
+    if (hapi_mfw_manifest_is_symlink(manifest_path) == 1) {
+        _hap_eputs("hapi: ");
+        _hap_eputs(hapi_mfw_err_msg(HapiMfwManifestIsSymlink));
+        _hap_eputs("\n  (");
+        _hap_eputs(manifest_path);
+        _hap_eputs(")\n");
+        return 1;
+    }
+
+    # Prove the trail takes a write before any mutation (F-055). Through
+    # 1.1.0 adopt moved the file, planted the link and wrote the row, and
+    # only then found the trail unwritable — "adopt succeeded but
+    # audit-trail write failed", the adopt kept, and `rollback` later
+    # reporting an empty trail with nothing to undo.
+    var pf_t, pf_v = audit_preflight_r();
+    if (is_err_result(pf_t) == 1) {
+        _hap_eputs("hapi: audit trail is not writable; refusing to adopt\n  ");
+        _hap_eputs(audit_trail_path());
+        _hap_eputs("\n  every hapi write must be auditable; nothing was changed\n");
+        return 1;
     }
 
     # 0. --backup-to: write the snapshot before any mutation.
@@ -317,7 +415,9 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
         # Undo symlink + move on failure to keep the world consistent.
         hapi_unlink(abs_target);
         hapi_rename(abs_source, abs_target);
-        _hap_eputs("hapi: manifest edit failed; filesystem restored\n");
+        _hap_eputs("hapi: manifest edit failed (");
+        _hap_eputs(hapi_mfw_err_msg(0 - mwrc));
+        _hap_eputs("); filesystem restored\n");
         return 1;
     }
 

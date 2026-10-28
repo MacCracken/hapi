@@ -37,6 +37,8 @@ enum HapiLinkAction {
     LINK_ACT_ERROR = 5;
     LINK_ACT_ESCAPE = 6;
     LINK_ACT_NO_SOURCE = 7;
+    LINK_ACT_INTO_PACKAGE = 8;
+    LINK_ACT_NESTED = 9;
 }
 
 # Test/CI override for the scope root. When set, takes
@@ -114,7 +116,7 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     var abs_src = _fsl_path_join(pkg_dir_abs, src_cstr);
     var abs_tgt = _fsl_path_join(scope_root_abs, tgt_cstr);
     var tgt_parent = _fsl_path_dirname(abs_tgt);
-    var rel = fsl_compute_relative(tgt_parent, abs_src);
+    var rel = fsl_link_text(abs_tgt, abs_src);
 
     store64(plan + 8, abs_src);
     store64(plan + 16, abs_tgt);
@@ -142,6 +144,15 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     # of the target is irrelevant if we cannot link anything there).
     if (fsl_source_present(abs_src) == 0) {
         store64(plan + 32, LINK_ACT_NO_SOURCE);
+        return plan;
+    }
+
+    # A target that physically lands inside the package is never ours to
+    # touch (F-045): through a symlinked parent it can be this row's own
+    # source, which `--force` deleted. Checked before the target probe,
+    # which would call that file an ordinary conflict.
+    if (fsl_lands_in(abs_tgt, pkg_dir_abs) == 1) {
+        store64(plan + 32, LINK_ACT_INTO_PACKAGE);
         return plan;
     }
 
@@ -192,6 +203,19 @@ fn _hlnk_print_conflict(plan): i64 {
         var abs_src = load64(plan + 8);
         _hlnk_eputs("(source missing: ");
         eprint(abs_src, strlen(abs_src));
+        _hlnk_eputs(")");
+    } elif (action == LINK_ACT_NESTED) {
+        var outer = load64(plan + 40);
+        _hlnk_eputs("(beneath another row's target: ");
+        if (outer != 0) { eprint(outer, strlen(outer)); }
+        _hlnk_eputs(")");
+    } elif (action == LINK_ACT_INTO_PACKAGE) {
+        var phys = fsl_physical_target(abs_tgt);
+        _hlnk_eputs("(resolves into the package");
+        if (phys != 0) {
+            _hlnk_eputs(": ");
+            eprint(phys, strlen(phys));
+        }
         _hlnk_eputs(")");
     } else {
         _hlnk_eputs("(probe error)");
@@ -322,6 +346,81 @@ fn cmd_link(pkg_arg, force): i64 {
         _hlnk_eputs("  dangle. Restore the file or fix the [[link]] source,\n");
         _hlnk_eputs("  then re-run. `hapi check <package>` lists every row\n");
         _hlnk_eputs("  whose source is missing.\n");
+        return 1;
+    }
+
+    # A row whose target lies beneath another row's target is refused
+    # (F-057). Containment is planned for every row before any is written,
+    # while both targets are still absent and so look contained. The outer
+    # row then plants a symlink, and the inner row is written THROUGH it:
+    # a package symlink `escape -> /outside` behind `.x`, and `.x/inner`
+    # landed in /outside, exit 0. Even without an escape the inner row
+    # writes into the package through hapi's own link. No layout needs it.
+    var nested = 0;
+    var ka = 0;
+    while (ka < nlinks) {
+        var pla = vec_get(plans, ka);
+        var kb = 0;
+        while (kb < nlinks) {
+            if (kb != ka) {
+                var plb = vec_get(plans, kb);
+                if (_fsl_within(load64(pla + 16), load64(plb + 16)) == 1
+                    && _hlnk_cstr_eq(load64(pla + 16), load64(plb + 16)) == 0) {
+                    store64(pla + 32, LINK_ACT_NESTED);
+                    store64(pla + 40, load64(plb + 16));
+                }
+            }
+            kb = kb + 1;
+        }
+        ka = ka + 1;
+    }
+    var kn = 0;
+    while (kn < nlinks) {
+        var pln = vec_get(plans, kn);
+        if (load64(pln + 32) == LINK_ACT_NESTED) {
+            if (nested == 0) {
+                _hlnk_eputs("hapi: refusing to link `");
+                var pkg_nn = hapi_mf_name(m);
+                eprint(str_data(pkg_nn), str_len(pkg_nn));
+                _hlnk_eputs("` — a target lies beneath another row's target:\n");
+            }
+            _hlnk_print_conflict(pln);
+            nested = 1;
+        }
+        kn = kn + 1;
+    }
+    if (nested == 1) {
+        _hlnk_eputs("  the outer row becomes a symlink, so the inner one would be\n");
+        _hlnk_eputs("  written through it — into the package, or wherever its\n");
+        _hlnk_eputs("  source leads. --force does NOT override this.\n");
+        return 1;
+    }
+
+    # A row whose target lands back inside the package is refused before
+    # the generic conflict block too: that block advises `--force`, and
+    # `--force` is what deleted the package's own file (F-045).
+    var into_pkg = 0;
+    var kp = 0;
+    while (kp < nlinks) {
+        var plp = vec_get(plans, kp);
+        if (load64(plp + 32) == LINK_ACT_INTO_PACKAGE) {
+            if (into_pkg == 0) {
+                _hlnk_eputs("hapi: refusing to link `");
+                var pkg_np = hapi_mf_name(m);
+                eprint(str_data(pkg_np), str_len(pkg_np));
+                _hlnk_eputs("` — target resolves into the package itself:\n");
+            }
+            _hlnk_print_conflict(plp);
+            into_pkg = 1;
+        }
+        kp = kp + 1;
+    }
+    if (into_pkg == 1) {
+        _hlnk_eputs("  a symlinked parent directory leads this target back into\n");
+        _hlnk_eputs("  the package, so what sits there is package content —\n");
+        _hlnk_eputs("  possibly the row's own source. --force does NOT override\n");
+        _hlnk_eputs("  this. Point the target elsewhere, or remove the symlinked\n");
+        _hlnk_eputs("  parent if the package is meant to be reached directly.\n");
         return 1;
     }
 

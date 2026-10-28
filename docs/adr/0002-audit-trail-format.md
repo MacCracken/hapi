@@ -253,3 +253,31 @@ edit or truncate the file.
   other writer. We don't expect concurrent hapi processes, but
   `O_APPEND` is the same code path and removes a class of
   bug.
+
+## Addendum — 2026-10-28 (1.1.1): crash semantics, as built
+
+**The line shape and the required-field set are unchanged.** Two things in
+*Crash semantics* above are corrected here, per the 2026-08-25 pass's
+accepted boundaries and
+[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md).
+
+**1. PIPE_BUF is not the guarantee.** POSIX bounds atomic writes by
+PIPE_BUF for *pipes*, not regular files (and agnos's PIPE_BUF is 512). What
+holds is: on Linux, `O_APPEND` plus an exclusive `flock` across the write;
+on agnos, whose kernel does not honour `AO_APPEND`, the `flock` plus an
+explicit seek to end. Since 1.1.1 an append whose lock fails is refused, not
+attempted. Entries are still one `write(2)` each.
+
+**2. The writer refuses a torn tail (since 1.0.9).** A crash mid-write can
+leave a final line with no `\n`. The reader drops it, as stated above. The
+*writer* checks the last byte before appending, and if it is not `\n` it
+refuses: appending would splice two entries into one line, and the reader
+would then drop both. The verb fails before it mutates anything — since
+1.1.1 for `unlink`, `rollback` and `adopt` as well as `link` (F-055) — and
+the user repairs the tail.
+
+**Replay, as built.** `hapi rollback` writes a `rollback-marker` after a
+run that reversed something without error (F-056), so a second run finds
+nothing past it. Before 1.1.1 a trail with no marker was re-reversed by
+every run. `hapi checkpoint` writes the same entry on demand; markers are
+not de-duplicated.

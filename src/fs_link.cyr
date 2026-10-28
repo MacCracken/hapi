@@ -37,6 +37,26 @@ fn _fsl_probe_new(kind, target_cstr): i64 {
 fn link_probe_kind(p): i64 { return load64(p); }
 fn link_probe_target(p): i64 { return load64(p + 8); }
 
+#ifdef CYRIUS_TARGET_AGNOS
+# agnos only: 1 when the nearest ancestor of `path` that exists is a
+# directory — i.e. a failed stat of `path` means "absent", not "a parent
+# component is a file". 0 otherwise.
+fn _fsl_agnos_parent_is_dir(path): i64 {
+    var cur = _fsl_path_dirname(path);
+    var st = alloc(STAT_BUFSZ);
+    var go = 1;
+    while (go == 1) {
+        if (sys_stat(cur, strlen(cur), st) >= 0) {
+            if ((load64(st + STAT_MODE) & 0xF000) == 0x4000) { return 1; }
+            return 0;
+        }
+        if (strlen(cur) <= 1) { go = 0; }
+        else { cur = _fsl_path_dirname(cur); }
+    }
+    return 0;
+}
+#endif
+
 # Probe `path` (cstring) and classify what's there. readlink(2)
 # is the cheap discriminator — its EINVAL is exactly the "exists
 # but not a symlink" signal. We follow up with a directory probe
@@ -65,7 +85,16 @@ fn link_probe(path): i64 {
     }
     var st = alloc(STAT_BUFSZ);
     var rc = sys_stat(path, strlen(path), st);
-    if (rc < 0) { return _fsl_probe_new(HAPI_LP_ABSENT, 0); }
+    if (rc < 0) {
+        # agnos says -1 for every failure, so "absent" has to be earned:
+        # the path is absent only if its nearest existing ancestor is a
+        # directory (F-050). Through 1.1.0 every failure was ABSENT, so a
+        # path through a regular file (`file/sub`) read as absent where
+        # Linux says ENOTDIR — `unlink` then reported it removed and wrote
+        # no trail entry, and `list` kept counting it live.
+        if (_fsl_agnos_parent_is_dir(path) == 1) { return _fsl_probe_new(HAPI_LP_ABSENT, 0); }
+        return _fsl_probe_new(HAPI_LP_ERROR, 0);
+    }
     if ((load64(st + STAT_MODE) & 0xF000) == 0x4000) { return _fsl_probe_new(HAPI_LP_DIRECTORY, 0); }
     return _fsl_probe_new(HAPI_LP_FILE, 0);
     #else
@@ -80,24 +109,20 @@ fn link_probe(path): i64 {
     var err = 0 - n;
     if (err == 2) { return _fsl_probe_new(HAPI_LP_ABSENT, 0); }
     if (err == 22) {
-        # Path exists, not a symlink. Distinguish file vs directory
-        # via the same trick is_dir uses: open + getdents. ENOTDIR
-        # (errno 20) on getdents = regular file.
-        # io.cyr's portable wrappers, not raw syscalls. Every target
-        # spells these differently — aarch64 Linux has no open(2) at all
-        # (56 there is `openat`, while 56 on x86_64 is `io_setup`, so a
-        # bare number is worse than an undefined one), and agnos's
-        # sys_open is (name, namelen, flags) with a 3-arg getdents. A
-        # bare `syscall(SYS_OPEN, ...)` here is exactly what kept
-        # `--aarch64` from building between 1.0.2 and 1.0.4, so this
-        # block stays on the wrappers even though it sits in the
-        # non-agnos `#else` arm.
-        var fd = file_open(path, O_RDONLY, 0);
-        if (fd < 0) { return _fsl_probe_new(HAPI_LP_FILE, 0); }
-        var dbuf = alloc(32);
-        var gd = xgetdents(fd, dbuf, 32);
-        file_close(fd);
-        if (gd >= 0) { return _fsl_probe_new(HAPI_LP_DIRECTORY, 0); }
+        # Path exists, not a symlink. Split file vs directory with stat
+        # (F-049). Through 1.1.0 this opened the path O_RDONLY and tried
+        # getdents, which had two failure modes: a FIFO at a target made
+        # the open block until a writer came, so `link` and `status` hung;
+        # and any open failure read as FILE, so a mode-000 directory was
+        # reported as a regular file. stat needs neither read permission
+        # nor an open. The final component is already known not to be a
+        # symlink, so stat's following it is moot. Anything that is not a
+        # directory — a FIFO, a socket, a device — stays FILE, as before.
+        # sys_stat is the per-arch peer (x86_64 stat, arm64 fstatat), and
+        # STAT_MODE its per-arch offset.
+        var st = alloc(STAT_BUFSZ);
+        if (sys_stat(path, st) < 0) { return _fsl_probe_new(HAPI_LP_ERROR, 0); }
+        if ((load64(st + STAT_MODE) & 0xF000) == 0x4000) { return _fsl_probe_new(HAPI_LP_DIRECTORY, 0); }
         return _fsl_probe_new(HAPI_LP_FILE, 0);
     }
     return _fsl_probe_new(HAPI_LP_ERROR, 0);
@@ -295,13 +320,23 @@ fn _fsl_split(path): i64 {
 # parent directories, so the parent of a new target is routinely absent,
 # and an absent component cannot be a symlink out of the scope.
 #
+# `.` and `..` are walked, not pre-collapsed (F-052). Through 1.1.0 the
+# path was lexically normalized first, which popped `..` against the
+# literal name before it — so `a/..` with `a -> /outside` came out as the
+# directory holding `a`, while the kernel goes to /outside's parent.
+# `adopt 'a/../c.conf'` moved a file from outside $HOME into the package
+# on that. A `..` now pops the RESOLVED prefix, which is exactly the
+# kernel's physical parent, and a symlink's own text is spliced in raw
+# for the same reason.
+#
 # Hop-capped at 40 (the kernel's own ELOOP budget). Returns 0 if the cap
 # is hit — the caller must treat that as "cannot prove containment" and
 # refuse, never as "contained".
 fn fsl_resolve_path(path): i64 {
-    var cur = fsl_lexical_normalize(fsl_to_absolute(path));
+    var abs = fsl_to_absolute(path);
+    if (abs == 0) { return 0; }
     var hops = 0;
-    var parts = _fsl_split(cur);
+    var parts = _fsl_split(abs);
     var idx = 0;
     var acc = alloc(2);
     store8(acc, 47); store8(acc + 1, 0);          # "/"
@@ -309,40 +344,44 @@ fn fsl_resolve_path(path): i64 {
     var go = 1;
     while (go == 1) {
         if (idx >= vec_len(parts)) { go = 0; continue; }
-        var seg = vec_get(parts, idx);
-        acc = _fsl_path_join(acc, _fsl_str_to_cstr(seg));
+        var seg = _fsl_str_to_cstr(vec_get(parts, idx));
         idx = idx + 1;
-
-        var probe = link_probe(acc);
+        if (_fsl_seg_is(seg, ".") == 1) { continue; }
+        if (_fsl_seg_is(seg, "..") == 1) {
+            acc = _fsl_path_dirname(acc);           # dirname("/") is "/"
+            continue;
+        }
+        var cand = _fsl_path_join(acc, seg);
+        var probe = link_probe(cand);
         if (link_probe_kind(probe) == HAPI_LP_SYMLINK) {
             hops = hops + 1;
             if (hops > 40) { return 0; }
             var tgt = link_probe_target(probe);
             if (tgt == 0) { return 0; }
-            var next = 0;
+            # Continue from the link's text, then the components we have
+            # not consumed. An absolute text restarts at "/"; a relative
+            # one resolves from the link's own (already resolved) parent,
+            # which `acc` still is.
             if (load8(tgt) == 47) {
-                next = fsl_lexical_normalize(tgt);
-            } else {
-                next = fsl_lexical_normalize(_fsl_path_join(_fsl_path_dirname(acc), tgt));
+                acc = alloc(2);
+                store8(acc, 47); store8(acc + 1, 0);
             }
-            # Re-seat the walk at the link target, then continue with the
-            # components we have not consumed yet.
-            var rest = vec_new();
+            var merged = _fsl_split(tgt);
             var r = idx;
-            while (r < vec_len(parts)) { vec_push(rest, vec_get(parts, r)); r = r + 1; }
-            var head = _fsl_split(next);
-            var h = 0;
-            var merged = vec_new();
-            while (h < vec_len(head)) { vec_push(merged, vec_get(head, h)); h = h + 1; }
-            h = 0;
-            while (h < vec_len(rest)) { vec_push(merged, vec_get(rest, h)); h = h + 1; }
+            while (r < vec_len(parts)) { vec_push(merged, vec_get(parts, r)); r = r + 1; }
             parts = merged;
             idx = 0;
-            acc = alloc(2);
-            store8(acc, 47); store8(acc + 1, 0);
+        } else {
+            acc = cand;
         }
     }
     return acc;
+}
+
+fn _fsl_seg_is(seg, lit): i64 {
+    var n = strlen(lit);
+    if (strlen(seg) != n) { return 0; }
+    return memeq(seg, lit, n);
 }
 
 # Is the PHYSICAL location of `path` inside the PHYSICAL scope root?
@@ -356,6 +395,11 @@ fn _fsl_within(path, prefix): i64 {
     var pn = strlen(path);
     var fn_ = strlen(prefix);
     if (fn_ == 0) { return 0; }
+    # "/" contains every absolute path — see _cap_path_within (F-047).
+    if (fn_ == 1 && load8(prefix) == 47) {
+        if (pn > 0 && load8(path) == 47) { return 1; }
+        return 0;
+    }
     if (fn_ > 1 && load8(prefix + fn_ - 1) == 47) { fn_ = fn_ - 1; }
     if (pn < fn_) { return 0; }
     if (memeq(path, prefix, fn_) == 0) { return 0; }
@@ -370,6 +414,91 @@ fn fsl_resolved_within(path, scope_root): i64 {
     var rs = fsl_resolve_path(scope_root);
     if (rs == 0) { return 0; }
     return _fsl_within(rp, rs);
+}
+
+# The final component of `path` (no slash), or `path` itself when it has
+# no slash.
+fn _fsl_path_basename(path): i64 {
+    var n = strlen(path);
+    var i = n;
+    while (i > 0 && load8(path + i - 1) != 47) { i = i - 1; }
+    return _fsl_cstr_dup(path + i);
+}
+
+# Where a link at `abs_target` PHYSICALLY sits: its parent resolved
+# through every symlink, plus its own final name left unresolved. The
+# final component is not followed on purpose — for an up-to-date row it
+# IS hapi's symlink, and following that lands in the package by design.
+# Returns 0 when the parent cannot be resolved (hop cap).
+fn fsl_physical_target(abs_target): i64 {
+    var rp = fsl_resolve_path(_fsl_path_dirname(abs_target));
+    if (rp == 0) { return 0; }
+    return _fsl_path_join(rp, _fsl_path_basename(abs_target));
+}
+
+# 1 when a link at `abs_target` would physically sit inside `dir` — or
+# when that cannot be proven either way, since the caller refuses on 1.
+#
+# Containment in the SCOPE was already decided on the resolved path
+# (F-015), but nothing asked the same question of the PACKAGE (F-045):
+# with `~/.ssh -> dotfiles/pkg/ssh` and a row `ssh/config -> .ssh/config`,
+# the target is the row's own source reached through a symlinked parent.
+# `link` called it an "existing regular file", and `--force` deleted the
+# user's only copy and planted a symlink to itself. Both paths are inside
+# $HOME, so the scope check was satisfied.
+fn fsl_lands_in(abs_target, dir): i64 {
+    var pt = fsl_physical_target(abs_target);
+    if (pt == 0) { return 1; }
+    var rd = fsl_resolve_path(dir);
+    if (rd == 0) { return 1; }
+    return _fsl_within(pt, rd);
+}
+
+# The text hapi writes into the symlink at `abs_target` (ADR 0003): the
+# relative path from the link's parent directory to the source — the
+# directory the link PHYSICALLY sits in.
+#
+# Through 1.1.0 this was computed from the LEXICAL parent (F-046). The
+# two agree unless a parent component is a symlink, and then they need
+# not: with `~/.config -> data/deep/config`, a row `.config/rc` got the
+# text `../dotfiles/pkg/rc`, which the kernel resolves from
+# `~/data/deep/config` to a path that does not exist. `link` reported
+# success, `status` said OK (it compares the text, which matched), and a
+# re-run said up to date. The source half stays lexical on purpose — a
+# package reached through a symlink resolves on its own, and resolving it
+# here would bake that mount into every link, against ADR 0003's
+# portability rationale.
+#
+# An unresolvable parent (hop cap) falls back to the lexical one; every
+# caller refuses such a row on the scope check before writing anything.
+fn fsl_link_text(abs_target, abs_source): i64 {
+    var parent = _fsl_path_dirname(abs_target);
+    var rp = fsl_resolve_path(parent);
+    if (rp == 0) { rp = parent; }
+    return fsl_compute_relative(rp, abs_source);
+}
+
+# 1 when the symlink text `text` at `abs_target` is one hapi wrote for
+# `abs_source`: today's text, or the lexical-parent text hapi 1.1.0 and
+# earlier wrote. Removal (unlink, rollback) accepts both, so a link an
+# older hapi planted under a symlinked parent stays removable — "we only
+# remove what we created". Creation and `status` use fsl_link_text alone.
+fn fsl_link_text_matches(text, abs_target, abs_source): i64 {
+    if (text == 0) { return 0; }
+    var tn = strlen(text);
+    var now = fsl_link_text(abs_target, abs_source);
+    if (now != 0) {
+        if (strlen(now) == tn) {
+            if (memeq(text, now, tn) == 1) { return 1; }
+        }
+    }
+    var old = fsl_compute_relative(_fsl_path_dirname(abs_target), abs_source);
+    if (old != 0) {
+        if (strlen(old) == tn) {
+            if (memeq(text, old, tn) == 1) { return 1; }
+        }
+    }
+    return 0;
 }
 
 fn fsl_lexical_normalize(path): i64 {

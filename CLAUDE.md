@@ -119,7 +119,7 @@ format, and **always** before a major-version cut:
 - [`docs/audit/`](docs/audit/) — Completed P(-1) security/hardening passes, one dated file per pass; findings carry stable `F-NNN` ids
 - [`docs/benchmarks.md`](docs/benchmarks.md) — `sync` scaling trend + the acceptance gates a release must not regress
 - [`docs/doc-health.md`](docs/doc-health.md) — Whole-tree doc-currency ledger (fresh / stale / archive / open-question; refreshed in place when docs are touched)
-- [`scripts/`](scripts/) — Shell harnesses for what `cyrius test` structurally cannot express, both run by CI: `concurrency-test.sh` (needs two hapi processes; `.tcyr` cannot fork) and `agnos-smoke.sh` (runs the `--agnos` build under mirshi; exits 2 = SKIP when mirshi is absent)
+- [`scripts/`](scripts/) — Shell harnesses for what `cyrius test` structurally cannot express, run by CI: `concurrency-test.sh` (needs two hapi processes; `.tcyr` cannot fork), `agnos-smoke.sh` (runs the `--agnos` build and the agnos build of `tests/agnos.tcyr` under mirshi; exits 2 = SKIP when a prerequisite is absent, which CI treats as a failure), and `build-mirshi.sh` (how CI gets a mirshi). mirshi is not the agnos kernel — see the 2026-10-28 audit's *Harness gap*
 
 Full doc-tree convention: [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md).
 

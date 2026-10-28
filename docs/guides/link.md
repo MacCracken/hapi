@@ -71,6 +71,30 @@ data; if you genuinely want to replace one, `rm -rf` with your
 eyes on the screen and then re-run `hapi link`. The flag is a
 small escape hatch, not a sledgehammer.
 
+Four refusals are never overridden by `--force`, because following
+the generic "rerun with --force" advice is exactly what made each one
+destructive:
+
+- **The target resolves outside the scope root** — see
+  [capability](capability.md).
+- **The row's source is missing** — the link would dangle.
+- **The target resolves into the package itself** (1.1.1). With
+  `~/.ssh -> dotfiles/pkg/ssh`, the row `ssh/config -> .ssh/config`
+  names its own source as its target; through 1.1.0 `--force` deleted
+  that file — the only copy — and linked it to itself.
+- **The target lies beneath another row's target** (1.1.1). The outer
+  row becomes a symlink, so the inner one would be written through it.
+
+### Under a symlinked parent
+
+The link text is computed from the directory the link physically sits
+in (ADR 0003, 1.1.1 addendum). Through 1.1.0 it was computed from the
+spelled parent, so under `~/.config -> data/deep/config` a row
+`.config/rc` got a text that dangled — while `status` said OK. A link
+1.1.0 wrote there still counts as hapi's for `unlink` and `rollback`;
+`link` sees it as a conflict (`--force` replaces it) and `status`
+reports it.
+
 ## Preserving the original bytes — `--backup-to`
 
 `--force` over a regular file is irreversible by itself — the

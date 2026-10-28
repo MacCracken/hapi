@@ -102,12 +102,25 @@ jobs:
         # signature verification the hand-rolled block skipped (which also
         # had `|| true` on every cp, so a half-copied toolchain looked
         # like a clean install). Same pattern as darshana / patra / libro.
+        #
+        # The installer itself comes from the PIN's tag, never from `main`
+        # (F-042). Through 1.1.0 this piped `…/cyrius/main/scripts/install.sh`
+        # into sh, so a push to upstream's mutable default branch ran on
+        # every hapi build even though the toolchain version was pinned —
+        # and the script being run is the one that does the SHA256 and
+        # signature checks. Upstream's own `cyriusly install` stopped
+        # fetching from main for this reason (cyrius 6.2.30 / 6.6.20). It is
+        # fetched to a file, not piped: `curl | sh` exits 0 when the fetch
+        # fails, because sh happily runs an empty script.
         run: |
           set -e
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
-          echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "Installing Cyrius $CYRIUS_VERSION (installer from tag $CYRIUS_VERSION)"
+          INSTALLER="$RUNNER_TEMP/cyrius-install.sh"
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/$CYRIUS_VERSION/scripts/install.sh" \
+            -o "$INSTALLER" \
+            || { echo "::error::could not fetch scripts/install.sh at tag $CYRIUS_VERSION"; exit 1; }
+          CYRIUS_VERSION="$CYRIUS_VERSION" sh "$INSTALLER"
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Verify toolchain layout

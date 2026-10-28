@@ -1,0 +1,327 @@
+# tests/agnos.tcyr — hapi's agnos-conditional paths, as a target-neutral suite.
+#
+# Every assertion here holds on EVERY target hapi ships for, so `cyrius test`
+# runs it on x86_64 (and `--aarch64` under qemu), and scripts/agnos-smoke.sh
+# builds it with `--agnos` and runs it under mirshi. That run is the only place
+# the `#ifdef CYRIUS_TARGET_AGNOS` arms in src/ execute in CI (F-043): through
+# 1.1.0 the agnos build was compile-only there, and the smoke skipped.
+#
+# tests/hapi.tcyr cannot be this file. It leans on Linux file modes, a working
+# directory and relative paths, none of which agnos has. So the rules here are:
+# absolute paths only, no chmod, and no environment — mirshi passes the child
+# no envp, so $HOME / $PWD / $XDG_STATE_HOME are all unset.
+
+include "src/agnos_compat.cyr"
+include "src/manifest.cyr"
+include "src/audit.cyr"
+include "src/audit_reader.cyr"
+include "src/fs_link.cyr"
+include "src/manifest_write.cyr"
+include "src/backup.cyr"
+include "src/cmd/link.cyr"
+include "src/cmd/status.cyr"
+include "src/cmd/unlink.cyr"
+
+var _ta_counter = 0;
+
+# A fresh directory under /tmp, unique per run and call. The pid alone is
+# not enough: under mirshi every agnos child is pid 1.
+fn _ta_scratch(): i64 {
+    _ta_counter = _ta_counter + 1;
+    var buf[128];
+    var prefix = "/tmp/hapi-agnos-test-";
+    var p = strlen(prefix);
+    memcpy(&buf, prefix, p);
+    p = p + fmt_int_buf(sys_getpid(), &buf + p);
+    store8(&buf + p, 45); p = p + 1;
+    p = p + fmt_int_buf(clock_now_ns(), &buf + p);
+    store8(&buf + p, 45); p = p + 1;
+    p = p + fmt_int_buf(_ta_counter, &buf + p);
+    store8(&buf + p, 0);
+    var out = alloc(p + 1);
+    memcpy(out, &buf, p + 1);
+    hapi_mkdir(out, 0x1C0);
+    return out;
+}
+
+fn _ta_write(path, content): i64 {
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) { return fd; }
+    var n = file_write(fd, content, strlen(content));
+    file_close(fd);
+    return n;
+}
+
+# 1 when the file at `path` holds exactly `content`.
+fn _ta_holds(path, content): i64 {
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) { return 0; }
+    var want = strlen(content);
+    var buf = alloc(want + 2);
+    var n = file_read(fd, buf, want + 1);
+    file_close(fd);
+    if (n != want) { return 0; }
+    return memeq(buf, content, want);
+}
+
+fn _ta_links(manifest_path): i64 {
+    var r_t, r_v = hapi_mf_parse_file_r(manifest_path);
+    if (is_err_result(r_t) == 1) { return 0 - 1; }
+    return vec_len(hapi_mf_links(r_v));
+}
+
+# F-031 / F-039. The agnos arm used to pre-check with readlink and open
+# without the flag; it now does both, and the flag is what makes the refusal
+# atomic where the kernel honours AO_NOFOLLOW (agnos ≥ 1.56.53, and mirshi
+# ≥ 1.11.2). The race itself cannot be staged in one thread, so the last two
+# assertions pin the primitive the arm now relies on, on this target.
+fn test_nofollow_open() {
+    test_group("agnos_compat: no-follow open refuses a symlink");
+
+    var d = _ta_scratch();
+    var real = _fsl_path_join(d, "real");
+    var lnk = _fsl_path_join(d, "lnk");
+    _ta_write(real, "x");
+    assert_eq(hapi_symlink(real, lnk), 0, "symlink planted");
+
+    var fd = hapi_open_nofollow(real, O_RDONLY);
+    assert(fd >= 0, "a regular file opens");
+    if (fd >= 0) { file_close(fd); }
+    assert(hapi_open_nofollow(lnk, O_RDONLY) < 0, "a symlink is refused");
+
+    # A body longer than the old 64-byte pre-check buffer: agnos readlink
+    # answers -1 (not a short count) when the body does not fit, so the
+    # pre-check used to call this "not a symlink".
+    var long_lnk = _fsl_path_join(d, "long");
+    var body = alloc(128);
+    var bi = 0;
+    while (bi < 40) { store8(body + bi * 2, 46); store8(body + bi * 2 + 1, 47); bi = bi + 1; }
+    memcpy(body + 80, "real", 4);
+    store8(body + 84, 0);
+    assert_eq(hapi_symlink(body, long_lnk), 0, "an 84-byte symlink planted");
+    assert(hapi_open_nofollow(long_lnk, O_RDONLY) < 0, "a long-bodied symlink is refused too");
+
+    assert(file_open(lnk, O_RDONLY | O_NOFOLLOW, 0) < 0,
+        "O_NOFOLLOW itself refuses a symlink on this target");
+    var f2 = file_open(lnk, O_RDONLY, 0);
+    assert(f2 >= 0, "control: without the flag the link is followed");
+    if (f2 >= 0) { file_close(f2); }
+    return 0;
+}
+
+# F-040. O_CREAT|O_EXCL has meant "exclusive" on agnos only since cyrius
+# 6.6.4 bridged it to AO_EXCL (kernel 1.56.56); before that both of hapi's
+# exclusive creates opened an existing file and overwrote it in place.
+fn test_exclusive_create() {
+    test_group("O_CREAT|O_EXCL refuses an existing name and leaves it intact");
+
+    var d = _ta_scratch();
+    var p = _fsl_path_join(d, "precious");
+    _ta_write(p, "precious");
+
+    var fd = file_open(p, O_WRONLY | O_CREAT | O_EXCL, 0x1A4);
+    assert(fd < 0, "an existing name is refused");
+    assert_eq(hapi_excl_exists(p, fd), 1, "and the failure reads as 'it exists'");
+    var fd2 = file_open(p, O_WRONLY | O_CREAT | O_EXCL | O_TRUNC, 0x1A4);
+    assert(fd2 < 0, "with O_TRUNC as well, still refused");
+    assert_eq(_ta_holds(p, "precious"), 1, "the existing file is untouched");
+
+    var missing = _fsl_path_join(d, "no-such-dir/f");
+    var fd3 = file_open(missing, O_WRONLY | O_CREAT | O_EXCL, 0x1A4);
+    assert(fd3 < 0, "a create under a missing directory fails");
+    assert_eq(hapi_excl_exists(missing, fd3), 0, "and does not read as 'it exists'");
+    return 0;
+}
+
+# F-044. "No trail yet" is an empty trail (F-017), but the reader recognised
+# it by -ENOENT, which agnos never returns, so there every absent trail was
+# refused as unreadable.
+fn test_absent_trail_is_empty() {
+    test_group("audit_reader: an absent trail is empty on every target");
+
+    var d = _ta_scratch();
+    var path = _fsl_path_join(d, "audit.jsonl");
+    var fd = file_open(path, O_RDONLY, 0);
+    assert(fd < 0, "the trail is absent");
+    assert_eq(hapi_open_absent(path, fd), 1, "and the failure reads as 'absent'");
+
+    var r_t, r_v = audit_read_r(path);
+    assert_eq(is_err_result(r_t), 0, "an absent trail is not an error");
+    if (is_err_result(r_t) == 0) { assert_eq(vec_len(r_v), 0, "and reads as empty"); }
+
+    # A directory where the trail should be exists, so it is not 'absent'.
+    assert_eq(hapi_open_absent(d, 0 - 21), 0, "an existing path is not 'absent'");
+    var e_t, e_v = audit_read_r(d);
+    assert_eq(is_err_result(e_t), 1, "a trail path that will not read is an error");
+    return 0;
+}
+
+# The trail's append path on this target: file_append_locked (LOCK_EX plus an
+# explicit SEEK_END on agnos, which does not honour AO_APPEND), the torn-tail
+# probe, and hapi_fsync (a global sync on agnos).
+fn test_trail_roundtrip() {
+    test_group("audit: append then read back");
+
+    var d = _ta_scratch();
+    var path = _fsl_path_join(d, "audit.jsonl");
+    audit_set_trail_path(path);
+    var a_t, a_v = audit_append_link_r("pkgA", "1.0", "sha1:aaa",
+        "srcA", ".tgtA", "/abs/srcA", "/abs/tgtA", 0);
+    assert_eq(is_err_result(a_t), 0, "first append succeeds");
+    var b_t, b_v = audit_append_link_r("pkgB", "2.0", "sha1:bbb",
+        "srcB", ".tgtB", "/abs/srcB", "/abs/tgtB", 0);
+    assert_eq(is_err_result(b_t), 0, "second append succeeds");
+    audit_set_trail_path(0);
+
+    var r_t, r_v = audit_read_r(path);
+    assert_eq(is_err_result(r_t), 0, "the trail reads");
+    if (is_err_result(r_t) == 0) { assert_eq(vec_len(r_v), 2, "both entries come back"); }
+    return 0;
+}
+
+# The manifest writer on this target: the package-dir flock, a pid-named
+# O_EXCL staging file, hapi_fsync, hapi_rename — and F-038's leftover check,
+# which on agnos has to ask stat because the open's -1 carries no errno.
+fn test_manifest_roundtrip() {
+    test_group("manifest_write: append, remove, and a staging leftover");
+
+    var d = _ta_scratch();
+    var m = _fsl_path_join(d, "hapi.cyml");
+    _ta_write(m, "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"f\"\ntarget = \".f\"\n");
+    assert_eq(_ta_links(m), 1, "the manifest parses");
+    assert_eq(manifest_append_link_row(m, "n", ".n"), 0, "append succeeds");
+    assert_eq(_ta_links(m), 2, "the appended row is read");
+    assert_eq(manifest_remove_link_row(m, "n", ".n"), 0, "remove succeeds");
+    assert_eq(_ta_links(m), 1, "the row is gone");
+
+    var pids = _hmw_itoa(sys_getpid());
+    var ml = strlen(m);
+    var pl = strlen(pids);
+    var stage = alloc(ml + pl + 6);
+    memcpy(stage, m, ml);
+    store8(stage + ml, 46);
+    memcpy(stage + ml + 1, pids, pl);
+    memcpy(stage + ml + 1 + pl, ".tmp\x00", 5);
+    _ta_write(stage, "left by a crashed run");
+    assert_eq(manifest_append_link_row(m, "n", ".n"), 0 - HapiMfwStagingExists,
+        "a staging leftover is named, not reported as a bare write failure");
+    assert_eq(_ta_holds(stage, "left by a crashed run"), 1, "and is not clobbered");
+    assert_eq(_ta_links(m), 1, "the manifest is unchanged");
+    hapi_unlink(stage);
+    return 0;
+}
+
+# The --backup-to copy on this target: no-follow source open, exclusive
+# destination create.
+fn test_backup_copy() {
+    test_group("backup: copy, refuse a symlink source, refuse an existing destination");
+
+    var d = _ta_scratch();
+    var src = _fsl_path_join(d, "src");
+    var dst = _fsl_path_join(d, "snap/dst");
+    var lnk = _fsl_path_join(d, "lnk");
+    _ta_write(src, "the bytes --force would delete");
+    assert_eq(hapi_backup_copy(src, dst), 0, "a regular file copies");
+    assert_eq(_ta_holds(dst, "the bytes --force would delete"), 1, "byte for byte");
+
+    hapi_symlink(src, lnk);
+    assert(hapi_backup_copy(lnk, _fsl_path_join(d, "snap/via-link")) < 0, "a symlink source is refused");
+
+    _ta_write(src, "newer");
+    assert(hapi_backup_copy(src, dst) < 0, "an existing destination is refused");
+    assert_eq(_ta_holds(dst, "the bytes --force would delete"), 1, "and keeps the first snapshot");
+    return 0;
+}
+
+# The remaining path-length shims, and dir_list_checked's error channel
+# (F-037's primitive): listing a regular file is an error on every target.
+fn test_fs_shims() {
+    test_group("agnos_compat: mkdir / symlink / readlink / rename / unlink");
+
+    var d = _ta_scratch();
+    # The callers' contract (fsl_mkdir_parents, audit_ensure_dir): success,
+    # or Linux's -EEXIST. agnos has no errno, so its shim confirms the
+    # directory with stat and answers 0.
+    var erc = hapi_mkdir(d, 0x1C0);
+    assert(erc == 0 || erc == 0 - 17, "mkdir of an existing directory reads as success");
+    var sub = _fsl_path_join(d, "sub");
+    assert_eq(hapi_mkdir(sub, 0x1C0), 0, "mkdir of a new directory succeeds");
+
+    var lnk = _fsl_path_join(d, "lnk");
+    assert_eq(hapi_symlink("some/target", lnk), 0, "symlink succeeds");
+    var buf = alloc(64);
+    var n = hapi_readlink(lnk, buf, 64);
+    assert_eq(n, 11, "readlink returns the target's length");
+    if (n == 11) { assert_eq(memeq(buf, "some/target", 11), 1, "and its text"); }
+
+    var a = _fsl_path_join(d, "a");
+    var b = _fsl_path_join(d, "b");
+    _ta_write(a, "moved");
+    assert_eq(hapi_rename(a, b), 0, "rename succeeds");
+    assert_eq(_ta_holds(b, "moved"), 1, "the content moved");
+    assert(file_open(a, O_RDONLY, 0) < 0, "the old name is gone");
+    assert_eq(hapi_unlink(b), 0, "unlink succeeds");
+
+    var names = vec_new();
+    assert(dir_list_checked(str_from(d), names) == 0, "listing a directory succeeds");
+    assert(dir_list_checked(str_from(lnk), names) < 0, "listing a non-directory is an error");
+
+    # F-050: a path through a regular file is not "absent" — agnos used to
+    # say ABSENT for every failed stat.
+    var f = _fsl_path_join(d, "plain");
+    _ta_write(f, "x");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "plain/sub"))), HAPI_LP_ERROR,
+        "a path through a regular file probes as an error");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "nope/deeper"))), HAPI_LP_ABSENT,
+        "a path under a missing directory probes as absent");
+    return 0;
+}
+
+# The verbs themselves on this target, with the scope at "/" — agnos's own
+# default (it stages HOME=/), which through 1.1.0 contained nothing, so
+# every row of every verb was refused there (F-047). The scope and trail
+# are set directly: mirshi passes no environment.
+fn test_verbs_with_root_scope() {
+    test_group("link / status / unlink round trip with the scope at /");
+
+    var d = _ta_scratch();
+    var pkg = _fsl_path_join(d, "pkg");
+    hapi_mkdir(pkg, 0x1C0);
+    _ta_write(_fsl_path_join(pkg, "rc"), "rc-content");
+    var tgt = _fsl_path_join(d, "home-rc");
+    var hdr = "[package]\nname = \"agnos-p\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"rc\"\ntarget = \"";
+    var hl = strlen(hdr);
+    var tl = strlen(tgt) - 1;
+    var m = alloc(hl + tl + 4);
+    memcpy(m, hdr, hl);
+    memcpy(m + hl, tgt + 1, tl);
+    memcpy(m + hl + tl, "\"\n\x00", 3);
+    _ta_write(_fsl_path_join(pkg, "hapi.cyml"), m);
+
+    link_set_scope_root("/");
+    audit_set_trail_path(_fsl_path_join(d, "audit.jsonl"));
+    assert_eq(cmd_link(pkg, 0), 0, "link succeeds");
+    assert_eq(_ta_holds(tgt, "rc-content"), 1, "and the link resolves to the source");
+    assert_eq(cmd_status(pkg), 0, "status agrees");
+    assert_eq(cmd_link(pkg, 0), 0, "a re-run is a no-op");
+    assert_eq(cmd_unlink("agnos-p"), 0, "unlink succeeds");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_ABSENT, "and removes the link");
+    link_set_scope_root(0);
+    audit_set_trail_path(0);
+    return 0;
+}
+
+fn main(): i64 {
+    test_nofollow_open();
+    test_exclusive_create();
+    test_absent_trail_is_empty();
+    test_trail_roundtrip();
+    test_manifest_roundtrip();
+    test_backup_copy();
+    test_fs_shims();
+    test_verbs_with_root_scope();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

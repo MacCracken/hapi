@@ -106,8 +106,7 @@ fn cmd_status(pkg_arg): i64 {
         var tgt_cstr = _fsl_str_to_cstr(hapi_link_target(lnk));
         var abs_src = _fsl_path_join(pkg_dir_abs, src_cstr);
         var abs_tgt = _fsl_path_join(scope_root_abs, tgt_cstr);
-        var tgt_parent = _fsl_path_dirname(abs_tgt);
-        var expected = fsl_compute_relative(tgt_parent, abs_src);
+        var expected = fsl_link_text(abs_tgt, abs_src);
 
         var probe = link_probe(abs_tgt);
         var kind = link_probe_kind(probe);

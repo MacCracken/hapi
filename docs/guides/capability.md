@@ -90,6 +90,19 @@ Two things worth holding onto:
 target in its own right, since adopt renames the file away and plants a
 symlink where it stood.
 
+Since 1.1.1 the resolution is the kernel's in three more places:
+
+- **`--root` itself is granted where it resolves.** `--root ~/trap` with
+  `trap -> /outside` is outside `$HOME`, and needs `/outside` in
+  `HAPI_ALLOWED_ROOTS`. Through 1.1.0 it was judged on its spelling and
+  let a plain `link` write — and `--force` delete — in `/outside`.
+- **`..` follows the symlink before it.** `a/..` with `a -> /outside/deep`
+  is `/outside`, as the kernel says; it was collapsed lexically to the
+  directory holding `a`.
+- **`/` contains everything.** `--root /` (with `HAPI_ALLOWED_ROOTS=/`)
+  and agnos's default `HOME=/` work; through 1.1.0 they refused every
+  row.
+
 ## Why an env var?
 
 It was framed as a stopgap ahead of the agnosticos
