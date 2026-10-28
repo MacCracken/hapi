@@ -1,5 +1,4 @@
-# cli.cyr — the command line: verb dispatch, each verb's flags, and the
-# process-wide CLI-mode flag they set.
+# cli.cyr — the command line: verb dispatch and each verb's flags.
 #
 # Parsing is cmdit's (1.2.0); through 1.1.1 it was a hand-rolled argv walk
 # in main.cyr. The v1.0 command surface is frozen, so cmdit is driven to
@@ -25,11 +24,11 @@
 # tests/hapi.tcyr drives it with a synthetic argv; hapi_cli_main() is the
 # binary's entry.
 #
-# This file is also included by the mutating commands for the --dry-run
-# flag below, so the include graph through it is a cycle. That is fine:
-# includes are once-only and functions resolve across the whole unit.
+# The dispatcher depends on the commands, never the reverse: a command
+# includes src/dry_run.cyr for the one flag it reads, not this file.
 
 include "lib/cmdit.cyr"
+include "src/dry_run.cyr"
 include "src/cmd/inspect.cyr"
 include "src/cmd/link.cyr"
 include "src/cmd/unlink.cyr"
@@ -42,18 +41,6 @@ include "src/cmd/check.cyr"
 include "src/cmd/sync.cyr"
 include "src/cap.cyr"
 include "src/backup.cyr"
-
-# The process-wide `--dry-run` flag. Set by the dispatcher when the verb's
-# command line has it; read by every mutating command (link, unlink, adopt,
-# sync, rollback, checkpoint) before its first syscall / audit write.
-#
-# Setter / getter pattern matches the `_hlnk_scope_root_override`
-# and `_audit_override_path` hooks — tests flip it via the
-# setter, the binary flips it from the dispatcher, nobody else.
-var _hapi_dry_run = 0;
-
-fn hapi_set_dry_run(v): i64 { _hapi_dry_run = v; return 0; }
-fn hapi_dry_run(): i64 { return _hapi_dry_run; }
 
 # Verb ids. cmdit hands them out in registration order, so a new verb (`fmt`
 # at 1.7.0) goes at the END: inserting one anywhere else renumbers every verb
@@ -281,7 +268,7 @@ fn _hapi_parse_error(vh, verb, f_root, f_backup): i64 {
         if (fi >= 0 && fi == f_root) { _hapi_missing_value("--root", "path"); return 2; }
         if (fi >= 0 && fi == f_backup) { _hapi_missing_value("--backup-to", "directory"); return 2; }
     }
-    return cmdit_print_error(vh);    # out of memory: cmdit's own words
+    return cmdit_print_error(vh);    # out of memory, or a finalize error: cmdit's own words
 }
 
 # Parse the verb's command line (argv[1..], so the slice's argv[0] is the
@@ -303,6 +290,9 @@ fn _hapi_run_verb(h, argc, argv): i64 {
       "snapshot a file before overwriting it");
 
     var r = cmdit_parse_argv(vh, argc - 1, argv + 8);
+    # The rest of cmdit_parse_verb: env fallbacks and required flags. hapi
+    # registers neither today; finalizing means a flag that does later works.
+    if (r == CMDIT_OK) { r = cmdit_finalize(vh); }
     if (r == CMDIT_RESULT_ERR) { return _hapi_parse_error(vh, verb, f_root, f_backup); }
     if (r == CMDIT_HELP) { hapi_print_usage(); return 0; }
     if (r == CMDIT_VERSION) { return hapi_print_version(); }

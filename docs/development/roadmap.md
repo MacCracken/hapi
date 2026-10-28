@@ -9,11 +9,12 @@
 
 ## Status
 
-- **Shipped: 1.2.0** — argument parsing moved to cmdit, with every 1.1.1
-  message kept and the forms getopt adds (`--root=PATH`, `--`,
-  `<verb> --help`); its P(-1) is the *1.2.0 addendum* of
-  [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md). 1.1.1
-  before it was that pass's repairs.
+- **Shipped: 1.2.1** — 1.2.0's fallout: the commands stopped depending on
+  the command line, and a 50,000-line differential fuzz against 1.1.1
+  found no behavioural change. 1.2.0 before it moved argument parsing to
+  cmdit, with every 1.1.1 message kept and the forms getopt adds
+  (`--root=PATH`, `--`, `<verb> --help`); its P(-1) is the *1.2.0
+  addendum* of [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md).
 - **Next: 1.3.0 — sync: no argument, and `--prune`** (below).
 - **1.4.0 → 1.7.0** — the rest of v1.x's additive work, one theme per
   minor. The command surface, ADR 0001's schema and ADR 0002's line
@@ -38,13 +39,6 @@
   says whether it does). A [`../benchmarks.md`](../benchmarks.md) row
   when it touches `link` / `audit` / `fs_link` / the parser. Both
   suites run on x86_64, aarch64 and agnos.
-
----
-
-## 1.2.x — cmdit fallout only
-
-Fixes to 1.2.0's migration — a message that drifted, a flag that parses differently. No new
-surface.
 
 ---
 

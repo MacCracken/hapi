@@ -20,7 +20,7 @@ include "src/manifest_write.cyr"
 include "src/audit.cyr"
 include "src/fs_link.cyr"
 include "src/cmd/link.cyr"   # link_set_scope_root + _hlnk_scope_root_override
-include "src/cli.cyr"
+include "src/dry_run.cyr"
 include "src/backup.cyr"
 
 fn _hap_puts(s): i64 { print(s, strlen(s)); return 0; }

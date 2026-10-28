@@ -5,8 +5,13 @@
 
 ## Version
 
-**1.2.0** (2026-10-28) — adopting cmdit, on the cyrius 6.7 line (pin
-`6.7.18`). The hand-rolled argv walk in `src/main.cyr` is replaced by
+**1.2.1** (2026-10-28) — cmdit fallout, on the cyrius 6.7 line (pin
+`6.7.18`). No surface change: the `--dry-run` flag moved to its own leaf
+so a command no longer includes the dispatcher, and each verb's parse is
+finalized as `cmdit_parse_verb` would. A model-checked differential fuzz
+of 50,000 command lines against 1.1.1 found no behavioural fallout.
+
+**1.2.0** (2026-10-28) — adopting cmdit. The hand-rolled argv walk in `src/main.cyr` is replaced by
 cmdit 1.5.0 (`[deps.cmdit]`), and the dispatcher lives in `src/cli.cyr`.
 The v1.0 command surface is kept message for message, checked against an
 819-line golden of the 1.1.1 binary; what changed is additive
@@ -215,12 +220,13 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   usage (`hapi_print_usage`), `hapi_print_version` — `hapi <X.Y.Z>`
   from the compile-time `CYRIUS_PKG_VERSION` (cyrius resolves it from
   `[package].version` = `${file:VERSION}`, so `VERSION` is the only
-  place the number lives) — and the process-wide `_hapi_dry_run` flag
+  place the number lives). Nothing under `src/cmd/` includes it: the
+  dispatcher depends on the commands, not the reverse.
+- `src/dry_run.cyr` — owns the process-wide `_hapi_dry_run` flag
   (`hapi_set_dry_run(0|1)` / `hapi_dry_run()`), which every mutating
-  cmd checks before its first syscall / audit write. The command files
-  include it for that flag, so the include graph through it is a
-  cycle; includes are once-only and functions resolve across the
-  unit.
+  cmd checks before its first syscall / audit write. A leaf since
+  1.2.1; 1.2.0 kept it in `src/cli.cyr`, so a command pulled in the
+  whole command line.
 - `src/backup.cyr` — owns the process-wide
   `_hapi_backup_dir` cstring (set by `--backup-to <dir>`),
   the `<YYYYMMDD-HHMMSS>-<pkg>-<basename>` filename
@@ -228,26 +234,6 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   `--force` path and adopt's pre-rename step. Setter
   `hapi_set_backup_dir(cstr|0)` and getter
   `hapi_backup_dir()` mirror the dry-run pattern.
-
-Post-v1.0 implementation work (additive only; tracked in
-[`roadmap.md`](roadmap.md)):
-
-- per-package manifest discovery for a no-arg `hapi sync` —
-  needs a way to recover pkg_dir from a live audit entry
-  (additive trail field, or a tree-walk heuristic). Internal;
-  no signature change to `cmd_sync`.
-- per-component symlink-aware resolution inside `src/cap.cyr`,
-  replacing the lexical-only normalization. Closes F-002 and
-  F-015. **No longer a kavach dep gate** — kavach 3.12.3 is a
-  sandbox-execution framework with no capability API, so this is
-  hapi's own work; the primitive it needs (`hapi_readlink`) is
-  portable across all three targets as of 1.0.4.
-  `cap_check_root_r(path) -> Result` signature unchanged. See
-  [`../audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md).
-
-_(Done in 1.0.2: the stdlib `sys_rename` / `sys_fsync` /
-`sys_fdatasync` wrappers landed in cyrius 6.2.x and replaced the
-in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Audit trail
 
@@ -375,13 +361,12 @@ syscall numbers of its own on any target as of 1.0.4. Still
 absent on agnos and not needed: `lstat` (readlink no-follows the
 final component) and `getcwd` (`_fsl_getcwd` returns `"."`).
 
-v1.0 ships the env-var allowlist stopgap (`HAPI_ALLOWED_ROOTS`)
-for non-`$HOME` roots. It was to be replaced by "the kavach
-capability service"; the 2026-08-25 audit established there is no
-such service to wait for, so the replacement — per-component
-symlink-aware resolution — is hapi's own work in the 1.0.x
-hardening arc. Internal-only swap either way:
-`cap_check_root_r(path) -> Result` is frozen.
+`HAPI_ALLOWED_ROOTS` is the grant for non-`$HOME` roots. It was to be
+replaced by "the kavach capability service"; the 2026-08-25 audit
+established there is no such service, and the symlink-aware resolution
+it was meant to bring became hapi's own: per component from 1.0.8
+(F-002 / F-015), and on the resolved root for `--root` itself from
+1.1.1 (F-051). `cap_check_root_r(path) -> Result` is frozen.
 
 ## Consumers
 
@@ -396,7 +381,8 @@ means downstream packagers (zugot recipes) and user manifests.
 ## Next
 
 The 2026-10-28 P(-1) pass is **closed** in 1.1.1, and its 1.2.0
-addendum (the argument surface under cmdit) closed with F-060 fixed.
+addendum (the argument surface under cmdit) closed with F-060 fixed;
+1.2.1 carried that migration's fallout.
 Every finding is fixed except F-059, accepted as an agnos kernel gap
 ([`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)).
 Two upstream follow-ups came out of it, both filed upstream on

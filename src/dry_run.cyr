@@ -1,0 +1,18 @@
+# dry_run.cyr — the process-wide `--dry-run` flag.
+#
+# Set by the dispatcher (src/cli.cyr) when a verb's command line has
+# `--dry-run`; read by every mutating command (link, unlink, adopt,
+# sync, rollback, checkpoint) before its first syscall / audit write.
+#
+# Its own leaf so a command never includes the command line: 1.2.0
+# kept the flag in src/cli.cyr, which by then held the dispatcher, so
+# including one command pulled in every verb and cmdit.
+#
+# Setter / getter pattern matches the `_hlnk_scope_root_override`
+# and `_audit_override_path` hooks — tests flip it via the
+# setter, the binary flips it from the dispatcher, nobody else.
+
+var _hapi_dry_run = 0;
+
+fn hapi_set_dry_run(v): i64 { _hapi_dry_run = v; return 0; }
+fn hapi_dry_run(): i64 { return _hapi_dry_run; }

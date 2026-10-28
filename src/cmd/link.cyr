@@ -25,7 +25,7 @@ include "src/manifest.cyr"
 include "src/audit.cyr"
 include "src/fs_link.cyr"
 include "src/cap.cyr"
-include "src/cli.cyr"
+include "src/dry_run.cyr"
 include "src/backup.cyr"
 
 enum HapiLinkAction {

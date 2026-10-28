@@ -41,14 +41,15 @@ Third leg of the terminal-aesthetics set:
 
 ## Status
 
-**v1.2.0** — the v1.0 contract, frozen 2026-05-23, still holds:
+**v1.2.1** — the v1.0 contract, frozen 2026-05-23, still holds:
 command surface (ten verbs plus five global flags), `hapi.cyml`
 manifest schema (ADR 0001), and audit-trail format (ADR 0002) are all
 contractual. 1.2.0 is the first release to add surface, all of it
 additive: argument parsing moved to
 [cmdit](https://github.com/MacCracken/cmdit), which brings
 `--root=PATH`, `--` and `hapi <verb> --help`, with every 1.1.1 message
-kept. The releases before it added teeth: 1.0.5 → 1.0.10 closed all
+kept; 1.2.1 cleans up after the move. The releases before it added
+teeth: 1.0.5 → 1.0.10 closed all
 twenty findings of the
 [2026-08-25 P(-1) audit](docs/audit/2026-08-25-audit.md), and 1.1.1
 repairs the [2026-10-28 pass](docs/audit/2026-10-28-audit.md), which

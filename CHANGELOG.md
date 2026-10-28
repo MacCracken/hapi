@@ -6,6 +6,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.2.1] - 2026-10-28
+
+> **cmdit fallout.** A patch on 1.2.0's migration, with no new surface and no change in
+> what hapi prints or does. A model-checked differential fuzz of 50,000 command lines
+> against 1.1.1 found no behavioural fallout. It did find one precedence shift that
+> 1.2.0's notes left out (below). The two fixes are structural: commands no longer depend
+> on the command line, and each verb's parse is finished the way cmdit finishes it.
+
+### Fixed
+
+- **Including one command pulled in the whole command line.** 1.2.0 put the dispatcher
+  in `src/cli.cyr`, which also held the `--dry-run` flag that five commands include. So
+  any unit that included a command pulled in every verb and the dispatcher through an
+  include cycle. `tests/agnos.tcyr` includes `link`, `status` and `unlink`, so it got all
+  of them. The flag now has its own leaf, `src/dry_run.cyr`, and the dispatcher depends
+  on the commands, not the reverse. The agnos test build shrinks 1,329,328 → 1,282,816
+  bytes. The rest of its growth over 1.1.1 (1,226,392) is cmdit itself, which `[deps]`
+  prepends to every compile.
+- **The verb's parse is finalized.** 1.2.0 parsed each verb with `cmdit_parse_argv` and
+  skipped `cmdit_finalize`, the other half of `cmdit_parse_verb`, so a flag given
+  `cmdit_env` or `cmdit_required` would have been silently ignored. hapi registers
+  neither, so nothing observable changes; a later flag that does will work.
+
+### Tests
+
+- Unchanged at 826 + 55: neither fix changes behaviour a test can see. The evidence is
+  instead:
+  - **The 1.2.0 golden** (819 command lines) is identical on 1.2.1 and on the released
+    1.2.0, but for the version line.
+  - **A differential fuzz.** 50,000 random command lines across five seeds were drawn
+    from every verb, flag, value and unknown-flag shape, leaving out 1.2.0's additive
+    forms. They ran on 1.1.1 and 1.2.1, each checked against a model of its own
+    semantics: 1.1.1's walk, and 1.2's parse, positional cap, `-` values and then
+    grants. There were zero mismatches. Every line that runs produces byte-identical
+    output and trees from both. The model is in the *1.2.0 addendum* of
+    `docs/audit/2026-10-28-audit.md`.
+- Verified: x86_64, `--aarch64`, `--agnos` and `CYRIUS_DCE=1` builds (the DCE binary is
+  unchanged at 580,928 bytes); `cyrius lint` 0 warnings; `cyrius test` and
+  `cyrius test --aarch64`; `cyrius fuzz` and `cyrius bench`;
+  `scripts/concurrency-test.sh`; `scripts/agnos-smoke.sh` under mirshi, all five checks;
+  `cyrius deps --verify` 114 / 114.
+
+### Notes
+
+- **Correction to 1.2.0's precedence list.** It named two shifts on lines with more
+  than one error: a flag error before an extra positional, and a usage error before a
+  `--root` denial. There is a third. An empty `--root` (exit 2) is reported after a flag
+  error or an extra positional anywhere on the line, where 1.1.1 reported whichever came
+  first. Among the `--root` values it is still judged in order with the grants. Exit 2
+  either way.
+- `docs/development/state.md` listed per-component symlink resolution in `src/cap.cyr`
+  as work still to do. It shipped in 1.0.8 (F-002 / F-015), and 1.1.1 decided the
+  `--root` grant on the resolved root (F-051).
+- No benchmark row: nothing on the `sync` path changed.
+
 ## [1.2.0] - 2026-10-28
 
 > **Adopting cmdit.** `src/main.cyr`'s hand-rolled argv walk is replaced by

@@ -14,7 +14,7 @@
 #   1  audit-trail write failed
 
 include "src/audit.cyr"
-include "src/cli.cyr"
+include "src/dry_run.cyr"
 
 fn _hck_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hck_eputs(s): i64 { eprint(s, strlen(s)); return 0; }

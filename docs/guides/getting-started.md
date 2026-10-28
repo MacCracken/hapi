@@ -13,7 +13,8 @@ cyrius test                            # run tests/*.tcyr
 
 - `src/main.cyr` — entry point
 - `src/cli.cyr` — the command line: verb dispatch and each verb's
-  flags (cmdit), the usage text, and the `--dry-run` flag
+  flags (cmdit), and the usage text. No command includes it.
+- `src/dry_run.cyr` — the process-wide `--dry-run` flag the commands read
 - `src/cmd/{link,unlink,adopt,list,sync,status,rollback,checkpoint,check,inspect}.cyr` —
   one module per verb
 - `src/manifest.cyr` — `hapi.cyml` parser + canonical re-serializer

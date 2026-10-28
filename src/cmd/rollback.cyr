@@ -22,7 +22,7 @@ include "src/audit.cyr"
 include "src/audit_reader.cyr"
 include "src/fs_link.cyr"
 include "src/manifest_write.cyr"
-include "src/cli.cyr"
+include "src/dry_run.cyr"
 
 fn _hrb_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hrb_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
