@@ -212,21 +212,42 @@ fn _hmw_write_atomic(path, buf, n): i64 {
     return 0;
 }
 
-# Find the byte offset of the CYML body separator (`\n---\n` or
-# `---\n` at pos 0). Returns -1 if no separator (file is all
-# TOML header). Used by append to pick the insertion point.
-fn _hmw_find_separator(buf, n): i64 {
-    if (n >= 4) {
-        if (load8(buf) == 45 && load8(buf + 1) == 45 && load8(buf + 2) == 45 && load8(buf + 3) == 10) {
-            return 0;
-        }
+# 1 when a `---` that ENDS ITS LINE sits at `at`: a `\n`, CR LF, a lone
+# CR as the last byte, or the end of the buffer follows it. Whether `at`
+# begins a line is the caller's test.
+#
+# This MUST be the reader's rule, byte for byte — bayan 1.11.1's
+# `_cyml_delim_at` / `_cyml_eol` (cyrius 6.7.18). hapi reads only the
+# header above the first such line, so a writer that disagrees on where
+# the header ends writes rows nothing can read. Through 1.0.12 this
+# matched only `---\n`; bayan 1.7 / 1.8 widened the reader to CR LF and
+# an unterminated final `---`, and `adopt` then appended into the body
+# on those manifests. tests/hapi.tcyr's `1.1.0` section pins both sides.
+fn _hmw_delim_at(buf, n, at): i64 {
+    if (at + 3 > n) { return 0; }
+    if (load8(buf + at) != 45) { return 0; }       # -
+    if (load8(buf + at + 1) != 45) { return 0; }   # -
+    if (load8(buf + at + 2) != 45) { return 0; }   # -
+    var e = at + 3;
+    if (e == n) { return 1; }
+    var c = load8(buf + e);
+    if (c == 10) { return 1; }
+    if (c == 13) {
+        if (e + 1 == n) { return 1; }
+        if (load8(buf + e + 1) == 10) { return 1; }
     }
+    return 0;
+}
+
+# Byte offset of the first CYML body delimiter line (see `_hmw_delim_at`),
+# or -1 when there is none and the whole file is header. Append inserts
+# above it; remove searches only above it.
+fn _hmw_find_separator(buf, n): i64 {
+    if (_hmw_delim_at(buf, n, 0) == 1) { return 0; }
     var i = 0;
-    while (i + 4 < n) {
-        if (load8(buf + i) == 10 && load8(buf + i + 1) == 45
-            && load8(buf + i + 2) == 45 && load8(buf + i + 3) == 45
-            && load8(buf + i + 4) == 10) {
-            return i + 1;
+    while (i < n) {
+        if (load8(buf + i) == 10) {
+            if (_hmw_delim_at(buf, n, i + 1) == 1) { return i + 1; }
         }
         i = i + 1;
     }
@@ -440,16 +461,22 @@ fn _hmw_remove_unlocked(manifest_path, source, target): i64 {
     var buf = _hmw_slurp(manifest_path, &len);
     if (buf == 0) { return 0 - HapiMfwReadFailed; }
 
+    # Search the header only. A [[link]] below the delimiter is markdown —
+    # an example in the package's docs — not a row; matching it deleted
+    # the prose and reported success while the reader saw no change.
+    var hdr_end = _hmw_find_separator(buf, len);
+    if (hdr_end < 0) { hdr_end = len; }
+
     var scan = 0;
     var found_start = 0 - 1;
     var found_end = 0;
     var go = 1;
     while (go == 1) {
-        var blk = _hmw_find_link_block(buf, len, scan);
+        var blk = _hmw_find_link_block(buf, hdr_end, scan);
         if (blk < 0) { go = 0; }
         else {
             var matched = 0;
-            var block_end = _hmw_scan_link_block(buf, len, blk, source, target, &matched);
+            var block_end = _hmw_scan_link_block(buf, hdr_end, blk, source, target, &matched);
             if (matched == 1) {
                 found_start = blk;
                 found_end = block_end;

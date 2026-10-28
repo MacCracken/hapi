@@ -1822,6 +1822,123 @@ fn test_backup_copy_refuses_symlink_source() {
 }
 
 # ============================================================
+# 1.1.0 — the `---` body delimiter (bayan 1.7 / 1.8 drift)
+# ============================================================
+
+# hapi reads only the CYML header (`cyml_doc_header`), so WHERE bayan splits
+# header from body decides which [[link]] rows exist. cyrius 6.7.18 ships bayan
+# 1.11.1, whose rule is: a delimiter is a whole `---` line, at byte 0 or after
+# a `\n`, ending in `\n`, CR LF, or end of input. Under 6.6.20 (bayan 1.5.12)
+# `---\r\n` and a final unterminated `---` were NOT delimiters, so a CRLF
+# manifest's markdown body was parsed as manifest. Nothing in hapi noticed the
+# rule move; these pin it, so the next bayan bump that moves it fails here.
+var _TDL_HDR = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"f\"\ntarget = \".f\"\n\n";
+
+# `s` with every `\n` turned into CR LF (fresh buffer, NUL-terminated).
+fn _tdl_crlf(s): i64 {
+    var n = strlen(s);
+    var out = alloc(n * 2 + 1);
+    var i = 0;
+    var o = 0;
+    while (i < n) {
+        if (load8(s + i) == 10) { store8(out + o, 13); o = o + 1; }
+        store8(out + o, load8(s + i));
+        o = o + 1;
+        i = i + 1;
+    }
+    store8(out + o, 0);
+    return out;
+}
+
+fn _tdl_hdr_crlf(): i64 { return _tdl_crlf(_TDL_HDR); }
+
+# Write `hdr` then `rest` as a fresh scratch hapi.cyml; return its path.
+fn _tdl_manifest(hdr, rest): i64 {
+    var path = _fsl_path_join(_test_scratch_dir(), "hapi.cyml");
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    file_write(fd, hdr, strlen(hdr));
+    file_write(fd, rest, strlen(rest));
+    file_close(fd);
+    return path;
+}
+
+# Link rows the reader sees, or -1 when the manifest does not parse.
+fn _tdl_links(path): i64 {
+    var t, v = hapi_mf_parse_file_r(path);
+    if (is_ok(t) == 0) { return 0 - 1; }
+    return vec_len(hapi_mf_links(v));
+}
+
+fn test_manifest_body_delimiter_reader() {
+    test_group("manifest: `---` body delimiter (bayan reader pin)");
+
+    assert_eq(_tdl_links(_tdl_manifest(_TDL_HDR, "---\n# notes\n")), 1, "LF body is not parsed");
+    assert_eq(_tdl_links(_tdl_manifest(_TDL_HDR, "---\n")), 1, "LF delimiter with an empty body parses");
+    assert_eq(_tdl_links(_tdl_manifest(_TDL_HDR, "---\n[[link]]\nsource = \"g\"\ntarget = \".g\"\n")), 1,
+      "a [[link]] in an LF body is not a row");
+    assert_eq(_tdl_links(_tdl_manifest(_tdl_hdr_crlf(), "---\r\n[[link]]\r\nsource = \"g\"\r\ntarget = \".g\"\r\n")), 1,
+      "a [[link]] in a CRLF body is not a row (6.6.20 counted it)");
+    assert_eq(_tdl_links(_tdl_manifest(_TDL_HDR, "---")), 1, "a final unterminated --- parses");
+    assert_eq(_tdl_links(_tdl_manifest(_TDL_HDR, "--- notes\n[[link]]\nsource = \"g\"\ntarget = \".g\"\n")), 2,
+      "--- followed by text is not a delimiter");
+    return 0;
+}
+
+# The writer must agree with the reader on where the header ends. Through
+# 1.0.12 `_hmw_find_separator` knew only `---\n`, so on a manifest whose
+# delimiter is `---\r\n` or an unterminated final `---` it found NONE and
+# appended at EOF — below the delimiter, in the body, where the 6.7.18 reader
+# does not look. `adopt` would move the file in, plant the link, write the
+# trail entry, and record a row nothing could ever read (F-028's shape).
+fn test_manifest_append_lands_in_header() {
+    test_group("manifest_write: append lands above the `---` the reader sees");
+
+    var lf = _tdl_manifest(_TDL_HDR, "---\n[[link]]\nsource = \"g\"\ntarget = \".g\"\n");
+    assert_eq(manifest_append_link_row(lf, "n", ".n"), 0, "LF: append succeeds");
+    assert_eq(_tdl_links(lf), 2, "LF: the appended row is read");
+
+    var crlf = _tdl_manifest(_tdl_hdr_crlf(), "---\r\n# notes\r\n");
+    assert_eq(manifest_append_link_row(crlf, "n", ".n"), 0, "CRLF: append succeeds");
+    assert_eq(_tdl_links(crlf), 2, "CRLF: the appended row is read");
+
+    var eof = _tdl_manifest(_TDL_HDR, "---");
+    assert_eq(manifest_append_link_row(eof, "n", ".n"), 0, "final ---: append succeeds");
+    assert_eq(_tdl_links(eof), 2, "final ---: the appended row is read");
+
+    var eof_cr = _tdl_manifest(_tdl_hdr_crlf(), "---\r");
+    assert_eq(manifest_append_link_row(eof_cr, "n", ".n"), 0, "final ---CR: append succeeds");
+    assert_eq(_tdl_links(eof_cr), 2, "final ---CR: the appended row is read");
+
+    # `--- notes` is header text, so the row goes at EOF and is still read.
+    var not_delim = _tdl_manifest(_TDL_HDR, "--- notes\n");
+    assert_eq(manifest_append_link_row(not_delim, "n", ".n"), 0, "--- text: append succeeds");
+    assert_eq(_tdl_links(not_delim), 2, "--- text: the appended row is read");
+    return 0;
+}
+
+# Remove scanned the WHOLE file, body included. A [[link]] written as an
+# example in the markdown body is not a row, but remove would match it,
+# delete the prose, and report success while the reader saw no change.
+fn test_manifest_remove_ignores_body() {
+    test_group("manifest_write: remove never edits the body");
+
+    var path = _tdl_manifest(_TDL_HDR, "---\n[[link]]\nsource = \"g\"\ntarget = \".g\"\n");
+    var before = 0;
+    var b0 = _hmw_slurp(path, &before);
+    assert(manifest_remove_link_row(path, "g", ".g") < 0, "a body-only row is not found");
+    var after = 0;
+    var b1 = _hmw_slurp(path, &after);
+    assert_eq(after, before, "the file is unchanged");
+    assert(_test_substr(b1, after, "source = \"g\"") >= 0, "the body example survives");
+
+    var crlf = _tdl_manifest(_tdl_hdr_crlf(), "---\r\n[[link]]\r\nsource = \"g\"\r\ntarget = \".g\"\r\n");
+    assert(manifest_remove_link_row(crlf, "g", ".g") < 0, "CRLF: a body-only row is not found");
+    assert_eq(manifest_remove_link_row(crlf, "f", ".f"), 0, "CRLF: a header row is removed");
+    assert_eq(_tdl_links(crlf), 0, "CRLF: the header row is gone");
+    return 0;
+}
+
+# ============================================================
 # 1.0.10 — the agnos-conditional pair (F-027, F-031)
 # ============================================================
 
@@ -2865,6 +2982,9 @@ fn main() {
     test_link_refuses_missing_source();
     test_status_reports_dangling_link();
     test_link_refuses_source_through_a_file();
+    test_manifest_body_delimiter_reader();
+    test_manifest_append_lands_in_header();
+    test_manifest_remove_ignores_body();
     return assert_summary();
 }
 

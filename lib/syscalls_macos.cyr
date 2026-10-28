@@ -20,6 +20,16 @@
 #
 # NOTE: macOS has no brk syscall. Use lib/alloc_macos.cyr (mmap-based) instead
 # of lib/alloc.cyr for macOS targets.
+#
+# NAMES WITH NO ROUTE. Some members below have no EMACHO_SYSXLAT row: Darwin has no
+# such syscall (brk, accept4, epoll, futex, ...) or only one a bare renumber would get
+# wrong. They are declared so portable source naming them compiles on both Macs, and
+# the stdlib never emits them here: under #ifdef CYRIUS_TARGET_MACOS its wrappers
+# decline with -78 or compose the call from routed ones. A raw syscall() of one warns at
+# compile time ("not routed by ... EMACHO_SYSXLAT") and at run time is SIGSYS, or -78
+# with SIGSYS ignored (the chain tail, CHANGELOG [6.6.8]). Each one's reason is in
+# tests/gates/platform/macho_route_parity.sh's allow-list; its axis 4 fails on an
+# unrouted name declared here without one. CHANGELOG [6.7.9]
 
 # ================================================================
 # Syscall numbers — LINUX numbers (EMACHO_SYSXLAT translates to BSD)
@@ -31,6 +41,7 @@ enum SysNr {
     SYS_CLOSE = 3;
     SYS_STAT = 4;
     SYS_FSTAT = 5;
+    SYS_POLL = 7;                 # 6.7.14: routed 7 → BSD poll 230 (fd_wait_ready, the macOS sleeps)
     SYS_LSEEK = 8;
     SYS_MMAP = 9;
     SYS_BRK = 12;
@@ -87,7 +98,7 @@ enum SysNr {
     # Use SYS_KQUEUE / SYS_KEVENT below — that is Darwin's actual readiness API.
     SYS_EPOLL_WAIT = 232;
     SYS_EPOLL_CTL = 233;
-    SYS_WAITID = 247;
+    SYS_WAITID = 247;             # NO route: nothing issues it; Darwin waitid(173) differs (see the header)
     SYS_TIMERFD_CREATE = 283;
     SYS_TIMERFD_SETTIME = 286;
     SYS_SIGNALFD4 = 289;
@@ -108,7 +119,7 @@ enum SysNr {
     SYS_MUNMAP = 11;
     SYS_FUTEX = 202;
     SYS_GETTID = 186;
-    SYS_SET_TID_ADDRESS = 218;
+    SYS_SET_TID_ADDRESS = 218;    # NO route: Darwin has no set_tid_address (see the header)
     SYS_EXIT_GROUP = 231;
     SYS_GETDENTS64 = 217;
     SYS_SECCOMP = 317;
@@ -130,6 +141,10 @@ enum SysNr {
     # BSD (52→31 getpeername, 51→32 getsockname; cf. accept 43→30).
     SYS_GETSOCKNAME = 51;
     SYS_GETPEERNAME = 52;
+    # SYS_ACCEPT4 has NO route, unlike the two above: Darwin has no accept4. sys_accept4
+    # (lib/syscalls_linux_common.cyr) composes accept 43 (→ BSD 30) + fcntl under
+    # #ifdef CYRIUS_TARGET_MACOS, so 288 is never emitted here; the name is kept for
+    # portable source (see NAMES WITH NO ROUTE in the header). CHANGELOG [6.7.9]
     SYS_ACCEPT4 = 288;
     # v6.6.5 — LINUX numbers, this peer's convention (see the header): EMACHO_SYSXLAT
     # rewrites 46→BSD 28 (sendmsg), 44→133 (sendto), 76→200 (truncate), 77→201 (ftruncate).
@@ -158,6 +173,8 @@ enum SysNr {
     # consumer needs it on macOS). The shared wrappers decline with -78 under
     # #ifdef CYRIUS_TARGET_MACOS, so the numbers are never emitted on this target; the names
     # exist so cross-platform source COMPILES. macho_route_parity.sh allow-lists them.
+    # (6.7.16: sys_mknodat makes a FIFO over Darwin mknod — the raw x86 133, routed 133 → 14 —
+    # and still never emits 259.)
     SYS_UNSHARE = 272;
     SYS_CHROOT = 161;
     SYS_PIVOT_ROOT = 155;
@@ -241,6 +258,13 @@ enum SysNr {
     SYS_INOTIFY_INIT1 = 294;
     SYS_INOTIFY_ADD_WATCH = 254;
     SYS_INOTIFY_RM_WATCH = 255;
+    # 6.7.9 — SYS_PPOLL, the x86 Linux 271 the x86_64 Linux peer names since 6.7.9. NO route
+    # (Darwin has no ppoll): sys_ppoll declines with -78 here and never compiles the number.
+    # Declared because both Linux peers and the arm64-macOS peer declare it, so portable source
+    # names it, and because lib/syscalls_linux_common.cyr's CYRIUS_TARGET_LINUX arm of
+    # sys_ppoll names it: a peer that includes linux_common declares every name it issues
+    # (without it this file stopped compiling alone under a Linux target). CHANGELOG [6.7.9]
+    SYS_PPOLL = 271;
 }
 
 # ================================================================
@@ -646,10 +670,28 @@ fn sigset_has(set, signum): i64 {
 
 # Build an epoll_event in the x86_64 PACKED layout ({ u32 events, u64 data @4 }, 12 bytes in a
 # 16-byte allocation) — the layout of the x86_64 Linux peer this one mirrors, NOT the aarch64
-# peer's unpacked data @8. Returns the event, or 0 when the allocation fails.
+# peer's unpacked data @8 (filled by epoll_event_set). Returns the event, or 0 when the
+# allocation fails.
 fn epoll_event_new(events, data): i64 {
     var ev = alloc(16);
     if (ev == 0) { return 0; }
+    return epoll_event_set(ev, events, data);
+}
+
+# The size of one epoll_event in this peer's layout (x86_64's packed 12 bytes). Darwin has no
+# epoll — sys_epoll_wait declines — so this sizes epoll_event_new's layout only. CHANGELOG [6.7.12]
+const EPOLL_EVENT_SIZE = 12;
+
+# The events mask of the epoll_event at `ev` (an epoll_event_new result).
+fn epoll_event_events(ev): i64 { return load32(ev); }
+
+# The u64 data of the epoll_event at `ev` — at offset 4, the packed layout epoll_event_new writes.
+fn epoll_event_data(ev): i64 { return load64(ev + 4); }
+
+# Fill the epoll_event at `ev`, a buffer the caller owns (at least EPOLL_EVENT_SIZE bytes):
+# `events` at 0 and `data` at offset 4 (the x86_64 packed layout). Returns ev. Darwin has no
+# epoll, so this fills the layout only (parity with the arm64-macOS surface). CHANGELOG [6.7.14]
+fn epoll_event_set(ev, events, data): i64 {
     store32(ev, events);
     store64(ev + 4, data);
     return ev;

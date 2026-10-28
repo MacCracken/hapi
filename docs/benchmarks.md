@@ -61,6 +61,8 @@ real HDD or under cgroup-throttled IO.
 
 | 1.0.12  | 90        | 72        | 0 bytes           | 2026-10-28 | Toolchain refresh (cyrius `6.6.2` → `6.6.20`). Measured before the release's one source fix (an aarch64 `O_NOFOLLOW` literal), which compiles to the same constant on x86_64. **Controlled A/B this time**: 1.0.11-on-6.6.2 built from `HEAD` and interleaved with 1.0.12 on one kernel, three pairs — old 91–93 / 72–75, new 90–91 / 72. Flat within noise. The drop against the 1.0.10 row is the machine (new kernel, 7.2.11), not the toolchain. Trail byte-identical at 101,150 bytes / 350 entries. DCE binary 188,552 → 194,744 bytes. |
 
+| 1.1.0   | 90        | 72        | 0 bytes           | 2026-10-28 | Toolchain refresh (cyrius `6.6.20` → `6.7.18`). Interleaved A/B against 1.0.12-on-6.6.20, three pairs — old 91–92 / 73–74, new 90 / 72–73. Flat. Trail byte-identical at 101,150 bytes / 350 entries. ⚠ **DCE binary 194,744 → 542,520 bytes (2.8×), all of it data**: the code segment is flat (+2.5 KB), the data segment went 38.7 KB → 382 KB because 6.7.18's `bayan` unconditionally includes the Unicode casefold / category / normalization tables, which DCE cannot drop. hapi never touches those pages, which is why the timings do not move. |
+
 ⚠ **On the 0.9.0 → 1.0.4 delta.** Three things changed at once between
 the two rows: the compiler (6.0.1 → 6.5.35), the kernel (7.0.9 → 7.1.9),
 and hapi's own `link_probe`. The 0.9.0 row is a single run; the 1.0.4 row

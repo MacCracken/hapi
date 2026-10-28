@@ -6,6 +6,97 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.1.0] - 2026-10-28
+
+> **The cyrius 6.7 line.** Pin `6.6.20` → `6.7.18`. The code compiled cleanly on all
+> four builds and the existing suite passed unchanged, but the bump moved one rule
+> underneath hapi without telling it. bayan, the CYML parser, changed where a manifest's
+> header ends, and hapi's own manifest writer did not follow. That is fixed here and
+> pinned by tests, so the next drift fails the suite instead of shipping. Command
+> surface, manifest schema (ADR 0001) and audit-trail format (ADR 0002) are unchanged.
+
+### Fixed
+
+- **`adopt` could record a row nothing would ever read.** hapi parses only the CYML
+  header, above the first `---` line. 6.7.18's bayan (1.11.1, from 1.5.12) widened what
+  counts as that line: a `---` ending in CR LF, and a final `---` with no newline after
+  it, are now delimiters. `_hmw_find_separator` in `src/manifest_write.cyr` still knew
+  only `---\n`. On those manifests it found no delimiter and appended at end of file,
+  **below** the delimiter the reader now sees, so the row landed in the body. `adopt`
+  would then move the file into the package, plant the symlink and write the trail
+  entry, while the manifest row recording it was invisible: F-028's orphan shape,
+  reached by a toolchain bump. The writer now uses bayan's rule byte for byte
+  (`_hmw_delim_at`), and append inserts above the delimiter on every line ending. This
+  never shipped: it existed only between the pin bump and this fix.
+- **`manifest_remove_link_row` could delete the package's documentation.** It searched
+  the whole file, so a `[[link]]` written as an *example* in the markdown body matched,
+  was cut out, and remove reported success, while the real header row (if any) stayed
+  and the reader saw no change. Remove now searches only the header. This bug is older
+  than the bump and affected LF manifests too. Its trigger is `rollback` of an `adopt`
+  whose row exists only as a body example.
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.18`.** `lib/` resynced to the 6.7.18 full snapshot
+  (`cyrius lib sync --full`, 113 files; same file set, 86 changed); `diff -rq` against
+  `~/.cyrius/versions/6.7.18/lib` is clean and `cyrius.lock` re-locked (113 / 113
+  verified). No new compiler refusal reaches hapi, and no API it uses was renamed or
+  deprecated.
+- **Manifests with a CRLF or unterminated `---` now parse as ADR 0001 describes.**
+  This is inherited from bayan, and visible:
+  - **CRLF + `---\r\n`:** 6.6.20 did not see the delimiter, so the markdown body was
+    parsed as manifest. `check --strict` refused it ("unknown key"), `inspect` silently
+    ignored stray keys, and a `[[link]]` in the body **counted as a row**. Now the body
+    is ignored, as on LF. *Migration:* a CRLF manifest whose rows sat below its `---`
+    loses them. Move them above it.
+  - **Blank first line, then `---`:** that line is now the delimiter (a `---` on line 1
+    always was), so the header is empty and the manifest is refused with
+    `[package].name is missing`. It used to parse.
+  - **Unchanged:** LF manifests; a `--- notes` line, which is still header text; and a
+    `---` with trailing spaces.
+
+  Measured by running 1.0.12-on-6.6.20 and 1.1.0 side by side on ten delimiter edge
+  cases. These are the only differences.
+- **The release binary is 2.8× larger, all of it data.** `CYRIUS_DCE=1` output went
+  194,744 → 542,520 bytes. The code segment is flat (+2.5 KB). The data segment went
+  38.7 KB → 382 KB because 6.7.18's bayan unconditionally includes the Unicode casefold,
+  category and normalization tables, and DCE drops dead code but not data. hapi never
+  touches those pages: an interleaved `sync` A/B against 1.0.12 is flat (see
+  `docs/benchmarks.md`). Upstream's to fix; `lib/` is not edited here.
+
+### Tests
+
+- New `1.1.0` section in `tests/hapi.tcyr`, three groups / 22 assertions:
+  - **The reader rule pinned:** LF and CRLF bodies are not parsed, a final unterminated
+    `---` parses, and `--- notes` is not a delimiter.
+  - **Writer/reader agreement:** append, then parse the row back, for LF, CRLF, final
+    `---`, final `---\r` and `--- notes`.
+  - **Remove never edits the body.**
+
+  Mutation-proven: against the 1.0.12 writer, 7 of them fail. Suite **387 / 387 across
+  95 groups**, on x86_64 and on aarch64 under qemu.
+- Re-verified on 6.7.18:
+  - x86_64, `--aarch64`, `--agnos` and `CYRIUS_DCE=1` builds
+  - `cyrius lint`: 0 warnings across all 21 `src/` files and `tests/hapi.tcyr`
+  - `cyrius fuzz` and `cyrius bench tests/hapi.bcyr`
+  - `scripts/concurrency-test.sh`
+  - `scripts/agnos-smoke.sh` under mirshi: all four checks
+  - the torn-tail guard, against the real binary
+  - an end-to-end `adopt` + `rollback` on a CRLF package with a body example: the row is
+    read, then removed, and the body survives
+
+### Notes
+
+- **`cyrius update` now honours the pin** (fixed upstream at 6.7.12). It still refreshes
+  only the declared `[deps] stdlib` set unless given `--full`, so `cyrius lib sync --full`
+  stays the way to keep hapi's full snapshot exact.
+- **A pin move needs `cyrius lib sync --full` first** (6.7.12+). Until it runs,
+  `cyrius deps` / `build` exit 1 and touch nothing.
+- **Appending to a CRLF manifest writes LF lines.** The result has mixed line endings;
+  the reader and `check --strict` accept it.
+- **Next: 1.1.1 is the P(-1) audit and repairs.** Scope and the repair candidates this
+  release and 1.0.12 turned up are in `docs/development/roadmap.md` § 1.1.1.
+
 ## [1.0.12] - 2026-10-28
 
 > **A toolchain refresh that found a real aarch64 hole.** The bump itself needed no

@@ -41,7 +41,7 @@ Third leg of the terminal-aesthetics set:
 
 ## Status
 
-**v1.0.12** — the v1.0 contract, frozen 2026-05-23, still holds:
+**v1.1.0** — the v1.0 contract, frozen 2026-05-23, still holds:
 command surface (ten verbs plus five global flags), `hapi.cyml`
 manifest schema (ADR 0001), and audit-trail format (ADR 0002) are all
 contractual, and the 1.0.x line has added no surface. What it added
@@ -58,7 +58,7 @@ for the v1.0 surface.
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/hapi   # compile
 ./build/hapi --help                    # see the verb set
-cyrius test                            # 365 assertions across 92 groups
+cyrius test                            # 387 assertions across 95 groups
 ```
 
 A worked example lives at

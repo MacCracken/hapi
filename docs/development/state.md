@@ -5,12 +5,15 @@
 
 ## Version
 
-**1.0.12** (2026-10-28) — a toolchain refresh (cyrius `6.6.2` →
-`6.6.20`, `lib/` resynced) that also fixed an aarch64 hole: the
-`O_NOFOLLOW` in `hapi_open_nofollow` was the x86_64 literal, which on
-arm64 is `O_LARGEFILE`, so F-003's TOCTOU defence was absent on
-aarch64 from 0.9.0 through 1.0.11. The test harness was x86-only too;
-it now passes 365 / 365 on aarch64 under qemu. The 1.0.x
+**1.1.0** (2026-10-28) — the cyrius 6.7 toolchain line: pin `6.6.20`
+→ `6.7.18`, `lib/` resynced. The previous release, 1.0.12, fixed an
+aarch64 hole: the `O_NOFOLLOW` in `hapi_open_nofollow` was the x86_64
+literal, which on arm64 is `O_LARGEFILE`, so F-003's TOCTOU defence was
+absent on aarch64 from 0.9.0 through 1.0.11. 1.1.0 also realigns the
+manifest writer with bayan 1.11.1's `---` delimiter rule (see
+`manifest_write.cyr` below). The suite passes 387 / 387 on x86_64 and
+on aarch64 under qemu. **Next is 1.1.1, the P(-1) audit
+and repairs** ([`roadmap.md`](roadmap.md)). The 1.0.x
 hardening arc closed at 1.0.10 — all twenty findings of the 2026-08-25
 P(-1) sweep are fixed. The v1.0 contract (command surface, manifest
 schema, audit-trail format) stayed frozen across the whole arc.
@@ -29,18 +32,28 @@ v0.2.0 = M1, M0 scaffold 2026-05-19.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`)
 - **Vendored `lib/`**: 113 files (106 top-level + 7 in `unicode/`),
-  the 6.6.20 full snapshot (`cyrius lib sync --full`). Mirrors the
+  the 6.7.18 full snapshot (`cyrius lib sync --full`). Mirrors the
   pin exactly — nothing hand-edited, nothing left over from an
   earlier snapshot. Verify with
-  `diff -rq lib ~/.cyrius/versions/6.6.20/lib`.
-- ⚠ **Use `cyrius lib sync --full` to refresh `lib/`, never
-  `cyrius update`.** At 6.6.20, `update` ignores the manifest pin and
-  re-vendors from whatever `~/.cyrius/current` points at (6.7.18 on
-  the dev box at the time of the 1.0.12 refresh).
-- **`cyrius.lock`**: `cyrius deps` / `lib sync` now write one (sha256
-  per vendored file). Not tracked in git as of 1.0.12.
+  `diff -rq lib ~/.cyrius/versions/6.7.18/lib`.
+- **Binary size**: the `CYRIUS_DCE=1` release binary is ~540 KB at
+  6.7.18 (195 KB at 6.6.20). The code segment is flat; the growth is
+  **data**. 6.7.18's `bayan` unconditionally includes the Unicode
+  casefold / category / normalization tables, and DCE drops dead code
+  but not data. hapi reaches none of it, and `sync` timing is
+  unchanged. Upstream's to fix — `lib/` is not edited here.
+- **Refresh `lib/` with `cyrius lib sync --full`.** Through 6.7.11,
+  `cyrius update` ignored the manifest pin and re-vendored from
+  whatever `~/.cyrius/current` pointed at (it did exactly that during
+  the 1.0.12 refresh). Fixed upstream at 6.7.12: `update` now runs the
+  same sync from the pin's snapshot. Without `--full` it refreshes
+  only the declared `[deps] stdlib` set, so `lib sync --full` (or
+  `update --full`) is still what keeps hapi's full snapshot exact.
+- **`cyrius.lock`**: written by `cyrius deps` / `lib sync` (sha256 per
+  vendored file plus a `cyrius<TAB><pin>` trailer). Tracked in git
+  since 1.0.12; `cyrius deps --verify` checks `lib/` against it.
 
 ## Shape
 
@@ -110,7 +123,13 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   `[[link]]` rows sorted by `target`, no comments, single
   blank line between sections.
 - `src/manifest_write.cyr` — append + remove `[[link]]` rows
-  atomically via `tmp+rename`. Uses the stdlib `sys_rename` /
+  atomically via `tmp+rename`. **Header-only, by the reader's rule**:
+  `_hmw_delim_at` / `_hmw_find_separator` find the first `---` line
+  exactly as bayan 1.11.1 does (a whole `---` line ending in `\n`, CR
+  LF, or end of file), append inserts above it, and remove searches
+  only above it. The bodies below it are markdown and never edited.
+  The two sides are pinned against each other by the `1.1.0` section of
+  `tests/hapi.tcyr`; a bayan bump that moves the rule fails there. Uses the stdlib `sys_rename` /
   `sys_fsync` wrappers (landed in cyrius 6.2.x) — shared by
   `adopt` / `rollback`. The 1.0.1-era `HapiSysno` enum
   (`HAPI_SYS_RENAME` / `HAPI_SYS_FSYNC`, x86_64-only literal
@@ -221,7 +240,7 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. **365 assertions across 92 test
+- `tests/hapi.tcyr` — primary suite. **387 assertions across 95 test
   groups.** Re-derive rather than recount by hand — these figures have
   rotted twice, and the per-tier breakdown below drifted 16 groups
   short before the 2026-08-26 sweep:
@@ -233,10 +252,10 @@ in-source magic-number `syscall(N, ...)` calls.)_
     | sort | uniq -c | sort -rn                 # per-tier breakdown
   ```
 
-  Groups by tier, as measured: manifest 7, cap 7, backup 7, rollback 6,
-  link 6, dry-run 6, adopt 6, status 5, canonical 5, audit_reader 5,
-  manifest_write 4, fs_link 4, check 4+2, audit-repair 4, audit 4,
-  sync 3, list 3, unlink 2, checkpoint 1, agnos_compat 1.
+  Groups by tier, as measured at 1.1.0: manifest 8, cap 7, backup 7,
+  rollback 6, manifest_write 6, link 6, dry-run 6, adopt 6, status 5,
+  canonical 5, audit_reader 5, fs_link 4, check 4+2, audit-repair 4,
+  audit 4, sync 3, list 3, unlink 2, checkpoint 1, agnos_compat 1.
 
 ### Harnesses
 
@@ -244,7 +263,7 @@ in-source magic-number `syscall(N, ...)` calls.)_
 beside it as shell harnesses. **CI runs both.**
 
 The suite itself also runs on aarch64 — `cyrius test --aarch64` under
-`qemu-aarch64` (365 / 365 at 1.0.12). **CI runs it** as of 1.0.12
+`qemu-aarch64` (387 / 387 at 1.1.0). **CI runs it** as of 1.0.12
 (`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
 qemu fails the step, it never skips). Before that the aarch64 step was
 compile-only, which is how the `O_NOFOLLOW` literal went unseen from
@@ -319,11 +338,12 @@ means downstream packagers (zugot recipes) and user manifests.
 The 1.0.x hardening arc is **closed** — all twenty findings of the
 2026-08-25 P(-1) sweep are fixed (1.0.5 → 1.0.10).
 
-One thing is owed before the arc is formally signed off: a **P(-1)
-re-walk** over the repaired write paths. Thirteen fixes landed across
-1.0.9 and 1.0.10 and between them touched a path argument, a syscall
-and the audit-trail write path — all three of CLAUDE.md's re-run
-triggers. That re-walk is what reopens the additive v1.x bucket.
+**1.1.1 is the P(-1) audit and repairs** — the re-walk over the
+repaired write paths that the arc still owes (1.0.9, 1.0.10 and 1.0.12
+between them touched a path argument, a syscall and the audit-trail
+write path — all three of CLAUDE.md's re-run triggers), with aarch64 in
+scope and the repair candidates the 1.0.12 / 1.1.0 toolchain work
+turned up. Scope is in [`roadmap.md`](roadmap.md) § 1.1.1.
 
 Forward-looking work is **not** listed here — it lives in
 [`roadmap.md`](roadmap.md), which carries only work that has not

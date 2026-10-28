@@ -57,7 +57,7 @@ fn _tn_ci_eq(a, b, n): i64 {
 # labels of its own ("*.com", "*." are not wildcards) — each label 1+ of [A-Za-z0-9-], not starting
 # or ending in '-', no second '*', no empty label and no trailing dot. 1 / 0. A dNSName this
 # refuses is compared LITERALLY (as OpenSSL does), so "*.com" matches only the host "*.com".
-# ⛔ 6.6.14 (CVE-67) — WHY. Native took any "*." prefix as a wildcard over the host's first label,
+# ⛔ 6.6.14 (CYRIUS-2026-0022) — WHY. Native took any "*." prefix as a wildcard over the host's first label,
 # so a certificate for "*.com" verified every .com host, and "*.example.com.", "*.a_b.com" and
 # "*.*.example.com" matched names libssl refuses — the backends disagreed on what a certificate
 # binds. CHANGELOG [6.6.14]
@@ -144,9 +144,9 @@ fn _tn_host_match(dns, dns_len, host, host_len): i64 {
 # Walk a cert DER to its SubjectAltName extension and match `host` against it.
 # The host is classified ONCE, up front (RFC 9525 §6.3, RFC 6125 §6.2.1): a DNS
 # name is compared with the dNSName entries only (exact or single-label
-# wildcard), an IP literal with the iPAddress entries only (CVE-18, octet for
+# wildcard), an IP literal with the iPAddress entries only (CYRIUS-2026-0003, octet for
 # octet), and a ':'-bearing non-literal with nothing — so neither DNS:127.0.0.1
-# nor DNS:*.0.0.1 verifies 127.0.0.1. CHANGELOG [6.6.13] (CVE-63).
+# nor DNS:*.0.0.1 verifies 127.0.0.1. CHANGELOG [6.6.13] (CYRIUS-2026-0018).
 # Returns 1 on a match, 0 otherwise.
 fn _tn_cert_san_match(der, der_len, host, host_len): i64 {
     var ipb[16];                                 # 16 BYTES (local-array rule)
@@ -216,7 +216,7 @@ fn _tn_cert_san_match(der, der_len, host, host_len): i64 {
                                     }
                                 }
                                 if (ntag == 0x87) {
-                                    # iPAddress (CVE-18): the raw 4/16 octets, IP-ID only.
+                                    # iPAddress (CYRIUS-2026-0003): the raw 4/16 octets, IP-ID only.
                                     if (iplen > 0) {
                                         if (ncl == iplen) {
                                             if (_tn_ct_eq(der + ncp, &ipb, iplen) == 1) { return 1; }
@@ -345,7 +345,7 @@ fn tls_native_set_entropy(rand_fn): i64 {
     return TLS_OK;
 }
 
-# CVE-18 (v6.1.36): wall-clock for cert-window validation. Mirrors
+# CYRIUS-2026-0003 (v6.1.36): wall-clock for cert-window validation. Mirrors
 # lib/chrono.cyr's clock_epoch_secs — clock_gettime(CLOCK_REALTIME) (#228, which
 # the backend ESYSXLAT renumbers per target: a64-Linux 228→113, Darwin/Windows
 # rerouted). The earlier syscall(201,0)=time(2) was an x86-ONLY leak: 201 is NOT
@@ -397,7 +397,7 @@ fn _tn_rand_bytes(buf, n): i64 {
     return fncall3(rf, buf, n, 0);
 }
 
-# CVE-18 (v6.1.36): fail-closed peer verification, run by connect() BEFORE it
+# CYRIUS-2026-0003 (v6.1.36): fail-closed peer verification, run by connect() BEFORE it
 # yields a CONNECTED channel — so a bare-metal/AGNOS caller (which can't use the
 # lib/tls.cyr wrapper) is verified by default, not connected-but-unverified.
 # TLS_VERIFY_NONE opts out (testing / pinned peer). Otherwise the chain MUST
@@ -416,7 +416,7 @@ fn _tn_connect_verify(ctx): i64 {
 
 # Client-side: perform the handshake over `sock_fd` (caller-managed
 # TCP socket, already connect()'d). Blocking; returns TLS_OK when
-# handshake completes AND (CVE-18) the peer verifies per the ctx verify
+# handshake completes AND (CYRIUS-2026-0003) the peer verifies per the ctx verify
 # mode, or a negative TLS_ERR_* on failure.
 # 6.6.15: a HelloRetryRequest is answered with the second ClientHello
 # (tls_native_client_process_hrr) — once; a ServerHello or HelloRetryRequest the client refuses
@@ -471,7 +471,7 @@ fn _tn_connect_hs(ctx, sock_fd): i64 {
             _tn_send_hs_alert(ctx, sock_fd);
             return ch2n;
         }
-        var c2cap = ch2n + TLS_RECORD_HEADER_LEN * (1 + ch2n / TLS_RECORD_MAX_PLAINTEXT);
+        var c2cap = ch2n + TLS_RECORD_HEADER_LEN * (1 + ch2n / _TLS_RECORD_MAX_PLAINTEXT);
         var c2rec = _tn_alloc(ctx, c2cap);
         if (c2rec == 0) { return _tn_ctx_fail(ctx, TLS_ERR_OOM); }
         var c2rn = _tn_hs_plain_records(ch2, ch2n, c2rec, c2cap);
@@ -494,7 +494,10 @@ fn _tn_connect_hs(ctx, sock_fd): i64 {
     var frl = _tn_read_rec(ctx, sock_fd, inbuf, cap, _TN_CCS_MAY);
     if (frl < 0) { return _tn_read_fail(ctx, frl); }
     var rf = tls_native_client_recv_flight(ctx, inbuf, frl);
-    if (rf != TLS_OK) { return rf; }
+    if (rf != TLS_OK) {
+        _tn_send_hs_alert(ctx, sock_fd);   # the refusals that name one (6.7.12), sealed under our handshake key
+        return rf;
+    }
     # Verify the server Finished + send the client second flight. v6.2.8: this
     # may include the client Certificate + CertificateVerify (mTLS client-auth)
     # ahead of the Finished, so size for a cert chain (was 256 — Finished-only).
@@ -507,7 +510,7 @@ fn _tn_connect_hs(ctx, sock_fd): i64 {
     # Install application-traffic keys (client_finish derived the master).
     var ik = tls_native_install_app_keys(ctx);
     if (ik != TLS_OK) { return ik; }
-    var vr = _tn_connect_verify(ctx);   # CVE-18: fail-closed chain + hostname
+    var vr = _tn_connect_verify(ctx);   # CYRIUS-2026-0003: fail-closed chain + hostname
     if (vr != TLS_OK) { return vr; }
     return TLS_OK;
 }
@@ -614,7 +617,7 @@ fn _tn_hs_plain_alert(ctx, rec, rl): i64 {
 # loops, reading no clock. The ctx-less _tn_sock_* names are their ctx == 0 forms. v6.2.4: the
 # leaves are the transport vtable's — _tn_tx_read / _tn_tx_write if installed, else the default
 # transport's _tn_os_read / _tn_os_write (6.6.14, below). `fd` is the per-conn handle.
-# ⛔ 6.6.13 (CVE-61) — WHY. A record read looped read(2) until the record was complete, with
+# ⛔ 6.6.13 (CYRIUS-2026-0017) — WHY. A record read looped read(2) until the record was complete, with
 # no clock: a peer that sent one byte just inside SO_RCVTIMEO held a 16 KB record read for days,
 # and nothing in the client took a deadline (the transport vtable is process-global, so a caller
 # could not install a per-connection one either). Issue 2026-10-01-tls-native-no-deadline (b);
@@ -634,9 +637,10 @@ fn _tn_hs_plain_alert(ctx, rec, rl): i64 {
 #     Windows socket), waits for writability with the time left, and restores the fd on every exit
 #     — its status flags on Linux / macOS; a Windows socket is left BLOCKING, because Windows cannot
 #     read FIONBIO back (the mode lib/net.cyr creates sockets in, as net_connect_sa_nb leaves them);
-#   - agnos, a tagged socket: sock_recv / sock_send take the time left themselves; a send can
-#     overshoot by one sock_send#48 stall (~8 s: the kernel waits for each segment's ACK inside the
-#     call and #48 takes no time bound — agnos needs a bounded send to close it);
+#   - agnos, a tagged socket: sock_recv / sock_send take the time left themselves — on a kernel
+#     with sock_send_dl#109 (agnos 1.57.13) as each send call's own ceiling (6.7.11); on an older
+#     kernel a send can still overshoot by one sock_send#48 stall (~8 s: the kernel waits for each
+#     segment's ACK inside the call and #48 takes no time bound);
 #   - a custom transport (tls_native_set_transport), an agnos fd that is not a socket, and a
 #     Windows HANDLE that is not a socket (a pipe, a file): the clock is checked BETWEEN calls only,
 #     so one call is bounded by the transport itself.
@@ -699,7 +703,7 @@ fn _tn_can_poll(): i64 {
 # are ReadFile / WriteFile, which fail on a Winsock SOCKET: native TLS could not run over a
 # lib/net.cyr socket there at all (roadmap backlog j). (b) A flagless write(2) to a peer that had
 # reset the connection raised SIGPIPE, which KILLED a native TLS client or server that had not
-# ignored it — any peer could end the process (CVE-66). The process-global signal disposition is
+# ignored it — any peer could end the process (CYRIUS-2026-0021). The process-global signal disposition is
 # left alone: the protection is per write (Linux) or per socket (macOS). A pipe or a file keeps
 # write(2)'s SIGPIPE — neither OS has a per-call flag for one. CHANGELOG [6.6.14]
 
@@ -732,6 +736,7 @@ fn _tn_is_notsock(e): i64 {
 # Read up to `n` bytes from `fd`.
 fn _tn_os_read(fd, buf, n): i64 {
     #ifdef CYRIUS_TARGET_WIN
+    if (_win_fd_aliases(fd) == 1) { return 0 - 9; }  # never a descriptor (6.7.16)
     var len = n;
     if (len > 0x7FFFFFFF) { len = 0x7FFFFFFF; }       # recv takes an int length
     var r = syscall(0xF048, fd, buf, len, 0);        # recv
@@ -748,6 +753,7 @@ fn _tn_os_read(fd, buf, n): i64 {
 # Write up to `n` bytes to `fd`, never raising SIGPIPE on a socket (see the block above).
 fn _tn_os_write(fd, buf, n): i64 {
     #ifdef CYRIUS_TARGET_WIN
+    if (_win_fd_aliases(fd) == 1) { return 0 - 9; }  # never a descriptor (6.7.16)
     var len = n;
     if (len > 0x7FFFFFFF) { len = 0x7FFFFFFF; }       # send takes an int length; a short write is legal
     var w = syscall(0xF047, fd, buf, len, 0);        # send
@@ -884,6 +890,7 @@ fn _tn_eagain(): i64 {
 # Linux / macOS: O_NONBLOCK (the saved status flags). Windows: ioctlsocket(FIONBIO, 1) — 0.
 fn _tn_nb_on(fd): i64 {
     #ifdef CYRIUS_TARGET_WIN
+    if (_win_fd_aliases(fd) == 1) { return 0 - 9; }  # never a descriptor (6.7.16)
     var v[8];
     store64(&v, 1);
     if (syscall(0xF049, fd, 0x8004667E, &v) != 0) { return _tn_win_sockerr(); }   # FIONBIO
@@ -897,6 +904,7 @@ fn _tn_nb_on(fd): i64 {
 # Undo _tn_nb_on. Windows cannot read FIONBIO back, so a socket is left BLOCKING there.
 fn _tn_nb_off(fd, saved): i64 {
     #ifdef CYRIUS_TARGET_WIN
+    if (_win_fd_aliases(fd) == 1) { return 0 - 9; }  # never a descriptor (6.7.16)
     var v[8];
     store64(&v, 0);
     syscall(0xF049, fd, 0x8004667E, &v);             # FIONBIO 0
@@ -1027,7 +1035,7 @@ fn _tn_sock_write_all(fd, buf, len): i64 { return _tn_io_write_all(0, fd, buf, l
 # second window: the peer's one CCS comes after the HelloRetryRequest / before the second
 # ClientHello or after the ServerHello / before its encrypted flight (RFC 8446 §D.4), never both
 # (6.6.15). ctx CCS_STATE bit0 records the peer's CCS.
-# ⛔ 6.6.13 (CVE-61) — WHY. Every read went through one helper that dropped ANY number of CCS
+# ⛔ 6.6.13 (CYRIUS-2026-0017) — WHY. Every read went through one helper that dropped ANY number of CCS
 # records, during the handshake and after it: one CCS more often than the read timeout — from
 # anyone on the path, no key needed — held a client thread for ever, even inside a verified
 # session. That helper is deleted; no read skips a CCS outside this policy. Issue
@@ -1127,7 +1135,7 @@ fn _tn_send_hs_alert(ctx, fd): i64 {
     return 0;
 }
 
-# A server refusing the client's authentication (6.6.14, CVE-64): tell the client why with a fatal
+# A server refusing the client's authentication (6.6.14, CYRIUS-2026-0019): tell the client why with a fatal
 # alert (best effort, _tn_send_fatal_alert) and fail the ctx with `rc`, which is returned.
 # `empty` = 1 when the client presented no certificate under TLS_VERIFY_FAIL_IF_NO_PEER_CERT:
 # certificate_required in TLS 1.3 (`is13`, RFC 8446 §4.4.2.4), handshake_failure in 1.2 (RFC 5246
@@ -1291,7 +1299,7 @@ fn _tn_accept_hs(ctx, sock_fd): i64 {
     # (VERIFY != NONE → CertificateRequest in our flight), the client's second
     # flight is [Certificate, CertificateVerify,] Finished — each its own
     # record. Read + verify the Certificate — its chain to our trust roots since
-    # 6.6.14 (CVE-64) — (+ CertificateVerify when the client presented a non-empty
+    # 6.6.14 (CYRIUS-2026-0019) — (+ CertificateVerify when the client presented a non-empty
     # cert) before the Finished; a refused client is told why (_tn_client_auth_alert).
     # With VERIFY == NONE this block is skipped and the flight is Finished-only.
     if (load64(ctx + TLS_CTX_OFF_VERIFY) != TLS_VERIFY_NONE) {
@@ -1368,9 +1376,9 @@ fn _tn_ctx_buf(ctx, off, n): i64 {
 fn tls_native_write(ctx, buf, len): i64 {
     if (ctx == 0) { return TLS_ERR_INVALID_PARAM; }
     if (load64(ctx + TLS_CTX_OFF_STATE) != TLS_STATE_CONNECTED) { return TLS_ERR_PROTOCOL; }
-    if (len > TLS_RECORD_MAX_PLAINTEXT) { return TLS_ERR_INVALID_PARAM; }   # caller fragments
+    if (len > _TLS_RECORD_MAX_PLAINTEXT) { return TLS_ERR_INVALID_PARAM; }   # caller fragments
     var fd = load64(ctx + TLS_CTX_OFF_SOCK_FD);
-    var rec = _tn_ctx_buf(ctx, TLS_CTX_OFF_WRITE_BUF, TLS_RECORD_MAX_PLAINTEXT + 64);
+    var rec = _tn_ctx_buf(ctx, TLS_CTX_OFF_WRITE_BUF, _TLS_RECORD_MAX_PLAINTEXT + 64);
     if (rec == 0) { return _tn_ctx_fail(ctx, TLS_ERR_OOM); }
     var rn = tls_native_seal_app(ctx, buf, len, rec, len + 64);
     if (rn < 0) { return rn; }
@@ -1384,7 +1392,7 @@ fn tls_native_write(ctx, buf, len): i64 {
 # above. 6.6.13: the 0 is STICKY (every later read is 0, even with more records
 # on the wire), and a negative result fails the ctx, so every later read returns
 # that same code (a fatal alert stays TLS_ERR_ALERT).
-# v6.1.36 (CVE-30): drains post-handshake records (NewSessionTicket /
+# v6.1.36 (the TLS post-handshake false-EOF bug): drains post-handshake records (NewSessionTicket /
 # KeyUpdate, RFC 8446 §4.6) that arrive interleaved with application data,
 # instead of returning 0 (false EOF) on the first one. A standard TLS 1.3
 # server (OpenSSL/nginx) sends a NewSessionTicket immediately after the
@@ -1456,6 +1464,7 @@ fn tls_native_read(ctx, buf, maxlen): i64 {
             # NOT end-of-stream — drain it and keep reading, so only a real
             # close_notify returns 0. Non-empty data is delivered to the caller.
             if (n > 0) {
+                store64(ctx + TLS_CTX_OFF_KEY_UPDATES, 0);   # data ends a KeyUpdate run. CHANGELOG [6.7.18]
                 if (n <= maxlen) {
                     memcpy(buf, plain, n);
                     return n;
@@ -1467,7 +1476,7 @@ fn tls_native_read(ctx, buf, maxlen): i64 {
                 # 16384-byte hold), then deliver the first `maxlen` bytes.
                 var hb = load64(ctx + TLS_CTX_OFF_READ_HOLD);
                 if (hb == 0) {
-                    hb = _tn_alloc(ctx, TLS_RECORD_MAX_PLAINTEXT);
+                    hb = _tn_alloc(ctx, _TLS_RECORD_MAX_PLAINTEXT);
                     if (hb == 0) { return _tn_ctx_fail(ctx, TLS_ERR_OOM); }
                     store64(ctx + TLS_CTX_OFF_READ_HOLD, hb);
                 }
@@ -1512,6 +1521,9 @@ fn tls_native_read(ctx, buf, maxlen): i64 {
 # allocator. Sealing the close_notify allocates nothing: the record (at most 31
 # bytes, TLS 1.2's) is built on the stack. The caller owns the socket fd
 # (TLS_CTX_OFF_SOCK_FD) and closes it after this returns. CHANGELOG [6.6.13]
+# Every secret the ctx holds — traffic secrets, keys and IVs, the key schedule, the
+# private key — is zeroised after the close_notify (_tn_wipe_secrets), whatever the
+# state, a failed ctx's too. CHANGELOG [6.7.18]
 fn tls_native_close(ctx): i64 {
     if (ctx == 0) { return TLS_ERR_INVALID_PARAM; }
     var state = load64(ctx + TLS_CTX_OFF_STATE);
@@ -1527,6 +1539,7 @@ fn tls_native_close(ctx): i64 {
             _tn_io_write_all(ctx, load64(ctx + TLS_CTX_OFF_SOCK_FD), &rec, rn);
         }
     }
+    _tn_wipe_secrets(ctx);
     store64(ctx + TLS_CTX_OFF_STATE, TLS_STATE_CLOSED);
     return TLS_OK;
 }
@@ -1551,7 +1564,7 @@ fn tls_native_get_alpn_selected(ctx, buf, bufmax): i64 {
 # handshake that went on to fail (a CertificateVerify that did not verify, say) exposes no client
 # identity, and a connection error after a completed handshake (the client gone without
 # close_notify) does not take the verified identity away — libssl's behaviour.
-# 6.6.14 (CVE-64): a server read the client-side SERVER_CERT slot, which it never fills, so every
+# 6.6.14 (CYRIUS-2026-0019): a server read the client-side SERVER_CERT slot, which it never fills, so every
 # getter answered 0 on a server.
 fn _tn_peer_leaf(ctx): i64 {
     if (load64(ctx + TLS_CTX_OFF_ROLE) == TLS_ROLE_SERVER) {

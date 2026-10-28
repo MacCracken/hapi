@@ -22,10 +22,18 @@
 # Sigil's hkdf_expand max OKM bound (255 * HashLen). We never request
 # that much; max single TLS expansion is the digest itself (48 bytes
 # for SHA-384). Buffer caps:
-var TLS_HKDF_LABEL_BUF_LEN = 512;     # HkdfLabel.length(2) + label(≤256) + ctx(≤256)
+# HkdfLabel at its largest: uint16 length + opaque label<7..255> + opaque context<0..255>,
+# each opaque a 1-byte length and up to 255 bytes = 514. (6.7.6: it was 512 — the comment
+# beside it added 2 + 256 + 256 and the constant did not — so the scratch it sizes was two
+# bytes short; see tls_native_hkdf_expand_label.)
+const _TLS_HKDF_LABEL_BUF_LEN = 2 + (1 + 255) + (1 + 255);
+# Read-only mirror of `_TLS_HKDF_LABEL_BUF_LEN`: lib/ reads the const; a write changes nothing (D16). CHANGELOG [6.7.12]
+var TLS_HKDF_LABEL_BUF_LEN = _TLS_HKDF_LABEL_BUF_LEN;
 var TLS_KEYSCHED_STATE_LEN = 104;     # 13 i64 slots (+1 @ v6.2.25: ALLOC) — see layout below
 var TLS_KS_OFF_ALLOC       = 96;      # v6.2.25 Allocator handle (0=global bump); derive fns route through it
-var TLS_MAX_DIGEST_LEN = 48;          # SHA-384
+const _TLS_MAX_DIGEST_LEN = 48;       # SHA-384
+# Read-only mirror of `_TLS_MAX_DIGEST_LEN`: lib/ reads the const; a write changes nothing (D16). CHANGELOG [6.7.12]
+var TLS_MAX_DIGEST_LEN = _TLS_MAX_DIGEST_LEN;
 
 # Key schedule "which sec" identifiers (for keysched_get_secret).
 var TLS_KS_EARLY            = 0;
@@ -84,7 +92,15 @@ fn tls_native_hkdf_expand_label(sec, secret_len, label, label_len,
     # Build the HkdfLabel into a stack scratch buffer (v6.2.25: was a per-call
     # alloc on the global bump — called for every expand-label, so a per-handshake
     # leak on a long-running server; the bytes never escape this fn).
-    var infobuf[512];   # == TLS_HKDF_LABEL_BUF_LEN (array size must be a literal)
+    # ⛔ 6.7.6: the scratch was 512 bytes and the largest label the checks above admit is
+    # 514 (2 + 1 + 6 + 249 + 1 + 255), so a 249-byte label with a 255-byte context wrote the
+    # context's last two bytes past it. On x86 they land in the spilled `out_len`, so
+    # hkdf_expand then wrote that many bytes (258 for a context ending 01 02) into the
+    # caller's `out` — a heap overrun of the caller's buffer. Every internal label is short
+    # and every internal context at most a 48-byte hash (the ticket nonce is 8), so it
+    # was reachable only by calling this public fn directly. Pinned by
+    # tests/tcyr/crossos/tls_native_scratch_bounds.tcyr.
+    var infobuf[_TLS_HKDF_LABEL_BUF_LEN];
     var info = &infobuf;
     # uint16 length BE
     _tn_be16_w(info, out_len);
@@ -138,7 +154,7 @@ fn tls_native_derive_secret(sec, secret_len, label, label_len,
     # Compute Transcript-Hash(Messages) into a stack scratch buffer (v6.2.25:
     # was a per-Derive-Secret alloc on the global bump → per-handshake leak;
     # the digest never escapes this fn).
-    var thbuf[48];   # == TLS_MAX_DIGEST_LEN (array size must be a literal)
+    var thbuf[_TLS_MAX_DIGEST_LEN];
     var th = &thbuf;
     tls_native_transcript_digest(transcript_state, th);
 
@@ -240,6 +256,9 @@ fn tls_native_keysched_set_psk(ks, psk, psk_len): i64 {
 #   - client_handshake_traffic_secret  ("c hs traffic")
 #   - server_handshake_traffic_secret  ("s hs traffic")
 fn tls_native_keysched_derive_handshake(ks, dhe, dhe_len, transcript): i64 {
+    # The "derived" bridge secret is a `secret var`, zeroised on every return (it was a
+    # _tn_ks_alloc abandoned un-wiped). CHANGELOG [6.7.18]
+    secret var derived_b[_TLS_MAX_DIGEST_LEN];
     if (ks == 0) { return TLS_ERR_INVALID_PARAM; }
     if (transcript == 0) { return TLS_ERR_INVALID_PARAM; }
     var hash_algo = load64(ks);
@@ -250,8 +269,7 @@ fn tls_native_keysched_derive_handshake(ks, dhe, dhe_len, transcript): i64 {
 
     # Derive-Secret(early, "derived", "") — the empty-transcript
     # bridge to the next HKDF-Extract.
-    var derived = _tn_ks_alloc(ks, hash_len);
-    if (derived == 0) { return TLS_ERR_OOM; }
+    var derived = &derived_b;
     var empty_th = _tn_empty_transcript_in(load64(ks + TLS_KS_OFF_ALLOC), hash_algo);
     if (empty_th == 0) { return TLS_ERR_OOM; }
     var drc = tls_native_derive_secret(early, hash_len, "derived", 7, empty_th, derived);
@@ -294,6 +312,9 @@ fn tls_native_keysched_derive_handshake(ks, dhe, dhe_len, transcript): i64 {
 #   - exporter_master_secret             ("exp master")
 #   - resumption_master_secret           ("res master")
 fn tls_native_keysched_derive_master(ks, transcript): i64 {
+    # The "derived" bridge secret is a `secret var`, zeroised on every return (it was a
+    # _tn_ks_alloc abandoned un-wiped). CHANGELOG [6.7.18]
+    secret var derived_b[_TLS_MAX_DIGEST_LEN];
     if (ks == 0) { return TLS_ERR_INVALID_PARAM; }
     if (transcript == 0) { return TLS_ERR_INVALID_PARAM; }
     var hash_algo = load64(ks);
@@ -303,8 +324,7 @@ fn tls_native_keysched_derive_master(ks, transcript): i64 {
     var hs = load64(ks + 32);
 
     # Derive-Secret(hs, "derived", "") bridge.
-    var derived = _tn_ks_alloc(ks, hash_len);
-    if (derived == 0) { return TLS_ERR_OOM; }
+    var derived = &derived_b;
     var empty_th = _tn_empty_transcript_in(load64(ks + TLS_KS_OFF_ALLOC), hash_algo);
     if (empty_th == 0) { return TLS_ERR_OOM; }
     var drc = tls_native_derive_secret(hs, hash_len, "derived", 7, empty_th, derived);
@@ -371,6 +391,22 @@ fn tls_native_keysched_get_secret(ks, which, out): i64 {
 fn tls_native_keysched_phase(ks): i64 {
     if (ks == 0) { return TLS_KSP_NONE; }
     return load64(ks + 16);
+}
+
+# Zeroise the schedule's nine secrets (early through resumption master, +24..+88, each hash_len
+# bytes) and clear their slots, so none can be read back (get_secret answers TLS_ERR_PROTOCOL).
+# tls_native_close runs it through _tn_wipe_secrets. Idempotent. CHANGELOG [6.7.18]
+fn _tn_ks_wipe(ks): i64 {
+    if (ks == 0) { return 0; }
+    var hash_len = load64(ks + 8);
+    var off = 24;
+    while (off <= 88) {
+        var p = load64(ks + off);
+        if (p != 0) { memset(p, 0, hash_len); }
+        store64(ks + off, 0);
+        off = off + 8;
+    }
+    return 0;
 }
 
 # ----------------------------------------------------------------
