@@ -1,15 +1,373 @@
-# cli.cyr — shared CLI-mode flags.
+# cli.cyr — the command line: verb dispatch, each verb's flags, and the
+# process-wide CLI-mode flag they set.
 #
-# Owns the process-wide `--dry-run` flag. Set by the
-# dispatcher when `--dry-run` is on the command line; read by
-# every mutating command (link, unlink, adopt, sync, rollback,
-# checkpoint) before its first syscall / audit write.
+# Parsing is cmdit's (1.2.0); through 1.1.1 it was a hand-rolled argv walk
+# in main.cyr. The v1.0 command surface is frozen, so cmdit is driven to
+# reproduce it:
+#   - The command is argv[1] alone: a verb, or --help/-h/--version/-v.
+#     Nothing is accepted before the verb, and a leading --help/--version
+#     answers whatever follows it.
+#   - Each verb parses on its own cmdit handle that registers only that
+#     verb's flags, so a flag another verb takes is still refused here with
+#     exit 2 (guides/dry-run.md, backup-to.md, capability.md). The usage text
+#     calls --root / --dry-run / --backup-to "global"; they are per-verb
+#     subsets, so they are not cmdit globals.
+#   - Every 1.1.1 message is kept: hapi renders cmdit's errors itself.
+#
+# The exit-code contract:
+#   0  success
+#   1  command-specific failure (parse error, conflict, IO,
+#      capability denial)
+#   2  bad usage (unknown verb, unknown / misplaced flag,
+#      missing argument)
+#
+# hapi_cli_run(argc, argv) is pure (it never reads /proc), so
+# tests/hapi.tcyr drives it with a synthetic argv; hapi_cli_main() is the
+# binary's entry.
+#
+# This file is also included by the mutating commands for the --dry-run
+# flag below, so the include graph through it is a cycle. That is fine:
+# includes are once-only and functions resolve across the whole unit.
+
+include "lib/cmdit.cyr"
+include "src/cmd/inspect.cyr"
+include "src/cmd/link.cyr"
+include "src/cmd/unlink.cyr"
+include "src/cmd/adopt.cyr"
+include "src/cmd/rollback.cyr"
+include "src/cmd/checkpoint.cyr"
+include "src/cmd/status.cyr"
+include "src/cmd/list.cyr"
+include "src/cmd/check.cyr"
+include "src/cmd/sync.cyr"
+include "src/cap.cyr"
+include "src/backup.cyr"
+
+# The process-wide `--dry-run` flag. Set by the dispatcher when the verb's
+# command line has it; read by every mutating command (link, unlink, adopt,
+# sync, rollback, checkpoint) before its first syscall / audit write.
 #
 # Setter / getter pattern matches the `_hlnk_scope_root_override`
 # and `_audit_override_path` hooks — tests flip it via the
-# setter, the binary flips it from main(), nobody else.
-
+# setter, the binary flips it from the dispatcher, nobody else.
 var _hapi_dry_run = 0;
 
 fn hapi_set_dry_run(v): i64 { _hapi_dry_run = v; return 0; }
 fn hapi_dry_run(): i64 { return _hapi_dry_run; }
+
+# Verb ids. cmdit hands them out in registration order, so a new verb (`fmt`
+# at 1.7.0) goes at the END: inserting one anywhere else renumbers every verb
+# after it, and stiva shipped exactly that (`cron ls` ran `completions`).
+enum HapiVerb {
+    HAPI_V_INSPECT = 0; HAPI_V_LINK = 1; HAPI_V_UNLINK = 2; HAPI_V_ADOPT = 3;
+    HAPI_V_ROLLBACK = 4; HAPI_V_CHECKPOINT = 5; HAPI_V_STATUS = 6;
+    HAPI_V_LIST = 7; HAPI_V_CHECK = 8; HAPI_V_SYNC = 9;
+}
+
+# The flags a verb accepts, as a bit set.
+enum HapiFlag {
+    HAPI_F_FORCE = 1; HAPI_F_STRICT = 2; HAPI_F_DRY_RUN = 4;
+    HAPI_F_ROOT = 8; HAPI_F_BACKUP_TO = 16;
+}
+
+# `hapi --version` prints `hapi <version>`. The number is
+# CYRIUS_PKG_VERSION — the compile-time constant cyrius resolves
+# from `[package].version`, which is `${file:VERSION}` — so the
+# VERSION file at the project root is the only place it lives.
+# Replaces the hand-synced literal this fn used to carry (the
+# constant landed in cyrius 6.5.21; 6.5.34 made it visible in
+# included files too, which is what lets it live here).
+fn hapi_print_version(): i64 {
+    print("hapi ", 5);
+    println(CYRIUS_PKG_VERSION);
+    return 0;
+}
+
+# Hand-written rather than cmdit_help_fd: cmdit's generated help is shaped
+# `Usage: hapi [options] [args]` + a flag table, and this text is v1.0
+# surface that has to stay byte for byte.
+fn hapi_print_usage(): i64 {
+    println("usage: hapi <command> [args...]");
+    println("");
+    println("commands:");
+    println("  inspect <path>            parse and display a package manifest");
+    println("  link <path> [--force]     create symlinks for the package");
+    println("  unlink <pkg>              remove this package's symlinks from the trail");
+    println("  adopt <file> <pkg>        move a file into a package, link back");
+    println("  rollback                  reverse the audit trail to the last marker");
+    println("  checkpoint                append a rollback-marker to the audit trail");
+    println("  status <path>             show drift between manifest and on-disk symlinks");
+    println("  list                      list packages tracked in the audit trail");
+    println("  check <path> [--strict]   parse + display a manifest, optionally strict");
+    println("  sync <path>               re-apply a manifest (idempotent)");
+    println("");
+    println("global flags:");
+    println("  --root <path>             open a non-$HOME scope (link/adopt/status/list/sync)");
+    println("                            requires the path to be inside $HOME or listed");
+    println("                            in HAPI_ALLOWED_ROOTS (colon-separated)");
+    println("  --dry-run                 print actions; no syscalls or audit writes");
+    println("                            (link/unlink/adopt/sync/rollback/checkpoint)");
+    println("  --backup-to <dir>         snapshot existing file content to <dir> before");
+    println("                            a destructive overwrite (link --force / adopt).");
+    println("                            Audit entry gains `backup_path`.");
+    println("");
+    println("options:");
+    println("  --version, -v             print version and exit");
+    println("  --help, -h                print this message and exit");
+    return 0;
+}
+
+# strlen-based so the length cannot drift from the literal — the
+# hand-counted eprints this replaces were one byte long and wrote a
+# stray NUL to stderr (F-060 was the last of them).
+fn _hapi_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
+fn _hapi_missing_value(flag, kind): i64 {
+    _hapi_eputs("hapi: ");
+    _hapi_eputs(flag);
+    _hapi_eputs(" requires a ");
+    _hapi_eputs(kind);
+    _hapi_eputs(" argument (a value starting with `-` must be spelled `./-name`)\n");
+    return 0;
+}
+
+# Print a stock "unexpected argument" error. Every verb rejects a
+# positional it has no slot for, rather than silently dropping it —
+# through 1.0.4 `hapi rollback <pkg>` ignored the package name and
+# reversed the ENTIRE visible trail at exit 0, and `hapi link A B`
+# reported complete success having linked only A (F-013).
+fn _hapi_extra_arg(verb, arg): i64 {
+    _hapi_eputs("hapi: unexpected argument for `");
+    _hapi_eputs(verb);
+    _hapi_eputs("`: ");
+    _hapi_eputs(arg);
+    _hapi_eputs("\n");
+    return 0;
+}
+
+# Print a stock "unexpected flag for this verb" error.
+fn _hapi_unexpected_flag(verb, flag): i64 {
+    _hapi_eputs("hapi: unexpected flag for `");
+    _hapi_eputs(verb);
+    _hapi_eputs("`: ");
+    _hapi_eputs(flag);
+    _hapi_eputs("\n");
+    return 0;
+}
+
+fn _hapi_unknown_command(word): i64 {
+    _hapi_eputs("hapi: unknown command: ");
+    _hapi_eputs(word);
+    _hapi_eputs("\n");
+    hapi_print_usage();
+    return 2;
+}
+
+# Apply one `--root` value: cap-check it, set the scope override on
+# success. Returns 0 success / 1 cap denial / 2 empty value. Runs
+# after the parse, so the grant is decided on the root actually used
+# (F-051).
+fn _hapi_apply_root(value): i64 {
+    if (strlen(value) == 0) {
+        _hapi_eputs("hapi: --root requires a path argument\n");
+        return 2;
+    }
+    var cr_t, cr_v = cap_check_root_r(value);
+    if (is_err_result(cr_t) == 1) {
+        var code = cr_v;
+        var msg = hapi_cap_err_msg(code);
+        _hapi_eputs("hapi: ");
+        _hapi_eputs(msg);
+        _hapi_eputs("\n");
+        return 1;
+    }
+    var abs_root = cr_v;
+    link_set_scope_root(abs_root);
+    return 0;
+}
+
+fn _hapi_cli_new(): i64 {
+    var h = cmdit_new("hapi");
+    cmdit_version_short(h, 118);    # -v, as v1.0 spells it; cmdit's default is -V
+    cmdit_verb(h, "inspect", "parse and display a package manifest");
+    cmdit_verb(h, "link", "create symlinks for the package");
+    cmdit_verb(h, "unlink", "remove this package's symlinks from the trail");
+    cmdit_verb(h, "adopt", "move a file into a package, link back");
+    cmdit_verb(h, "rollback", "reverse the audit trail to the last marker");
+    cmdit_verb(h, "checkpoint", "append a rollback-marker to the audit trail");
+    cmdit_verb(h, "status", "show drift between manifest and on-disk symlinks");
+    cmdit_verb(h, "list", "list packages tracked in the audit trail");
+    cmdit_verb(h, "check", "parse + display a manifest, optionally strict");
+    cmdit_verb(h, "sync", "re-apply a manifest (idempotent)");
+    return h;
+}
+
+fn _hapi_verb_flags(v): i64 {
+    if (v == HAPI_V_LINK)       { return HAPI_F_FORCE | HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO; }
+    if (v == HAPI_V_UNLINK)     { return HAPI_F_DRY_RUN; }
+    if (v == HAPI_V_ADOPT)      { return HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO; }
+    if (v == HAPI_V_ROLLBACK)   { return HAPI_F_DRY_RUN; }
+    if (v == HAPI_V_CHECKPOINT) { return HAPI_F_DRY_RUN; }
+    if (v == HAPI_V_STATUS)     { return HAPI_F_ROOT; }
+    if (v == HAPI_V_LIST)       { return HAPI_F_ROOT; }
+    if (v == HAPI_V_CHECK)      { return HAPI_F_STRICT; }
+    if (v == HAPI_V_SYNC)       { return HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO; }
+    # inspect takes none, and still owes exit 2 for one, not the
+    # exit 1 that means "bad manifest" (F-033).
+    return 0;
+}
+
+# The positional slots each verb has. A missing one is each cmd_*'s
+# own usage line; an extra one is refused here (F-013).
+fn _hapi_verb_positionals(v): i64 {
+    if (v == HAPI_V_ADOPT) { return 2; }
+    if (v == HAPI_V_ROLLBACK || v == HAPI_V_CHECKPOINT || v == HAPI_V_LIST) { return 0; }
+    return 1;
+}
+
+# Register a flag on the verb's handle when its set has `bit`. A flag
+# left out returns -1, which every cmdit getter reads as "not given".
+fn _hapi_bool_flag(vh, set, bit, name, help): i64 {
+    if ((set & bit) == 0) { return 0 - 1; }
+    return cmdit_bool(vh, 0, name, help);
+}
+
+# --root / --backup-to are repeatable so that every occurrence is
+# checked, as the 1.1.1 walk checked each one: a denied `--root`
+# refuses the run even when a later one would be granted. The value
+# in effect is the last, as before.
+fn _hapi_value_flag(vh, set, bit, name, metavar, help): i64 {
+    if ((set & bit) == 0) { return 0 - 1; }
+    var idx = cmdit_repeat(vh, 0, name, help);
+    cmdit_metavar(vh, idx, metavar);
+    # `--root --dry-run pkg` must not take `--dry-run` as the root.
+    # Through 1.0.8 it did: the cap check passes whenever cwd is under
+    # $HOME, so a run the user asked to be a no-op created
+    # `$HOME/--dry-run/`, planted a symlink and appended to the trail —
+    # at exit 0 (F-019).
+    cmdit_reject_flag_value(vh, idx);
+    return idx;
+}
+
+# Refuse any value of `idx` that starts with `-`. cmdit_reject_flag_value
+# already refuses a flag-shaped value given separately; this adds a lone
+# `-`, which cmdit takes as a value (stdin) but 1.1.1 refused, and the
+# `--root=-x` spelling 1.2.0 adds, so the message's advice holds however
+# the value was typed. Returns 1 when every value is acceptable.
+fn _hapi_values_ok(vh, idx, flag, kind): i64 {
+    var n = cmdit_repeat_count(vh, idx);
+    var i = 0;
+    while (i < n) {
+        if (load8(cmdit_repeat_get(vh, idx, i)) == 45) {
+            _hapi_missing_value(flag, kind);
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Render a verb's parse error in hapi's 1.1.1 words. Whatever the verb
+# does not take — an unknown flag (`--x`), a bundled short (`-xy`), a
+# bool given a value (`--force=1`) — is "unexpected", named as typed.
+fn _hapi_parse_error(vh, verb, f_root, f_backup): i64 {
+    var e = cmdit_error(vh);
+    if (e == CMDIT_ERR_UNKNOWN || e == CMDIT_ERR_BUNDLED || e == CMDIT_ERR_UNEXPECTED_VALUE) {
+        _hapi_unexpected_flag(verb, cmdit_err_token(vh));
+        return 2;
+    }
+    if (e == CMDIT_ERR_MISSING_VALUE) {
+        var fi = cmdit_err_flag(vh);
+        if (fi >= 0 && fi == f_root) { _hapi_missing_value("--root", "path"); return 2; }
+        if (fi >= 0 && fi == f_backup) { _hapi_missing_value("--backup-to", "directory"); return 2; }
+    }
+    return cmdit_print_error(vh);    # out of memory: cmdit's own words
+}
+
+# Parse the verb's command line (argv[1..], so the slice's argv[0] is the
+# verb) on a handle of its own, apply its flags, and run it. A parse
+# error, an extra positional or a `-` value (exit 2) is reported before
+# any --root is cap-checked (exit 1); an empty --root is still judged in
+# turn with the grants, as it was in 1.1.1.
+fn _hapi_run_verb(h, argc, argv): i64 {
+    var v = cmdit_verb_matched(h);
+    var verb = cmdit_verb_name_at(h, v);
+    var set = _hapi_verb_flags(v);
+    var vh = cmdit_new("hapi");
+    cmdit_version_short(vh, 118);
+    var f_force  = _hapi_bool_flag(vh, set, HAPI_F_FORCE, "force", "replace a conflicting target");
+    var f_strict = _hapi_bool_flag(vh, set, HAPI_F_STRICT, "strict", "refuse unknown manifest keys");
+    var f_dry    = _hapi_bool_flag(vh, set, HAPI_F_DRY_RUN, "dry-run", "print actions; no syscalls or audit writes");
+    var f_root   = _hapi_value_flag(vh, set, HAPI_F_ROOT, "root", "path", "open a non-$HOME scope");
+    var f_backup = _hapi_value_flag(vh, set, HAPI_F_BACKUP_TO, "backup-to", "dir",
+      "snapshot a file before overwriting it");
+
+    var r = cmdit_parse_argv(vh, argc - 1, argv + 8);
+    if (r == CMDIT_RESULT_ERR) { return _hapi_parse_error(vh, verb, f_root, f_backup); }
+    if (r == CMDIT_HELP) { hapi_print_usage(); return 0; }
+    if (r == CMDIT_VERSION) { return hapi_print_version(); }
+    if (cmdit_require_positionals_max(vh, _hapi_verb_positionals(v)) == CMDIT_RESULT_ERR) {
+        _hapi_extra_arg(verb, cmdit_err_token(vh));
+        return 2;
+    }
+    if (_hapi_values_ok(vh, f_root, "--root", "path") == 0) { return 2; }
+    if (_hapi_values_ok(vh, f_backup, "--backup-to", "directory") == 0) { return 2; }
+
+    var n = cmdit_repeat_count(vh, f_root);
+    var i = 0;
+    while (i < n) {
+        var rc = _hapi_apply_root(cmdit_repeat_get(vh, f_root, i));
+        if (rc != 0) { return rc; }
+        i = i + 1;
+    }
+    if (cmdit_get_bool(vh, f_dry) == 1) { hapi_set_dry_run(1); }
+    var backup = cmdit_get_str(vh, f_backup);
+    if (backup != 0) { hapi_set_backup_dir(backup); }
+
+    var p0 = cmdit_positional(vh, 0);
+    if (v == HAPI_V_INSPECT)    { return cmd_inspect(p0); }
+    if (v == HAPI_V_LINK)       { return cmd_link(p0, cmdit_get_bool(vh, f_force)); }
+    if (v == HAPI_V_UNLINK)     { return cmd_unlink(p0); }
+    if (v == HAPI_V_ADOPT)      { return cmd_adopt(p0, cmdit_positional(vh, 1)); }
+    if (v == HAPI_V_ROLLBACK)   { return cmd_rollback(); }
+    if (v == HAPI_V_CHECKPOINT) { return cmd_checkpoint(); }
+    if (v == HAPI_V_STATUS)     { return cmd_status(p0); }
+    if (v == HAPI_V_LIST)       { return cmd_list(); }
+    if (v == HAPI_V_CHECK)      { return cmd_check(p0, cmdit_get_bool(vh, f_strict)); }
+    if (v == HAPI_V_SYNC)       { return cmd_sync(p0); }
+    return 2;
+}
+
+# The command is argv[1] alone, so cmdit dispatches over that one token
+# and the verb's handle parses the rest. A dispatch over the whole line
+# would change three 1.1.1 answers: `hapi --version x` (exit 0) would be an
+# unknown command, `hapi --version --help` would print help, and
+# `hapi -- link pkg` would run link.
+fn _hapi_cli_dispatch(h, argc, argv): i64 {
+    if (argc < 2) { hapi_print_usage(); return 2; }
+    var r = cmdit_dispatch_argv(h, 2, argv);
+    if (r == CMDIT_HELP) { hapi_print_usage(); return 0; }
+    if (r == CMDIT_VERSION) { return hapi_print_version(); }
+    # Every error over one token names it, but for out-of-memory.
+    if (r == CMDIT_RESULT_ERR && cmdit_err_token(h) == 0) { return cmdit_print_error(h); }
+    # An unknown word, any other flag, `-`, and `--` (which cmdit consumes,
+    # leaving no verb).
+    if (r == CMDIT_RESULT_ERR || cmdit_verb_matched(h) < 0) {
+        return _hapi_unknown_command(load64(argv + 8));
+    }
+    return _hapi_run_verb(h, argc, argv);
+}
+
+# Pure: run hapi over a caller-built argv (NULL-terminated cstr array,
+# argv[0] the program name). For tests.
+fn hapi_cli_run(argc, argv): i64 {
+    return _hapi_cli_dispatch(_hapi_cli_new(), argc, argv);
+}
+
+fn hapi_cli_main(): i64 {
+    var h = _hapi_cli_new();
+    var n = cmdit_argv(h);
+    var av = cmdit_raw_argv(h);
+    if (av == 0) { return cmdit_print_error(h); }    # the command line could not be read whole
+    return _hapi_cli_dispatch(h, n, av);
+}

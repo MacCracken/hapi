@@ -67,20 +67,23 @@ tail -1 ~/.local/state/hapi/audit.jsonl | grep -o '"backup_path":"[^"]*"'
 # "backup_path":"/home/user/.local/share/hapi/backups/20260523-153042-git-.gitconfig"
 ```
 
-## Example: shell-wide default via env var
+## Example: a session-wide default
 
-`--backup-to` does not consult any env var directly. To make the
-flag default-on for a session, set a shell alias:
+`--backup-to` does not consult any env var. To make it the default
+for a session, wrap a verb that takes it in a shell function:
 
 ```sh
-alias hapi='hapi --backup-to=$HOME/.local/share/hapi/backups'
+hapi-link() { hapi link --backup-to="$HOME/.local/share/hapi/backups" "$@"; }
 ```
 
-(Note: hapi's CLI parses `--backup-to <dir>` as two tokens, not
-`=`-joined. The alias works because the shell expands the `=` form
-into two tokens before invoking the binary. Aliases are session-local
-on purpose — making this implicit at the binary level would hide
-that backups exist.)
+A plain `alias hapi='hapi --backup-to=…'` does **not** work, in any
+version: hapi accepts nothing before the verb, so the flag is read as
+the command (`hapi: unknown command: --backup-to=…`, exit 2), and the
+verbs that don't take `--backup-to` refuse it anyway. The `=` spelling
+is accepted from 1.2.0; before that, write `--backup-to <dir>`. A value
+starting with `-` is refused in either spelling — write `./-name`.
+Wrappers are session-local on purpose: making this implicit at the
+binary level would hide that backups exist.
 
 ## When to use it
 

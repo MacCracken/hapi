@@ -9,10 +9,13 @@
 
 ## Status
 
-- **Shipped: 1.1.1** — the cyrius 6.7 line (1.1.0) and its P(-1) audit
-  and repairs ([`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)).
-- **Next: 1.2.0 — adopting cmdit** (below).
-- **1.3.0 → 1.7.0** — the rest of v1.x's additive work, one theme per
+- **Shipped: 1.2.0** — argument parsing moved to cmdit, with every 1.1.1
+  message kept and the forms getopt adds (`--root=PATH`, `--`,
+  `<verb> --help`); its P(-1) is the *1.2.0 addendum* of
+  [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md). 1.1.1
+  before it was that pass's repairs.
+- **Next: 1.3.0 — sync: no argument, and `--prune`** (below).
+- **1.4.0 → 1.7.0** — the rest of v1.x's additive work, one theme per
   minor. The command surface, ADR 0001's schema and ADR 0002's line
   shape stay frozen throughout; everything here is additive.
 - **Gated** — work that waits on something outside hapi, scheduled when
@@ -25,8 +28,8 @@
 - **One theme per minor.** A minor adds caller-visible surface (a verb
   form, a flag, an additive trail field). Its `.x` patches carry fixes
   only: a `1.N.x` adds nothing.
-- **Order: dependency first, then dogfood pressure.** cmdit goes first
-  because every later flag registers through it. After that, sync
+- **Order: dependency first, then dogfood pressure.** cmdit went first
+  (1.2.0) because every later flag registers through it. After that, sync
   carries two open dogfood issues, so it goes next. The order of 1.4 –
   1.7 is a proposal and can be swapped when pressure changes.
 - **Standing obligations, per release** (CLAUDE.md, not repeated in each
@@ -37,95 +40,6 @@
   suites run on x86_64, aarch64 and agnos.
 
 ---
-
-## 1.2.0 — Adopting cmdit (CLI parsing)
-
-Replace `src/main.cyr`'s hand-rolled argv handling with cmdit. The v1.0
-command surface stays frozen: every delta below is identical or
-additive, which is what makes this a minor. Checked against the 1.1.1
-tree (`src/main.cyr` is unchanged since 1.0.9) and cmdit **1.5.0**.
-
-**P(-1): yes.** Argument parsing is a path-argument surface. Re-walk
-F-013 (extra positionals), F-019 (flag-shaped values), F-033 (`inspect`
-flags exit 2) and F-051 (the `--root` grant runs after parse, unchanged).
-
-### What is hand-rolled, and where
-
-All of it is `src/main.cyr` — `argc(`/`argv(`/`flags_`/`FLAG_ERR_` appear nowhere else in `src/`,
-`tests/` or `scripts/`, and `cyrius.cyml` has no stdlib `"flags"`.
-
-- **Verbs** — a `_hapi_argeq` chain over `argv(1)`, ten verbs (`:197-386`); `--version`/`-v`/
-  `--help`/`-h` match only at `argv(1)` (`:192-195`). No args → usage, exit 2 (`:185-188`); unknown
-  verb → stderr `hapi: unknown command: X` + usage on stdout, exit 2 (`:388-392`).
-- **Per-verb flag loops** re-walk `argv(2..)` with each verb's subset of `--force`, `--strict`,
-  `--dry-run`, `--root <path>`, `--backup-to <dir>`. The usage text calls the last three "global";
-  they are per-verb subsets, and nothing is accepted before the verb.
-- **Helpers** — `_hapi_flag_value` refuses a flag-shaped value (`:114-119`, F-019); three message
-  helpers render the exit-2 errors (`:124-178`); `_hapi_apply_root` cap-checks mid-walk (`:137-154`).
-- **Positionals** are capped at 1, 2 (adopt) or 0 (rollback/checkpoint/list); a *missing* one is
-  each `cmd_*`'s own usage line (e.g. `cmd_link`'s `usage: hapi link …`). Help: `hapi_print_usage`
-  (`:58-87`, stdout).
-
-### Site → cmdit
-
-- `argv(1)` chain → `cmdit_new("hapi")` + ten `cmdit_verb` + `cmdit_dispatch` on
-  `cmdit_verb_matched`; `-v` → `cmdit_version_short(h, 118)`. Ids are registration order, so future
-  verbs (`fmt` at 1.7.0) append at the end (stiva's `src/main.cyr:77` warning).
-- Per-verb loops → one child handle per verb + `cmdit_parse_verb`, registering only that verb's
-  subset. **Not** cmdit globals — those bind on every verb and would break the exit-2 rejections in
-  `guides/dry-run.md:23`, `guides/backup-to.md:18` and `guides/capability.md:30-32`.
-- Bools → `cmdit_bool`; `--root`/`--backup-to` → `cmdit_str` + `cmdit_metavar`, each with
-  **`cmdit_reject_flag_value`** (cmdit 1.3.6, added for hapi), which keeps F-019's refusal: a
-  flag-shaped separate value is `CMDIT_ERR_MISSING_VALUE`, not taken. The setters and
-  `_hapi_apply_root` run after parse.
-- Extra positional → `cmdit_require_positionals_max` (the token is `cmdit_positional(vh, N)`);
-  missing value → `CMDIT_ERR_MISSING_VALUE` + `cmdit_err_flag`; unknown flag → **`cmdit_err_token`**
-  (cmdit 1.3.3), so ``unexpected flag for `link`: --x`` survives verbatim. Every existing message
-  is kept.
-- Delete `args_init()` (`:182`): `cmdit_argv` calls it, and each Linux call allocates a fresh 2 MB
-  buffer (`lib/args.cyr`).
-
-### Decisions left (none block)
-
-- [ ] **Help.** Keep `hapi_print_usage` hand-written, or render it with `cmdit_help_fd(h, 1)`
-  (cmdit 1.3.5 — help on stdout, which `hapi --help` needs). The identity bar below decides: switch
-  only if the output can match byte for byte. The default is to keep it hand-written; the verb set
-  is frozen, so drift risk is low.
-- [ ] **CHANGELOG as additive:** `--root=PATH`/`--backup-to=DIR`, `--` (an alternative to the
-  `./-name` advice at `:129`), lone `-` as a positional, `hapi <verb> --help`/`--version` (exit 2
-  today). Error precedence shifts on multi-error lines: unknown flags beat extra positionals, and
-  parse errors (2) beat a cap denial (1).
-
-### The manifest change
-
-Append after `[deps]` (`cyrius.cyml`). `"args"` and `"io"` are already listed, there is no `"flags"`
-to drop, and cmdit 1.5.0 is on the same cyrius pin as hapi (`6.7.18`), so no pin bump:
-
-```
-[deps.cmdit]
-git = "https://github.com/MacCracken/cmdit.git"
-tag = "1.5.0"
-modules = ["dist/cmdit.cyr"]
-```
-
-### Tests and the output-identity bar
-
-- [ ] **No argv-level test exists** — `tests/hapi.tcyr` drives `cmd_*` and cannot include
-  `main.cyr`. Move the dispatcher into `src/cli.cyr` (already included, `tests/hapi.tcyr:20`) and
-  drive the pure `cmdit_dispatch_argv` with synthetic argv. `tests/agnos.tcyr` needs nothing: it
-  drives `cmd_*` too.
-- [ ] No golden either: capture `(stdout, stderr, exit)` from the 1.1.1 binary for every verb ×
-  {each accepted/rejected flag, extra positional, missing and flag-shaped value, `--help`/`-h`/
-  `--version`/`-v`}, plus no args and an unknown verb. It must diff clean but for the deltas above.
-- [ ] Must pass unmodified: `scripts/agnos-smoke.sh` checks 1 and 4 (`--version`; an unknown verb
-  exits 2 on agnos), `scripts/concurrency-test.sh` (`adopt`), and `release.yml`'s `--version` gate
-  (`hapi ${VERSION}`).
-- [ ] **Benchmark row.** The sync harness starts 100 processes, so per-process parse cost is
-  visible there. Dropping `args_init()` saves a 2 MB allocation per process. Record the DCE binary
-  size too: cmdit adds code to a binary that is mostly bayan's Unicode data.
-
-Pointers: cmdit's `README.md` (API reference) and `docs/adr/0002-verb-dispatch.md`; stiva's
-`src/main.cyr` is the worked verb-tool migration, and sit (cmdit 1.4.0) a recent one.
 
 ## 1.2.x — cmdit fallout only
 
@@ -144,7 +58,8 @@ write targets, and prune removes links.
   hand, and the wiped trail proved trail-recovery fails closed exactly when recovery matters
   most. So the **root scan is the primary mechanism**, and the trail only augments it (an additive
   `manifest_path` field on `op:link` would let it name packages the scan misses). The signature
-  stays: no argument becomes legal, a positional-count change once cmdit owns the bounds. What the
+  stays: cmdit already bounds `sync` at one positional and lets it have none (1.2.0), so no-arg
+  becomes legal inside `cmd_sync`, which prints its usage today (exit 2). What the
   scan walks, how deep, and what it refuses to treat as a package are this release's design.
   [`issues/2026-05-24-no-arg-sync-bootstrap-recovery.md`](issues/2026-05-24-no-arg-sync-bootstrap-recovery.md).
 - **`hapi sync --prune` (opt-in)** — emit `op:unlink` for trail rows no longer in the manifest.

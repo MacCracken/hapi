@@ -11,7 +11,9 @@ cyrius test                            # run tests/*.tcyr
 
 ## Layout
 
-- `src/main.cyr` — entry point + argv dispatcher
+- `src/main.cyr` — entry point
+- `src/cli.cyr` — the command line: verb dispatch and each verb's
+  flags (cmdit), the usage text, and the `--dry-run` flag
 - `src/cmd/{link,unlink,adopt,list,sync,status,rollback,checkpoint,check,inspect}.cyr` —
   one module per verb
 - `src/manifest.cyr` — `hapi.cyml` parser + canonical re-serializer
@@ -19,14 +21,17 @@ cyrius test                            # run tests/*.tcyr
 - `src/audit.cyr` / `src/audit_reader.cyr` — JSONL trail writer + reader
 - `src/fs_link.cyr` — symlink primitives + path resolution
 - `src/cap.cyr` — `--root` capability check
-- `src/cli.cyr` — `--dry-run` flag plumbing
 - `src/backup.cyr` — `--backup-to` pre-`--force` snapshots
 - `tests/hapi.{tcyr,bcyr,fcyr}` — tests / benchmarks / fuzz
 
 ## Adding a command
 
 1. Add a new `src/cmd/<name>.cyr` module with the command handler.
-2. Wire it into `src/main.cyr` dispatch.
+2. Wire it into `src/cli.cyr`: append its id to the `HapiVerb` enum
+   and its `cmdit_verb` call to `_hapi_cli_new` — at the **end** of
+   both, because cmdit numbers verbs by registration order — then give
+   it a flag set and a positional count, and call it from
+   `_hapi_run_verb`. Add it to `hapi_print_usage` too.
 3. Add a guide page at `docs/guides/<name>.md` describing the
    command's semantics, flags, and exit codes.
 4. Add happy + conflict + capability-denied tests to `tests/hapi.tcyr`.

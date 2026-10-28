@@ -32,6 +32,12 @@ The other verbs (unlink, rollback, checkpoint, inspect, check)
 reject the flag with exit 2 — they read absolute paths back
 from the audit trail and don't need a scope.
 
+`--root=<path>` (1.2.0) is the same flag, granted the same way. A
+value starting with `-` is refused in either spelling; write
+`./-name`. Every `--root` on the line must be granted, and a bad
+flag, a missing value or an extra argument anywhere on the line
+(exit 2) is reported before a denial (exit 1).
+
 ## Granting a non-`$HOME` root
 
 hapi ships with an **env-var allowlist**. Set

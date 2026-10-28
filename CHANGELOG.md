@@ -6,6 +6,119 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.2.0] - 2026-10-28
+
+> **Adopting cmdit.** `src/main.cyr`'s hand-rolled argv walk is replaced by
+> [cmdit](https://github.com/MacCracken/cmdit) 1.5.0, and the dispatcher moved to
+> `src/cli.cyr`, where `tests/hapi.tcyr` drives it with a synthetic argv. The v1.0
+> command surface is frozen, so everything that changes is additive. Before any code
+> changed, a golden of 819 command lines was captured from the 1.1.1 binary: every
+> verb × every flag, value and positional shape, plus the top-level forms. 1.2.0 diffs
+> clean against it except for the forms listed below and one fix (F-060). The manifest
+> schema (ADR 0001) and the audit-trail line shape (ADR 0002) are unchanged, and a
+> `sync` writes a byte-identical trail.
+
+### Added
+
+- **`hapi <verb> --help` / `-h` and `--version` / `-v`.** They print the usage or
+  `hapi <version>` and exit 0, as at the top level; through 1.1.1 each was an
+  unexpected flag (exit 2). `--help` answers past extra positionals but not past a bad
+  flag: `hapi link --help --bogus` names `--bogus`, exit 2.
+- **`--root=PATH` and `--backup-to=DIR`**, beside the separate spelling. `--root=PATH`
+  is granted exactly as `--root PATH`. A value starting with `-` is refused in either
+  spelling (`--root=-x`, `--root=--dry-run`); write `./-name`, as the message says.
+- **`--` ends a verb's flags.** What follows is positional, so `hapi link -- -pkg` takes
+  `-pkg` as the package: an alternative to the `./-name` advice. Before the verb it is
+  still an unknown command (`hapi -- link pkg`, exit 2), because the command is
+  `argv[1]` alone.
+- **A lone `-` is a positional**, as in getopt, not an unexpected flag. hapi gives it no
+  stdin meaning: `hapi inspect -` reads `./-/hapi.cyml`. As a `--root` or `--backup-to`
+  value it is still refused.
+
+### Changed
+
+- **Argument parsing is cmdit's** (`[deps.cmdit]`, tag 1.5.0, commit-pinned in
+  `cyrius.lock`). Each verb parses on its own cmdit handle that registers only that
+  verb's flags. A flag another verb takes is still refused with exit 2
+  (`guides/dry-run.md`, `backup-to.md`, `capability.md`), and every message is the
+  1.1.1 text: hapi renders cmdit's errors itself, naming the token as typed through
+  `cmdit_err_token` (``unexpected flag for `link`: --x``). `--root` and `--backup-to`
+  carry `cmdit_reject_flag_value`. `main()` no longer calls `args_init()`;
+  `cmdit_argv` reads the command line, once. The usage text stays hand-written, because
+  `cmdit_help_fd` cannot reproduce it byte for byte.
+- **Which error a line reports, when it has more than one.** cmdit parses the whole
+  line before hapi checks positional counts and grants. A flag error (an unknown flag,
+  a missing value) is reported before an extra positional: `hapi link a extra --bogus`
+  names `--bogus`, where 1.1.1 named `extra`. Any usage error (exit 2) is reported
+  before a `--root` denial (exit 1): `hapi link pkg --root /etc --bogus` exits 2, where
+  1.1.1 exited 1. An empty `--root` keeps its 1.1.1 place among the grants.
+- **Unchanged on purpose**, each held by the golden and a test. `hapi --version
+  anything` still prints the version, and `hapi --help anything` the usage, at exit 0.
+  Nothing is accepted before the verb (`hapi --dry-run link pkg` is an unknown command).
+  Every `--root` given must be granted, so a denied one is not rescued by a later one.
+  `-V` stays unknown; hapi's version letter is `-v`.
+
+### Fixed
+
+- **F-060 [LOW] — an empty `--root` wrote a stray NUL to stderr.** `hapi link pkg
+  --root ''` printed its message and then the literal's NUL terminator. Its `eprint`
+  length was hand-counted one byte long, the one F-019's sweep (1.0.9) missed. Every
+  message helper in `src/cli.cyr` is `strlen`-based now.
+
+### Security
+
+P(-1) re-ran on the argument surface, which is a path-argument surface. The record is
+the *1.2.0 addendum* of
+[`docs/audit/2026-10-28-audit.md`](docs/audit/2026-10-28-audit.md).
+
+- **F-013 (extra positionals) holds.** Each verb's slot count (1; 2 for `adopt`; 0
+  for `rollback`, `checkpoint` and `list`) is `cmdit_require_positionals_max`.
+  `hapi rollback <pkg>` is refused and the trail is untouched.
+- **F-019 (flag-shaped values) holds, and is wider.** `cmdit_reject_flag_value`
+  refuses a flag-shaped separate value during the parse, where 1.1.1's walk refused it,
+  so a `--bogus` after it is never reached. hapi also refuses a lone `-`, which cmdit
+  would take as a value, and every attached value starting with `-`.
+- **F-033 (`inspect` flags exit 2) holds.** `inspect` registers no flags.
+- **F-051 (the `--root` grant) holds.** `cap_check_root_r` runs on every `--root`
+  value, in order, after the parse and the positional check, on the value the run uses.
+- New: F-060, above.
+
+Each holds under a seeded revert: 15 reverts of `src/cli.cyr`, each turning the suite
+red.
+
+### Tests
+
+- `tests/hapi.tcyr` 469 → **826** assertions (112 → 121 groups). A new `cli` tier
+  drives `hapi_cli_run` with a synthetic argv and captures stdout and stderr through
+  `dup2`, so messages are asserted byte for byte. It covers the top-level forms, every
+  verb × every flag (50 probes), F-013 on all ten verbs, F-019 in nine spellings,
+  F-051, F-060, the additive forms, and each flag reaching its command.
+  `tests/agnos.tcyr` is unchanged at 55. Both pass on x86_64 and on aarch64 under qemu.
+- Verified: x86_64, `--aarch64`, `--agnos` and `CYRIUS_DCE=1` builds; `cyrius lint`
+  0 warnings across `src/` and `tests/`; `cyrius fuzz` and `cyrius bench`;
+  `scripts/concurrency-test.sh`; `scripts/agnos-smoke.sh` under mirshi, all five
+  checks, with checks 1 and 4 (`--version`, an unknown verb exits 2) unmodified;
+  `cyrius deps --verify` 114 / 114.
+
+### Notes
+
+- **Benchmarks: flat.** An interleaved A/B against 1.1.1 over five pairs measured
+  cold 131–133 vs 132–135 ms, warm 108–110 vs 107–109, and 100 single-package syncs
+  113–116 vs 115–117. The trail is byte-identical and warm growth is 0. The DCE binary
+  went 552,488 → 580,928 bytes, all but 4 KB of it code: cmdit, unlike 1.1.0's bayan
+  tables. See `docs/benchmarks.md`.
+- **The dispatcher hands cmdit `argv[1]` alone**, not the whole line. A full
+  `cmdit_dispatch` would have broken three 1.1.1 answers: `hapi --version x` (exit 0)
+  would be an unknown command, `hapi --version --help` would print help, and `hapi --
+  link pkg` would run `link`. The verb's handle parses `argv[1..]` with
+  `cmdit_parse_argv`, which is what `cmdit_parse_verb` would hand it, since hapi has no
+  global flags.
+- **`--root` and `--backup-to` are registered with `cmdit_repeat`**, not `cmdit_str`,
+  so that every occurrence is checked as 1.1.1's walk checked it. The value in effect is
+  still the last.
+- New verbs append to the `HapiVerb` enum and the `cmdit_verb` order in `src/cli.cyr`:
+  cmdit numbers verbs by registration.
+
 ## [1.1.1] - 2026-10-28
 
 > **The P(-1) audit and its repairs.** One pass over the 1.1.0 tree, filed as

@@ -3413,6 +3413,484 @@ fn test_link_refuses_source_through_a_file() {
     return 0;
 }
 
+# ------------------------------------------------------------
+# cli — the argv surface (1.2.0: cmdit). hapi_cli_run is driven
+# with a synthetic argv, its stdout and stderr captured to files,
+# so the v1.0 messages are asserted byte for byte.
+# ------------------------------------------------------------
+
+# A synthetic argv. Slot 0 is the word count; the words follow,
+# NULL-terminated, so `av + 8` is the array hapi_cli_run takes.
+fn _cli_add(av, w): i64 {
+    var c = load64(av);
+    store64(av + 8 + c * 8, w);
+    store64(av + 16 + c * 8, 0);
+    store64(av, c + 1);
+    return av;
+}
+
+# Split `words` on single spaces. An empty argument, or one with a
+# space in it, is added with _cli_add.
+fn _cli_av(words): i64 {
+    var av = alloc(8 * 40);
+    store64(av, 0);
+    store64(av + 8, 0);
+    var n = strlen(words);
+    var start = 0;
+    var i = 0;
+    while (i <= n) {
+        if (i == n || load8(words + i) == 32) {
+            if (i > start) {
+                var w = alloc(i - start + 1);
+                memcpy(w, words + start, i - start);
+                store8(w + i - start, 0);
+                _cli_add(av, w);
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return av;
+}
+
+fn _cli_cat(a, b): i64 {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    store8(out + la + lb, 0);
+    return out;
+}
+
+var _cli_dir = 0;
+var _cli_out = 0;      # what the last _cli_run wrote to stdout
+var _cli_out_n = 0;    # ...in bytes, a NUL included
+var _cli_err = 0;
+var _cli_err_n = 0;
+
+fn _cli_slurp(path): i64 {
+    var buf = alloc(65536);
+    var n = file_read_all(path, buf, 65535);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    return buf;
+}
+
+# Run hapi over `av` with fds 1 and 2 pointed at capture files.
+fn _cli_run(av): i64 {
+    if (_cli_dir == 0) { _cli_dir = _test_scratch_dir(); }
+    var op = _fsl_path_join(_cli_dir, "out");
+    var ep = _fsl_path_join(_cli_dir, "err");
+    var ofd = file_open(op, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    var efd = file_open(ep, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    var keep1 = syscall(SYS_DUP, 1);
+    var keep2 = syscall(SYS_DUP, 2);
+    sys_dup2(ofd, 1);
+    sys_dup2(efd, 2);
+    var rc = hapi_cli_run(load64(av), av + 8);
+    sys_dup2(keep1, 1);
+    sys_dup2(keep2, 2);
+    file_close(keep1);
+    file_close(keep2);
+    file_close(ofd);
+    file_close(efd);
+    _cli_out_n = _test_file_size(op);
+    _cli_out = _cli_slurp(op);
+    _cli_err_n = _test_file_size(ep);
+    _cli_err = _cli_slurp(ep);
+    return rc;
+}
+
+# 1 when the `n` captured bytes are exactly `want`.
+fn _cli_same(got, n, want): i64 {
+    if (n != strlen(want)) { return 0; }
+    return memeq(got, want, n);
+}
+
+# Run `av` and assert its exit code, stdout and stderr. A 0 for
+# `out` / `err` leaves that stream unchecked.
+fn _cli_expect(av, rc, out, err, label): i64 {
+    var got = _cli_run(av);
+    assert_eq(got, rc, label);
+    if (out != 0) { assert(_cli_same(_cli_out, _cli_out_n, out), _cli_cat(label, " — stdout")); }
+    if (err != 0) { assert(_cli_same(_cli_err, _cli_err_n, err), _cli_cat(label, " — stderr")); }
+    return got;
+}
+
+var _cli_usage = 0;      # `hapi --help`'s stdout, captured once
+
+fn _cli_version_line(): i64 {
+    return _cli_cat(_cli_cat("hapi ", CYRIUS_PKG_VERSION), "\n");
+}
+
+fn _cli_unexpected_flag(verb, flag): i64 {
+    return _cli_cat(_cli_cat(_cli_cat(_cli_cat("hapi: unexpected flag for `", verb), "`: "), flag), "\n");
+}
+
+fn _cli_unexpected_arg(verb, arg): i64 {
+    return _cli_cat(_cli_cat(_cli_cat(_cli_cat("hapi: unexpected argument for `", verb), "`: "), arg), "\n");
+}
+
+fn _cli_reset(scope): i64 {
+    hapi_set_dry_run(0);
+    hapi_set_backup_dir(0);
+    link_set_scope_root(scope);
+    return 0;
+}
+
+fn test_cli_top_level() {
+    test_group("cli: the command is argv[1] alone");
+
+    assert_eq(_cli_run(_cli_av("hapi --help")), 0, "--help exits 0");
+    _cli_usage = _cli_out;
+    var head = "usage: hapi <command> [args...]\n";
+    assert(_cli_out_n > strlen(head) && memeq(_cli_out, head, strlen(head)) == 1,
+      "--help prints the v1.0 usage on stdout");
+    assert_eq(_cli_err_n, 0, "--help writes nothing to stderr");
+
+    var ver = _cli_version_line();
+    _cli_expect(_cli_av("hapi"), 2, _cli_usage, "", "no arguments: usage, exit 2");
+    _cli_expect(_cli_av("hapi -h"), 0, _cli_usage, "", "-h");
+    _cli_expect(_cli_av("hapi --version"), 0, ver, "", "--version");
+    _cli_expect(_cli_av("hapi -v"), 0, ver, "", "-v, not cmdit's -V");
+    # A leading option answers whatever follows it, as since v1.0.
+    _cli_expect(_cli_av("hapi --version junk"), 0, ver, "", "--version junk");
+    _cli_expect(_cli_av("hapi --version --help"), 0, ver, "", "the first option wins");
+    _cli_expect(_cli_av("hapi -h --bogus"), 0, _cli_usage, "", "-h --bogus");
+
+    _cli_expect(_cli_av("hapi -V"), 2, _cli_usage, "hapi: unknown command: -V\n", "-V is unknown");
+    _cli_expect(_cli_av("hapi bogus"), 2, _cli_usage, "hapi: unknown command: bogus\n", "unknown verb");
+    _cli_expect(_cli_av("hapi LINK"), 2, _cli_usage, "hapi: unknown command: LINK\n", "verbs are case-sensitive");
+    _cli_expect(_cli_av("hapi -"), 2, _cli_usage, "hapi: unknown command: -\n", "a lone - is no verb");
+    var av0 = _cli_av("hapi");
+    _cli_add(av0, "");
+    _cli_expect(av0, 2, _cli_usage, "hapi: unknown command: \n", "an empty verb");
+
+    # Nothing is accepted before the verb: not a verb's flag, not `--`.
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _test_make_package("rc", ".rc");
+    var av1 = _cli_av("hapi --dry-run link");
+    _cli_add(av1, pkg);
+    _cli_expect(av1, 2, _cli_usage, "hapi: unknown command: --dry-run\n", "a flag before the verb");
+    var av2 = _cli_av("hapi -- link");
+    _cli_add(av2, pkg);
+    _cli_expect(av2, 2, _cli_usage, "hapi: unknown command: --\n", "`--` before the verb");
+    _cli_expect(_cli_av("hapi --"), 2, _cli_usage, "hapi: unknown command: --\n", "`--` alone");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, ".rc"))), HAPI_LP_ABSENT,
+      "neither ran link");
+    assert_eq(_test_file_size(audit_path), 0, "the trail is untouched");
+    assert_eq(hapi_dry_run(), 0, "--dry-run before the verb was not applied");
+
+    _test_clear_env();
+    return 0;
+}
+
+# Probe `hapi <verb> <flag> [x] --help`. cmdit refuses an unregistered
+# flag anywhere on the line before it answers --help, so an accepted
+# flag exits 0 with the usage and a refused one exits 2, and nothing
+# runs either way.
+fn _cli_flag_probe(verb, flag, takes_value, accepted): i64 {
+    var av = _cli_av("hapi");
+    _cli_add(av, verb);
+    _cli_add(av, flag);
+    if (takes_value == 1) { _cli_add(av, "x"); }
+    _cli_add(av, "--help");
+    var label = _cli_cat(_cli_cat(verb, " "), flag);
+    if (accepted == 1) { return _cli_expect(av, 0, _cli_usage, "", _cli_cat(label, " is accepted")); }
+    return _cli_expect(av, 2, "", _cli_unexpected_flag(verb, flag), _cli_cat(label, " is refused"));
+}
+
+fn _cli_flag_row(verb, force, strict, dry, root, backup): i64 {
+    _cli_flag_probe(verb, "--force", 0, force);
+    _cli_flag_probe(verb, "--strict", 0, strict);
+    _cli_flag_probe(verb, "--dry-run", 0, dry);
+    _cli_flag_probe(verb, "--root", 1, root);
+    _cli_flag_probe(verb, "--backup-to", 1, backup);
+    return 0;
+}
+
+fn test_cli_verbs_take_only_their_flags() {
+    test_group("cli: each verb takes only its own flags (F-033, guides)");
+
+    # The usage calls --root / --dry-run / --backup-to "global"; they are
+    # per-verb subsets, and a verb outside the subset owes exit 2 (guides
+    # dry-run.md, backup-to.md, capability.md). inspect takes none (F-033).
+    #              verb          force strict dry root backup
+    _cli_flag_row("inspect",       0,    0,    0,   0,   0);
+    _cli_flag_row("link",          1,    0,    1,   1,   1);
+    _cli_flag_row("unlink",        0,    0,    1,   0,   0);
+    _cli_flag_row("adopt",         0,    0,    1,   1,   1);
+    _cli_flag_row("rollback",      0,    0,    1,   0,   0);
+    _cli_flag_row("checkpoint",    0,    0,    1,   0,   0);
+    _cli_flag_row("status",        0,    0,    0,   1,   0);
+    _cli_flag_row("list",          0,    0,    0,   1,   0);
+    _cli_flag_row("check",         0,    1,    0,   0,   0);
+    _cli_flag_row("sync",          0,    0,    1,   1,   1);
+    return 0;
+}
+
+fn test_cli_extra_positional_refused() {
+    test_group("cli: an extra positional is refused on every verb (F-013)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _test_make_package("rc", ".rc");
+
+    var avl = _cli_av("hapi link");
+    _cli_add(avl, pkg);
+    assert_eq(_cli_run(avl), 0, "seed: link the package");
+    var seeded = _test_file_size(audit_path);
+    assert(seeded > 0, "seed: the trail has a row");
+
+    _cli_expect(_cli_av("hapi inspect a extra"), 2, "", _cli_unexpected_arg("inspect", "extra"), "inspect");
+    _cli_expect(_cli_av("hapi link a extra"), 2, "", _cli_unexpected_arg("link", "extra"), "link");
+    _cli_expect(_cli_av("hapi unlink a extra"), 2, "", _cli_unexpected_arg("unlink", "extra"), "unlink");
+    _cli_expect(_cli_av("hapi adopt a b extra"), 2, "", _cli_unexpected_arg("adopt", "extra"), "adopt");
+    _cli_expect(_cli_av("hapi checkpoint extra"), 2, "", _cli_unexpected_arg("checkpoint", "extra"), "checkpoint");
+    _cli_expect(_cli_av("hapi status a extra"), 2, "", _cli_unexpected_arg("status", "extra"), "status");
+    _cli_expect(_cli_av("hapi list extra"), 2, "", _cli_unexpected_arg("list", "extra"), "list");
+    _cli_expect(_cli_av("hapi check a extra"), 2, "", _cli_unexpected_arg("check", "extra"), "check");
+    _cli_expect(_cli_av("hapi sync a extra"), 2, "", _cli_unexpected_arg("sync", "extra"), "sync");
+    # The F-013 case itself: through 1.0.4 this reversed the whole trail.
+    var avr = _cli_av("hapi rollback");
+    _cli_add(avr, "test-pkg");
+    _cli_expect(avr, 2, "", _cli_unexpected_arg("rollback", "test-pkg"), "rollback <pkg>");
+    assert_eq(_test_file_size(audit_path), seeded, "no refused verb touched the trail");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, ".rc"))), HAPI_LP_SYMLINK,
+      "the seeded link is still there");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cli_flag_shaped_value_refused() {
+    test_group("cli: a value starting with `-` is refused (F-019)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _test_make_package("rc", ".rc");
+    var advice = " argument (a value starting with `-` must be spelled `./-name`)\n";
+    var root_msg = _cli_cat("hapi: --root requires a path", advice);
+    var bk_msg = _cli_cat("hapi: --backup-to requires a directory", advice);
+
+    # The F-019 case: `--dry-run` must not become the root.
+    var av = _cli_av("hapi link --root --dry-run");
+    _cli_add(av, pkg);
+    _cli_expect(av, 2, "", root_msg, "--root --dry-run");
+    assert_eq(hapi_dry_run(), 0, "--dry-run was not applied either");
+    # Refused where it stands, in the parse, as 1.1.1's walk refused it:
+    # a `--bogus` after it is never reached.
+    _cli_add(av, "--bogus");
+    _cli_expect(av, 2, "", root_msg, "--root --dry-run <pkg> --bogus");
+
+    var forms = _cli_cat("--root -|--root=-x|--root=--dry-run|--root|",
+      "--backup-to --force|--backup-to -|--backup-to=-x|--backup-to");
+    var n = strlen(forms);
+    var start = 0;
+    var i = 0;
+    while (i <= n) {
+        if (i == n || load8(forms + i) == 124) {
+            var f = alloc(i - start + 1);
+            memcpy(f, forms + start, i - start);
+            store8(f + i - start, 0);
+            # The package goes first, so a trailing value flag has no value.
+            var a2 = _cli_av("hapi link");
+            _cli_add(a2, pkg);
+            var fw = _cli_av(f);
+            var j = 0;
+            while (j < load64(fw)) { _cli_add(a2, load64(fw + 8 + j * 8)); j = j + 1; }
+            var msg = root_msg;
+            if (load8(f + 2) == 98) { msg = bk_msg; }    # 'b'
+            _cli_expect(a2, 2, "", msg, f);
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, ".rc"))), HAPI_LP_ABSENT,
+      "no refused form linked anything");
+    assert_eq(_test_file_size(audit_path), 0, "the trail is untouched");
+
+    _cli_reset(0);
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cli_empty_root_writes_no_stray_byte() {
+    test_group("cli: an empty --root is refused cleanly (F-060)");
+
+    # Through 1.1.1 this eprint was hand-counted one byte long, and wrote
+    # the literal's NUL terminator to stderr after the newline.
+    var msg = "hapi: --root requires a path argument\n";
+    var av = _cli_av("hapi link pkg --root");
+    _cli_add(av, "");
+    _cli_expect(av, 2, "", msg, "--root ''");
+    _cli_expect(_cli_av("hapi status pkg --root="), 2, "", msg, "--root=");
+    return 0;
+}
+
+fn test_cli_root_grant_after_parse() {
+    test_group("cli: the --root grant runs after the parse (F-051)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    cap_set_home(scope);
+    cap_set_allowlist("");
+    var pkg = _test_make_package("rc", ".rc");
+    var granted = _fsl_path_join(scope, "granted");
+    hapi_mkdir(granted, 0x1C0);
+    var deny = "hapi: --root path is not in HAPI_ALLOWED_ROOTS (and is not within $HOME)\n";
+
+    var av1 = _cli_av("hapi link");
+    _cli_add(av1, pkg);
+    _cli_add(av1, "--root");
+    _cli_add(av1, "/etc");
+    _cli_expect(av1, 1, "", deny, "--root outside the grant: exit 1");
+    var av2 = _cli_av("hapi link");
+    _cli_add(av2, pkg);
+    _cli_add(av2, "--root=/etc");
+    _cli_expect(av2, 1, "", deny, "--root=PATH is granted the same way");
+    # A usage error is reported before the grant is decided.
+    _cli_add(av1, "--bogus");
+    _cli_expect(av1, 2, "", _cli_unexpected_flag("link", "--bogus"), "an unknown flag beats a denial");
+    # Every --root given must be granted, as each was in 1.1.1's walk.
+    var av3 = _cli_av("hapi link");
+    _cli_add(av3, pkg);
+    _cli_add(av3, "--root");
+    _cli_add(av3, "/etc");
+    _cli_add(av3, "--root");
+    _cli_add(av3, granted);
+    _cli_expect(av3, 1, "", deny, "a denied --root is not rescued by a later one");
+    assert_eq(_test_file_size(audit_path), 0, "no denied run wrote the trail");
+
+    var av4 = _cli_av("hapi link");
+    _cli_add(av4, pkg);
+    _cli_add(av4, _cli_cat("--root=", granted));
+    assert_eq(_cli_run(av4), 0, "a granted --root=PATH links");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(granted, ".rc"))), HAPI_LP_SYMLINK,
+      "...into the granted root");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, ".rc"))), HAPI_LP_ABSENT,
+      "...and not into $HOME");
+
+    _cli_reset(0);
+    cap_set_home(0);
+    cap_set_allowlist(0);
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cli_flags_reach_the_command() {
+    test_group("cli: parsed flags reach the command");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _test_make_package("rc", ".rc");
+    var target = _fsl_path_join(scope, ".rc");
+
+    var av1 = _cli_av("hapi link --dry-run");
+    _cli_add(av1, pkg);
+    assert_eq(_cli_run(av1), 0, "link --dry-run exits 0");
+    assert_eq(hapi_dry_run(), 1, "--dry-run set the process flag");
+    assert_eq(link_probe_kind(link_probe(target)), HAPI_LP_ABSENT, "...and nothing was linked");
+    _cli_reset(scope);
+
+    _test_write_file(target, "user");
+    var av2 = _cli_av("hapi link");
+    _cli_add(av2, pkg);
+    assert_eq(_cli_run(av2), 1, "a conflict without --force exits 1");
+    var bk = _fsl_path_join(scope, "bk");
+    _cli_add(av2, "--force");
+    _cli_add(av2, "--backup-to");
+    _cli_add(av2, bk);
+    assert_eq(_cli_run(av2), 0, "link --force --backup-to replaces it");
+    assert_eq(link_probe_kind(link_probe(target)), HAPI_LP_SYMLINK, "the target is now the link");
+    assert(hapi_backup_dir() != 0 && streq(hapi_backup_dir(), bk) == 1, "--backup-to set the backup dir");
+    assert_eq(link_probe_kind(link_probe(bk)), HAPI_LP_DIRECTORY, "...and the snapshot landed there");
+    assert(_test_file_size(audit_path) > 0, "the forced link was recorded");
+    _cli_reset(scope);
+
+    var spkg = _test_scratch_dir();
+    _test_write_file(_fsl_path_join(spkg, "hapi.cyml"),
+      "[package]\nname = \"s\"\nversion = \"1.0\"\nauthor = \"me\"\n");
+    var av3 = _cli_av("hapi check");
+    _cli_add(av3, spkg);
+    assert_eq(_cli_run(av3), 0, "check tolerates an unknown key");
+    _cli_add(av3, "--strict");
+    assert_eq(_cli_run(av3), 1, "check --strict refuses it");
+
+    _cli_reset(0);
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cli_additive_forms() {
+    test_group("cli: 1.2.0's additive forms");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _test_make_package("rc", ".rc");
+    var ver = _cli_version_line();
+
+    _cli_expect(_cli_av("hapi link --help"), 0, _cli_usage, "", "<verb> --help");
+    _cli_expect(_cli_av("hapi unlink pkg -h"), 0, _cli_usage, "", "<verb> -h");
+    _cli_expect(_cli_av("hapi status --version"), 0, ver, "", "<verb> --version");
+    _cli_expect(_cli_av("hapi rollback -v"), 0, ver, "", "<verb> -v");
+    # --help answers past extra positionals, but not past a bad flag.
+    _cli_expect(_cli_av("hapi link a b c --help"), 0, _cli_usage, "", "--help past extras");
+    _cli_expect(_cli_av("hapi link --help --bogus"), 2, "", _cli_unexpected_flag("link", "--bogus"),
+      "--help does not hide an unknown flag");
+
+    # `--` ends the verb's flags; what follows is positional.
+    var av1 = _cli_av("hapi link --");
+    _cli_add(av1, pkg);
+    assert_eq(_cli_run(av1), 0, "link -- <pkg> links");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(scope, ".rc"))), HAPI_LP_SYMLINK,
+      "...the package after `--`");
+    var av2 = _cli_av("hapi link");
+    _cli_add(av2, pkg);
+    _cli_add(av2, "--");
+    _cli_add(av2, "--force");
+    _cli_expect(av2, 2, "", _cli_unexpected_arg("link", "--force"), "--force after `--` is an argument");
+    # A lone `-` is a positional, not a flag.
+    _cli_expect(_cli_av("hapi rollback -"), 2, "", _cli_unexpected_arg("rollback", "-"), "- is a positional");
+
+    # A flag error is reported before an extra positional.
+    _cli_expect(_cli_av("hapi link a extra --bogus"), 2, "", _cli_unexpected_flag("link", "--bogus"),
+      "an unknown flag beats an extra positional");
+
+    _cli_reset(0);
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cli_unexpected_flag_named_as_typed() {
+    test_group("cli: an unexpected flag is named as typed");
+
+    var toks = "--x|--x=1|-x|-xy|-V|--force=1|--dry-run=|--strict|--root=";
+    var n = strlen(toks);
+    var start = 0;
+    var i = 0;
+    while (i <= n) {
+        if (i == n || load8(toks + i) == 124) {
+            var t = alloc(i - start + 1);
+            memcpy(t, toks + start, i - start);
+            store8(t + i - start, 0);
+            var av = _cli_av("hapi unlink pkg");
+            _cli_add(av, t);
+            _cli_expect(av, 2, "", _cli_unexpected_flag("unlink", t), t);
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -3527,6 +4005,15 @@ fn main() {
     test_link_refuses_nested_targets();
     test_dot_slash_target_links_correctly();
     test_symlinked_manifest_is_not_rewritten();
+    test_cli_top_level();
+    test_cli_verbs_take_only_their_flags();
+    test_cli_extra_positional_refused();
+    test_cli_flag_shaped_value_refused();
+    test_cli_empty_root_writes_no_stray_byte();
+    test_cli_root_grant_after_parse();
+    test_cli_flags_reach_the_command();
+    test_cli_additive_forms();
+    test_cli_unexpected_flag_named_as_typed();
     return assert_summary();
 }
 

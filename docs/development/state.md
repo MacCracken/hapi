@@ -5,17 +5,22 @@
 
 ## Version
 
-**1.1.1** (2026-10-28) — the P(-1) audit and repairs, on the cyrius 6.7
-line (pin `6.7.18`). The pass,
-[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md), filed
-F-035 – F-059. Twenty-two are fixed here, four of them HIGH and all four
-on the capability boundary: `link --force` deleting a row's own source,
-`--root` through a symlink, `..` collapsed before its symlink, and an
-adopt that crashed outside the scope root. Two are retroactive and one
-is accepted (F-059, `adopt` on a real agnos kernel). The v1.0 contract
-(command surface, manifest schema, audit-trail line shape) is unchanged.
-Both suites pass on x86_64 and on aarch64 under qemu, and
-`tests/agnos.tcyr` also passes on agnos under mirshi.
+**1.2.0** (2026-10-28) — adopting cmdit, on the cyrius 6.7 line (pin
+`6.7.18`). The hand-rolled argv walk in `src/main.cyr` is replaced by
+cmdit 1.5.0 (`[deps.cmdit]`), and the dispatcher lives in `src/cli.cyr`.
+The v1.0 command surface is kept message for message, checked against an
+819-line golden of the 1.1.1 binary; what changed is additive
+(`<verb> --help` / `--version`, `--root=PATH` / `--backup-to=DIR`, `--`,
+a lone `-` as a positional) plus two error-precedence shifts on lines
+with more than one error. P(-1) re-ran on the argument surface (the
+*1.2.0 addendum* of
+[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)): F-013,
+F-019, F-033 and F-051 hold, and F-060 (a stray NUL on an empty
+`--root`) is fixed. 1.1.1 before it repaired that pass's F-035 – F-059;
+F-059 (`adopt` on a real agnos kernel) stays accepted. The manifest
+schema and the audit-trail line shape are unchanged. Both suites pass on
+x86_64 and on aarch64 under qemu, and `tests/agnos.tcyr` also passes on
+agnos under mirshi.
 
 Release-by-release detail lives in
 [`../../CHANGELOG.md`](../../CHANGELOG.md), and the findings with their
@@ -34,13 +39,17 @@ v0.2.0 = M1, M0 scaffold 2026-05-19.
 ## Toolchain
 
 - **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`)
-- **Vendored `lib/`**: 113 files (106 top-level + 7 in `unicode/`),
-  the 6.7.18 full snapshot (`cyrius lib sync --full`). Mirrors the
-  pin exactly — nothing hand-edited, nothing left over from an
-  earlier snapshot. Verify with
-  `diff -rq lib ~/.cyrius/versions/6.7.18/lib`.
-- **Binary size**: the `CYRIUS_DCE=1` release binary is ~550 KB at
-  1.1.1 (543 KB at 1.1.0; 195 KB at 6.6.20). The code segment is flat; the growth is
+- **Vendored `lib/`**: 114 files. 113 are the 6.7.18 full stdlib
+  snapshot (106 top-level + 7 in `unicode/`, `cyrius lib sync --full`),
+  mirroring the pin exactly — nothing hand-edited, nothing left over
+  from an earlier snapshot. The 114th is `lib/cmdit.cyr`, cmdit 1.5.0's
+  `dist/cmdit.cyr`, which `cyrius deps` writes from `[deps.cmdit]` and
+  `cyrius.lock` pins to its commit (`7671a28`). Verify with
+  `diff -rq lib ~/.cyrius/versions/6.7.18/lib` (the one difference is
+  `Only in lib: cmdit.cyr`) and `cyrius deps --verify`.
+- **Binary size**: the `CYRIUS_DCE=1` release binary is ~581 KB at
+  1.2.0 (552 KB at 1.1.1; 543 KB at 1.1.0; 195 KB at 6.6.20). 1.2.0's
+  +28 KB is code, cmdit's. The 6.7 line's earlier growth is
   **data**. 6.7.18's `bayan` unconditionally includes the Unicode
   casefold / category / normalization tables, and DCE drops dead code
   but not data. hapi reaches none of it, and `sync` timing is
@@ -58,9 +67,11 @@ v0.2.0 = M1, M0 scaffold 2026-05-19.
 
 ## Shape
 
-Binary (`hapi`). Argv dispatcher. Ten real verbs frozen at v1.0.0;
-`--version` / `--help` / `-v` / `-h` round out the surface.
-Three global flags plug into per-verb arg parsers:
+Binary (`hapi`). The command line is parsed by cmdit in `src/cli.cyr`:
+the command is `argv[1]` alone (a verb, or `--version` / `--help` /
+`-v` / `-h`), and each verb parses the rest on its own cmdit handle.
+Ten real verbs frozen at v1.0.0. Three "global" flags are per-verb
+subsets, registered only on the verbs that take them:
 `--root <path>` (link / adopt / sync / status / list),
 `--dry-run` (link / unlink / adopt / sync / rollback /
 checkpoint), and `--backup-to <dir>` (parsed on link / sync / adopt; effective
@@ -85,13 +96,22 @@ opt-in pre-`--force` snapshot.
 | `hapi --version`      | 0                        |
 | `hapi --help`         | 0                        |
 
+Additive since 1.2.0: `hapi <verb> --help` / `-h` and `--version` /
+`-v` (exit 0), `--root=PATH` and `--backup-to=DIR`, `--` to end a
+verb's flags, and a lone `-` as a positional. Nothing is accepted
+before the verb, and a leading `--help` / `--version` answers whatever
+follows it.
+
 ADR 0005's usage contract, tightened in 1.0.9: **every** verb rejects an
 extra positional with exit 2 (`hapi rollback <pkg>` used to ignore the
 argument and reverse the entire trail); a verb that takes no flags still
 owes 2 for one rather than 1 (F-033, `inspect`); and a flag-shaped value
 for `--root` / `--backup-to` is refused rather than consumed (F-019 —
 `link --root --dry-run pkg` used to create a directory named
-`--dry-run`). `status` exits 1 on drift, which is an assertion, not a
+`--dry-run`; since 1.2.0 a value starting with `-` is refused in every
+spelling). On a line with more than one error, a flag error is named
+before an extra positional, and a usage error (2) before a `--root`
+denial (1). `status` exits 1 on drift, which is an assertion, not a
 predicate.
 
 Two accepted keys do nothing, and a state snapshot is the right place to
@@ -102,12 +122,8 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 
 ## Source
 
-- `src/main.cyr` — entry point + argv dispatcher. `--version`
-  prints `hapi <X.Y.Z>` from the compile-time
-  `CYRIUS_PKG_VERSION` constant (cyrius resolves it from
-  `[package].version` = `${file:VERSION}`), so `VERSION` is the
-  only place the number lives — the hand-synced literal was
-  retired in 1.0.4.
+- `src/main.cyr` — entry point: `alloc_init()`, then
+  `hapi_cli_main()`.
 - `src/agnos_compat.cyr` — target-portability shims for the agnos
   userland (`hapi_unlink` / `hapi_rename` / `hapi_fsync` /
   `hapi_symlink` / `hapi_readlink` / `hapi_mkdir`). Each forwards
@@ -187,10 +203,24 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   scope)` is the per-write check — resolved target inside resolved
   scope, or allowlisted. Test hooks `cap_set_home` and
   `cap_set_allowlist`.
-- `src/cli.cyr` — owns the process-wide `_hapi_dry_run`
-  flag. Setter `hapi_set_dry_run(0|1)` and getter
-  `hapi_dry_run()`. Every mutating cmd checks the flag
-  before its first syscall / audit write.
+- `src/cli.cyr` — the command line (1.2.0). `hapi_cli_main()` reads
+  argv through `cmdit_argv`; the pure `hapi_cli_run(argc, argv)` is
+  what `tests/hapi.tcyr` drives. cmdit dispatches over `argv[1]` alone;
+  each verb then parses `argv[1..]` on its own handle with only its
+  flags (`--root` / `--backup-to` as `cmdit_repeat` +
+  `cmdit_reject_flag_value`), its positional count is
+  `cmdit_require_positionals_max`, and hapi renders every error in its
+  1.1.1 words. Verb ids are registration order: a new verb appends to
+  the `HapiVerb` enum and to `_hapi_cli_new`. Also the hand-written
+  usage (`hapi_print_usage`), `hapi_print_version` — `hapi <X.Y.Z>`
+  from the compile-time `CYRIUS_PKG_VERSION` (cyrius resolves it from
+  `[package].version` = `${file:VERSION}`, so `VERSION` is the only
+  place the number lives) — and the process-wide `_hapi_dry_run` flag
+  (`hapi_set_dry_run(0|1)` / `hapi_dry_run()`), which every mutating
+  cmd checks before its first syscall / audit write. The command files
+  include it for that flag, so the include graph through it is a
+  cycle; includes are once-only and functions resolve across the
+  unit.
 - `src/backup.cyr` — owns the process-wide
   `_hapi_backup_dir` cstring (set by `--backup-to <dir>`),
   the `<YYYYMMDD-HHMMSS>-<pkg>-<basename>` filename
@@ -248,7 +278,7 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. **469 assertions across 112 test
+- `tests/hapi.tcyr` — primary suite. **826 assertions across 121 test
   groups.** Re-derive rather than recount by hand — these figures have
   rotted twice, and the per-tier breakdown below drifted 16 groups
   short before the 2026-08-26 sweep:
@@ -260,10 +290,13 @@ in-source magic-number `syscall(N, ...)` calls.)_
     | sort | uniq -c | sort -rn                 # per-tier breakdown
   ```
 
-  Groups by tier, as measured at 1.1.1: link 10, cap 9, rollback 8,
-  manifest 8, manifest_write 8, check 8, backup 7, adopt 7, fs_link 6,
-  dry-run 6, status 5, canonical 5, audit_reader 5, audit-repair 4,
-  audit 4, unlink 4, sync 3, list 3, checkpoint 1, agnos_compat 1.
+  Groups by tier, as measured at 1.2.0: link 10, cli 9, cap 9,
+  rollback 8, manifest 8, manifest_write 8, check 8, backup 7, adopt 7,
+  fs_link 6, dry-run 6, status 5, canonical 5, audit_reader 5,
+  audit-repair 4, audit 4, unlink 4, sync 3, list 3, checkpoint 1,
+  agnos_compat 1. The `cli` tier (1.2.0) runs `hapi_cli_run` with a
+  synthetic argv and its stdout / stderr captured through `dup2`, so the
+  v1.0 messages are asserted byte for byte.
 - `tests/agnos.tcyr` — **55 assertions across 8 groups**, all
   target-neutral: the agnos-conditional paths (no-follow open,
   exclusive create, absent trail, trail and manifest round trips,
@@ -278,7 +311,7 @@ in-source magic-number `syscall(N, ...)` calls.)_
 beside it as shell harnesses. **CI runs both.**
 
 The suite itself also runs on aarch64 — `cyrius test --aarch64` under
-`qemu-aarch64` (469 / 469 and 55 / 55 at 1.1.1). **CI runs it** as of 1.0.12
+`qemu-aarch64` (826 / 826 and 55 / 55 at 1.2.0). **CI runs it** as of 1.0.12
 (`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
 qemu fails the step, it never skips). Before that the aarch64 step was
 compile-only, which is how the `O_NOFOLLOW` literal went unseen from
@@ -314,6 +347,9 @@ Direct (declared in `cyrius.cyml`):
   assert, bench, args, fs, result, bayan, sha1, chrono
   (`bayan` supplies `cyml`; the standalone `toml` / `cyml`
   modules were folded into it in the v6.1.25 stdlib carve)
+- **cmdit 1.5.0** (`[deps.cmdit]`, `modules = ["dist/cmdit.cyr"]`) —
+  argument parsing, since 1.2.0. On the same cyrius pin as hapi.
+  `args` and `io` above are what it needs.
 
 Previously-pending stdlib syscall wrappers **landed in cyrius
 6.2.x** and are now consumed directly (1.0.2): `sys_rename`
@@ -359,8 +395,9 @@ means downstream packagers (zugot recipes) and user manifests.
 
 ## Next
 
-The 2026-10-28 P(-1) pass is **closed** in 1.1.1. Every finding is
-fixed except F-059, accepted as an agnos kernel gap
+The 2026-10-28 P(-1) pass is **closed** in 1.1.1, and its 1.2.0
+addendum (the argument surface under cmdit) closed with F-060 fixed.
+Every finding is fixed except F-059, accepted as an agnos kernel gap
 ([`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)).
 Two upstream follow-ups came out of it, both filed upstream on
 2026-10-28: mirshi's divergences from the kernel (its roadmap, § *Open
@@ -370,6 +407,6 @@ rename-over-existing (an agnos issue file). [`roadmap.md`](roadmap.md)
 
 Forward-looking work is **not** listed here — it lives in
 [`roadmap.md`](roadmap.md), which carries only work that has not
-shipped. **Next is 1.2.0, adopting cmdit**; 1.3.0 – 1.7.0 are planned
-there one theme per minor, with upstream-gated work listed apart. Open dogfood papercuts are in
+shipped. **Next is 1.3.0, `sync` with no argument and `--prune`**;
+1.4.0 – 1.7.0 are planned there one theme per minor, with upstream-gated work listed apart. Open dogfood papercuts are in
 [`issues/`](issues/) (4 open, 7 archived).
