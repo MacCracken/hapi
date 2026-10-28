@@ -62,8 +62,8 @@ jobs:
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
       - name: Build (aarch64, compile-only)
-        # Cross-compile only — no aarch64 runner, so this proves the
-        # target still COMPILES, nothing more. That is the whole point:
+        # Cross-compile only — this proves the target still COMPILES;
+        # "Test (aarch64, under qemu)" below proves it BEHAVES. Keep both:
         # `--aarch64` silently stopped building at 1.0.2 (a bare
         # `SYS_OPEN`, the one constant the aarch64 table deliberately
         # does not define) and nothing noticed until 1.0.4, because CI
@@ -110,3 +110,22 @@ jobs:
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
         run: cyrius test
+
+      - name: Test (aarch64, under qemu)
+        # The suite again, as an aarch64 binary. Compile-only is how
+        # hapi_open_nofollow's x86_64 O_NOFOLLOW literal (131072, which
+        # is O_LARGEFILE on arm64) followed symlinks on aarch64 from
+        # 0.9.0 to 1.0.11 with CI green: the test that catches it had
+        # only ever run on x86_64. Under qemu it failed 10 of 365.
+        #
+        # cyrius execs aarch64 test binaries via /usr/bin/qemu-aarch64
+        # (a hardcoded path), which qemu-user provides. hapi's ELFs are
+        # static, so no aarch64 sysroot or binfmt is needed. A missing
+        # qemu FAILS this step (cyrius exits 127); it never skips.
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user
+          test -x /usr/bin/qemu-aarch64 \
+            || { echo "::error::qemu-user did not provide /usr/bin/qemu-aarch64"; exit 1; }
+          cyrius test --aarch64

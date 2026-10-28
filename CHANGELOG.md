@@ -4,15 +4,108 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.0.12] - 2026-10-28
+
+> **A toolchain refresh that found a real aarch64 hole.** The bump itself needed no
+> source change. Reading the upstream changelog for it did: cyrius 6.6.4 lists hapi among
+> the consumers that hard-code the x86_64 `O_NOFOLLOW` value, and on arm64 that number
+> means something else. Running the suite **on aarch64 for the first time** (under qemu)
+> showed F-003's TOCTOU defence was absent there, and that the test harness itself was
+> x86-only.
+
+### Fixed
+
+- **`O_NOFOLLOW` was spelled as the x86_64 literal, so the aarch64 build followed
+  symlinks in `hapi_open_nofollow`.** `src/agnos_compat.cyr` OR'd `131072` (`0400000`)
+  into the open flags. On x86_64 that is `O_NOFOLLOW`; on arm64 it is **`O_LARGEFILE`**,
+  and arm64's `O_NOFOLLOW` is `0100000`. So on aarch64 `hapi_backup_copy` (the
+  `--backup-to` snapshot taken before `link --force` and `adopt`) would follow a
+  swapped-in symlink and copy its target into the "snapshot". That is exactly the F-003
+  race the shim exists to close.
+
+  Nothing caught it. The aarch64 target was compile-only in CI, and
+  `test_open_nofollow_refuses_symlink` only ever ran on x86_64. Under qemu it fails:
+  *"a symlink is refused"*, *"backup_copy refuses a symlink source"*, *"copy through
+  symlink refused"*, plus an `-EEXIST` knock-on from the snapshot that should never have
+  been written. The shim now spells the symbol (`flags | O_NOFOLLOW`), which each
+  `lib/syscalls_*` peer has defined per target since cyrius 6.6.4. x86_64 compiles to the
+  same constant. The bug is as old as F-003's fix itself: the literal entered
+  `src/backup.cyr` at 0.9.0, and 1.0.10 moved it into the shim unchanged. Every aarch64
+  build since then has carried it.
+- **The test harness was x86_64-only.** `_test_file_size` called raw `syscall(8, …)`,
+  which is `lseek` on x86_64 and something else on arm64, so six audit-trail assertions
+  failed on aarch64 for a harness reason, not a hapi one. It now uses `xlseek`, as
+  `src/audit.cyr` does. The three harness entry points (`tests/hapi.tcyr`, `.bcyr`,
+  `.fcyr`) ended with `syscall(60, …)`, the x86_64 `exit`; they now spell `SYS_EXIT`, as
+  `src/main.cyr` and `src/test.cyr` already did. **`cyrius test --aarch64`: 355 / 365
+  before, 365 / 365 after.**
+- **CI now runs the suite on aarch64.** New `ci.yml` step `Test (aarch64, under qemu)`
+  installs `qemu-user` and runs `cyrius test --aarch64`. cyrius execs aarch64 test
+  binaries through a hard-coded `/usr/bin/qemu-aarch64`, and hapi's ELFs are static, so
+  nothing else is needed. A missing qemu **fails** the step (checked with qemu masked
+  out: `FAIL: tests/hapi.tcyr (exit 127)`, exit 1); it does not skip. `release.yml`
+  gates on `ci.yml`, so a release runs it too. The aarch64 build step stays: it proves
+  the target compiles, and the new step proves it behaves.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.20`.** `lib/` resynced to the 6.6.20 full snapshot
+  (`cyrius lib sync --full`, 113 files; five new: `alloc_cx`, `boxed`, `hashseed`,
+  `poison`, `tls_hostid`). `diff -rq lib ~/.cyrius/versions/6.6.20/lib` is clean, so
+  `lib/` mirrors the pin exactly. It had drifted at 1.0.11: only the declared modules were
+  refreshed, and the rest of the tree was still the 1.0.4-era (6.5.35) snapshot. Nothing
+  in `src/` trips a 6.6.3 – 6.6.20 refusal.
+
+  Re-verified:
+  - x86_64 build, plus the `--aarch64` and `--agnos` builds
+  - a `CYRIUS_DCE=1` release build
+  - `cyrius test`: 365 / 365 on x86_64, and on aarch64 under qemu
+  - `cyrius lint`: 0 warnings across all 21 `src/` files and `tests/hapi.tcyr`
+  - `cyrius fuzz` and `cyrius bench tests/hapi.bcyr`
+  - `cyrius deps --verify`: 113 / 113
+  - `scripts/concurrency-test.sh`
+  - `scripts/agnos-smoke.sh` under mirshi: all four checks
+  - the torn-tail guard, against the real binary: a trail whose last byte is not `\n`
+    refuses `link` with exit 1, creates nothing, and leaves the trail untouched
+- **Toolchain fixes hapi picks up.**
+  - On agnos, `file_open` now bridges `O_EXCL` → `AO_EXCL` (6.6.4; agnos ≥ 1.56.56).
+    Before, the bit was dropped, so `backup.cyr`'s and `manifest_write.cyr`'s exclusive
+    creates opened an existing file and overwrote it in place.
+  - `CYRIUS_DCE=1` no longer emits a data segment the code was not patched against
+    (6.6.3).
+  - A large environment can no longer make `--agnos` emit a Linux ELF, or make
+    `CYRIUS_DCE=1` a silent no-op, while the build still reports OK (6.6.20).
+  - `cyrius test` children get the whole environment, so `HOME` / `XDG_STATE_HOME` /
+    `PWD` resolve in large shells (6.6.11).
+- **Benchmarks flat**: cold 90 ms / warm 72 ms, trail byte-identical at 101,150 bytes /
+  350 entries, zero warm growth. An interleaved A/B against 1.0.11-on-6.6.2 on the same
+  kernel shows no toolchain delta (see `docs/benchmarks.md`). It was measured before the
+  `O_NOFOLLOW` fix, which compiles to the same constant on x86_64.
+
+### Notes
+
+- **`cyrius update` ignores the manifest pin at 6.6.20.** It re-vendored `lib/` from
+  `~/.cyrius/current` (6.7.18) rather than the pinned 6.6.20. Refresh `lib/` with
+  `cyrius lib sync --full`. Recorded in `docs/development/state.md` § Toolchain.
+- **`cyrius.lock` now exists.** Since 6.6.9, `cyrius deps` / `lib sync` write one for a
+  stdlib-only project too (sha256 per vendored file plus a `cyrius<TAB><pin>` trailer),
+  and upstream's note says to commit it. `deps --verify` fails on any vendored file the
+  lock does not cover. It is untracked as of this release.
+- Carried over from the retired roadmap note on the 6.6.6 bump: the stdlib's
+  `file_replace_atomic` **writes through a symlink**. That is the wrong default for a
+  symlink farm, because it edits the package source rather than the link. hapi uses
+  neither it nor `file_write_atomic`; adopting either is a decision, not a drop-in.
+- `docs/development/state.md`'s Version and Toolchain sections, missed at 1.0.11, are
+  current again.
+
 ## [1.0.11] - 2026-09-11
 
 ### Changed
 
 - **Toolchain `6.5.35` → `6.6.2`.** Migrated to the `Result` value form: 14 first-party
   file(s) changed. Build, tests and every bench/fuzz/distlib target re-verified.
-
-
-_Nothing yet._
 
 ## [1.0.10] - 2026-08-26
 

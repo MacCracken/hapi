@@ -5,10 +5,15 @@
 
 ## Version
 
-**1.0.10** (2026-08-26). The 1.0.x hardening arc is closed — all
-twenty findings of the 2026-08-25 P(-1) sweep are fixed. The v1.0
-contract (command surface, manifest schema, audit-trail format) stayed
-frozen across the whole arc.
+**1.0.12** (2026-10-28) — a toolchain refresh (cyrius `6.6.2` →
+`6.6.20`, `lib/` resynced) that also fixed an aarch64 hole: the
+`O_NOFOLLOW` in `hapi_open_nofollow` was the x86_64 literal, which on
+arm64 is `O_LARGEFILE`, so F-003's TOCTOU defence was absent on
+aarch64 from 0.9.0 through 1.0.11. The test harness was x86-only too;
+it now passes 365 / 365 on aarch64 under qemu. The 1.0.x
+hardening arc closed at 1.0.10 — all twenty findings of the 2026-08-25
+P(-1) sweep are fixed. The v1.0 contract (command surface, manifest
+schema, audit-trail format) stayed frozen across the whole arc.
 
 Release-by-release detail lives in
 [`../../CHANGELOG.md`](../../CHANGELOG.md), and the findings with their
@@ -24,10 +29,18 @@ v0.2.0 = M1, M0 scaffold 2026-05-19.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.35` (in `cyrius.cyml [package].cyrius`)
-- **Vendored `lib/`**: 108 files, the 6.5.35 full snapshot
-  (`cyrius lib sync --full`). Mirrors the pin exactly — nothing
-  hand-edited, nothing left over from an earlier snapshot.
+- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`)
+- **Vendored `lib/`**: 113 files (106 top-level + 7 in `unicode/`),
+  the 6.6.20 full snapshot (`cyrius lib sync --full`). Mirrors the
+  pin exactly — nothing hand-edited, nothing left over from an
+  earlier snapshot. Verify with
+  `diff -rq lib ~/.cyrius/versions/6.6.20/lib`.
+- ⚠ **Use `cyrius lib sync --full` to refresh `lib/`, never
+  `cyrius update`.** At 6.6.20, `update` ignores the manifest pin and
+  re-vendors from whatever `~/.cyrius/current` points at (6.7.18 on
+  the dev box at the time of the 1.0.12 refresh).
+- **`cyrius.lock`**: `cyrius deps` / `lib sync` now write one (sha256
+  per vendored file). Not tracked in git as of 1.0.12.
 
 ## Shape
 
@@ -229,6 +242,14 @@ in-source magic-number `syscall(N, ...)` calls.)_
 
 `cyrius test` cannot express two of hapi's regressions, so they live
 beside it as shell harnesses. **CI runs both.**
+
+The suite itself also runs on aarch64 — `cyrius test --aarch64` under
+`qemu-aarch64` (365 / 365 at 1.0.12). **CI runs it** as of 1.0.12
+(`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
+qemu fails the step, it never skips). Before that the aarch64 step was
+compile-only, which is how the `O_NOFOLLOW` literal went unseen from
+0.9.0 to 1.0.11. `release.yml` gates on `ci.yml`, so a release runs it
+too.
 
 - `scripts/concurrency-test.sh` — F-012's regression. The defect needs
   two hapi *processes* racing on one manifest, and `.tcyr` cannot fork

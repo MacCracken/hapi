@@ -235,7 +235,7 @@ fn _test_scratch_dir(): i64 {
 fn _test_file_size(path): i64 {
     var fd = file_open(path, 0, 0);
     if (fd < 0) { return 0; }
-    var size = syscall(8, fd, 0, 2);   # lseek(fd, 0, SEEK_END)
+    var size = xlseek(fd, 0, 2);       # SEEK_END; not raw syscall 8 — that is x86_64-only
     file_close(fd);
     return size;
 }
@@ -2869,4 +2869,4 @@ fn main() {
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+syscall(SYS_EXIT, exit_code);

@@ -34,9 +34,9 @@ sanity checks, not statistical benchmarks.
 | Field | Value |
 |-------|-------|
 | CPU   | AMD Ryzen 7 5800H |
-| OS    | Linux 7.0.9-arch1-1 x86_64 (0.9.0 row) · 7.1.9-arch1-2 (1.0.4 row) |
+| OS    | Linux 7.0.9-arch1-1 x86_64 (0.9.0 row) · 7.1.9-arch1-2 (1.0.4 row) · 7.2.11-arch1-1 (1.0.12 row) |
 | FS    | tmpfs (`/tmp`) |
-| Build | stripped, statically linked ELF, `CYRIUS_DCE=1` |
+| Build | stripped, statically linked ELF, `CYRIUS_DCE=1` — cyrius emits it already stripped. **Do not run GNU `strip` on it**: at 1.0.12 that produced a binary whose every `sync` dies with `alloc_init: mmap failed`. |
 
 tmpfs eliminates spinning-disk variance — these numbers are
 syscall + CPU bound, not IO bound. Numbers will be slower on a
@@ -58,6 +58,8 @@ real HDD or under cgroup-throttled IO.
 | 1.0.9   | 106       | 87        | 0 bytes           | 2026-08-25 | Tier 2 + Tier 3 batch. ~6% cold against 1.0.8, from F-018's `fsync` before the trail lock is dropped — the durability the finding was about. Warm is unchanged (a warm sync writes nothing). ⭐ F-023's owner map is the number that matters here: the naive per-package build measured **41x** (0.665 s vs 0.016 s) and was rejected; the shipped hashmap build is 1.0x. Trail byte-identical at 101,150 bytes. |
 
 | 1.0.10  | 107       | 87        | 0 bytes           | 2026-08-26 | F-027 / F-031. Flat against 1.0.9 within noise (best of three; the middle run read 113/94 on a busier box). The Linux hot path is untouched — F-027's `PWD` lookup is inside the agnos `#ifdef` arm, and `hapi_open_nofollow` compiles to the same `O_NOFOLLOW` open it replaced. Row recorded because `fs_link.cyr` changed, which is the trigger, not because anything moved. |
+
+| 1.0.12  | 90        | 72        | 0 bytes           | 2026-10-28 | Toolchain refresh (cyrius `6.6.2` → `6.6.20`). Measured before the release's one source fix (an aarch64 `O_NOFOLLOW` literal), which compiles to the same constant on x86_64. **Controlled A/B this time**: 1.0.11-on-6.6.2 built from `HEAD` and interleaved with 1.0.12 on one kernel, three pairs — old 91–93 / 72–75, new 90–91 / 72. Flat within noise. The drop against the 1.0.10 row is the machine (new kernel, 7.2.11), not the toolchain. Trail byte-identical at 101,150 bytes / 350 entries. DCE binary 188,552 → 194,744 bytes. |
 
 ⚠ **On the 0.9.0 → 1.0.4 delta.** Three things changed at once between
 the two rows: the compiler (6.0.1 → 6.5.35), the kernel (7.0.9 → 7.1.9),

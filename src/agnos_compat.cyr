@@ -76,12 +76,19 @@ fn hapi_readlink(path, buf, buflen): i64 {
 
 # Open `path` WITHOUT following a final-component symlink.
 #
-# Linux/macOS get the real thing: `O_NOFOLLOW` (0x20000) is atomic — the
-# kernel refuses with ELOOP inside the open itself, so no race exists.
+# Linux/macOS get the real thing: `O_NOFOLLOW` is atomic — the kernel
+# refuses with ELOOP inside the open itself, so no race exists. Spell the
+# SYMBOL, never the number: the value is per-arch (x86_64 0x20000, arm64
+# 0x8000, Darwin 0x100) and each `lib/syscalls_*` peer owns it. From 0.9.0
+# through 1.0.11 this open carried the x86_64 literal, which on arm64 is
+# O_LARGEFILE — so the aarch64 build followed symlinks here and F-003's
+# defence was absent there (cyrius 6.6.4 named hapi as carrying it).
 #
-# agnos has no equivalent. Its AO_* set is RDONLY/WRONLY/RDWR/CREAT/
-# TRUNC/APPEND/DIRECTORY and nothing else, so `lib/io.cyr`'s bridge
-# silently DROPS the O_NOFOLLOW bit — there is nothing to map it to.
+# agnos had no equivalent when this was written. Its AO_* set was RDONLY/
+# WRONLY/RDWR/CREAT/TRUNC/APPEND/DIRECTORY and nothing else, so
+# `lib/io.cyr`'s bridge silently DROPPED the O_NOFOLLOW bit. (The kernel
+# gained AO_NOFOLLOW at agnos 1.56.53 and cyrius 6.6.4 bridges it; this
+# arm does not rely on it yet — see the race note below.)
 # That meant F-003's backup-copy TOCTOU defence did not exist on agnos:
 # an attacker who swapped the regular file for a symlink got the
 # symlink's target content written into the "snapshot", and
@@ -104,7 +111,7 @@ fn hapi_open_nofollow(path, flags): i64 {
     if (n > 0) { return 0 - 40; }          # ELOOP — it is a symlink
     return file_open(path, flags, 0);
     #else
-    return file_open(path, flags | 131072, 0);   # O_NOFOLLOW
+    return file_open(path, flags | O_NOFOLLOW, 0);
     #endif
 }
 

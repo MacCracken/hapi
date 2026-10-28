@@ -230,93 +230,6 @@ Items that don't earn a place no matter the version.
 
 ---
 
-## Moving the cyrius pin to 6.6.6
-
-**Current pin: `cyrius = "6.6.2"`** — four releases behind. Nothing must change first;
-this is a pin bump and a rebuild.
-
-### The O_APPEND question, answered first
-
-hapi **does** use `O_APPEND`, in the one place where 6.6.6's Windows defect would have been
-worst: `_audit_append_durable` (`src/audit.cyr:363`), the append-only audit trail. Before
-6.6.6 a PE build's `O_APPEND` did not append — it overwrote from offset 0 — which for this
-function would have meant each entry silently erasing the trail's head while
-`file_lock` + `fsync` + the torn-tail guard all reported success.
-
-**hapi is not exposed, and here is the check rather than the assumption.** hapi builds
-exactly three targets, all of them in `.github/workflows/ci.yml`: x86_64 Linux, aarch64
-Linux (compile-only), and agnos (compile-only, smoked under mirshi). There is no PE target,
-no `CYRIUS_TARGET_WIN` / `_TARGET_PE` branch anywhere in `src/` — the only conditional in
-the tree is `CYRIUS_TARGET_AGNOS`, at 11 sites — and no Windows runner in CI. The audit
-comment's *"portable across all three targets"* means those three, not Windows.
-
-So: not a live corruption, but **the reason to carry the fix anyway is that this repo is one
-Windows target away from it**, and `src/audit.cyr:363` is the line that would go first.
-
-### What else was checked
-
-- **Other open sites, all safe by construction.** `src/backup.cyr:230` and
-  `src/manifest_write.cyr:202` both open `O_WRONLY|O_CREAT|O_EXCL` — deliberately *not*
-  `O_TRUNC` (backup.cyr:221–224 records why: with `O_TRUNC` a second copy in the same second
-  silently overwrote the first). `O_EXCL` disposition behaviour is unchanged by 6.6.6.
-- **No shape the new refusals catch.** Zero `struct` declarations in `src/`, so no
-  struct/vector copy, no by-value struct parameter, no struct-valued return, no top-level
-  struct call. **All 8 `: Result` fns were walked** (`hapi_mf_parse_header_r`,
-  `hapi_mf_parse_file_r`, `audit_read_r`, `audit_read_default_r`, `cap_check_root_r`,
-  `audit_preflight_r`, `_audit_append_bytes`, `audit_append_rollback_marker_r`) and every
-  `return` in them is `Ok(…)`, `Err(…)` or a tail call to another `_r` — none returns a bare
-  scalar, so the new "a pair-return fn must return a same-shaped pair" refusal is satisfied.
-  No `async fn`, no `operator` fn, no SIMD-returning fn.
-- **The 6.6.6 `file_append_locked` fix does not reach hapi's trail, and that is by design.**
-  6.6.6 makes `lib/io.cyr`'s `file_append_locked` loop until the whole record lands — before
-  it, one `write` could append a **prefix** and return that count as success, so a caller
-  testing `< 0` logged a torn line and called it written. hapi does not use it (audit.cyr:343
-  records why), and `_audit_append_durable`'s own write is `var w = file_write(fd, buf, n);`
-  followed by `if (w != n) { return 0 - 5; }` — it does not loop, but it **detects** the short
-  write and reports it rather than claiming success, so the torn-line class cannot occur.
-  Worth knowing, because the stdlib's new looping behaviour is now the stronger of the two:
-  if F-018's two missing properties ever land upstream, hapi's hand-rolled path can retire.
-- **Also clean:** no `var` inside a top-level block (zero top-level `{` / `if (` / `while (`
-  at column 0), no raw `SYS_STATFS`, no `lib/regression.cyr` consumer, no `vec_*` of hapi's
-  own, no symlink in `lib/` (which matters here: 6.6.6 makes `cyrius deps` **fail** rather
-  than skip when a `lib/*.cyr` cannot be hashed, and a stale dangling symlink must be removed
-  rather than bypassed — hapi's `lib/` is 43 regular files, nothing to clear). The only
-  duplicate top-level global is `var r = main();` in `src/main.cyr` and `src/test.cyr`, two
-  entry files that are never co-linked.
-
-### ⚠ One new stdlib primitive to look at deliberately, not adopt by reflex
-
-6.6.6 adds **`file_replace_atomic`, which writes THROUGH a symlink**, and changes
-`file_write_atomic` to **keep an existing file's mode** (it was `0644 & ~umask`). hapi
-currently uses neither — `manifest_write.cyr` hand-rolls tmp-write-then-rename.
-
-- The `file_write_atomic` mode-preservation change is the behaviour hapi wants: a dotfile
-  manager that rewrites a user's file should not silently reset its mode to 0644.
-- **`file_replace_atomic`'s write-through-symlink semantics are the opposite of what a
-  symlink farm wants** in most paths. hapi's whole model is that `~/.zshrc` *is* a link into
-  the package tree; writing through it edits the package source instead of the link. If a
-  future slot reaches for it, that has to be a decision, not a default.
-
-### What it gains
-
-6.6.3's `#inline`-disarms-`#derive` fix; 6.6.4's ≥64 KB string-literal read-back fix (hapi's
-longest literal is 3,668 B in `src/manifest.cyr`, so not reachable today, but the manifest
-format is the part of hapi that grows); 6.6.5's aggregate-layout fix, silently wrong since
-5.8.17, and three corrected ENTRY stack bases; and 6.6.6's nine new refusals.
-
-### Verify after bumping
-
-`cyrius deps` → `cyrius build` → `cyrius test` → `cyrius build --aarch64` and
-`cyrius build --agnos` (both compile-only gates; the roadmap's own note that `--aarch64`
-silently stopped building at 1.0.2 and nothing noticed until 1.0.4 is exactly why these must
-be re-run, not assumed) → `scripts/concurrency-test.sh` (F-012, needs two racing processes)
-→ the agnos smoke under mirshi (F-027, F-031). Then re-run the audit-trail append path
-specifically and confirm the torn-tail guard still refuses a trail whose last byte is not
-`\n` — that guard reads the file's tail, and it is the one hapi behaviour that a change in
-open-flag handling would silently alter.
-
----
-
 ## Adopting cmdit (CLI parsing)
 
 **Demand-gated, not a forced sweep.** hapi is a Tier-2 verb tool in the 2026-06-25 ecosystem
@@ -372,7 +285,7 @@ All of it is `src/main.cyr` — `argc(`/`argv(`/`flags_`/`FLAG_ERR_` appear nowh
 ### The manifest change
 
 Append after `[deps]` (`cyrius.cyml:14-21`). `"args"` and `"io"` are listed, there is no `"flags"`
-to drop, and no pin bump is needed (the dist compiles on 6.6.2):
+to drop, and no pin bump is needed (the dist compiled on 6.6.2; not yet re-checked on the current 6.6.20 pin):
 
 ```
 [deps.cmdit]
