@@ -28,8 +28,23 @@ no-arg form is the v1.0 contract and behaves exactly as before.
      append an `op:unlink` audit entry.
    - **`op:unlink` entry**: if `abs_target` is currently
      absent, recreate the symlink and append an `op:link`
-     entry.
+     entry. Since 1.7.1 not when its source is gone, since the link
+     would dangle: it prints `! <target>  (its source is gone: not
+     re-created)` and goes on (F-110). An `op:unlink` carrying
+     `"absent":"1"` is not reversed at all: `unlink` wrote it for a
+     link that was already gone, so it changed nothing on disk (F-078).
+   - **`op:adopt` entry**: if the link is still the one adopt wrote and
+     the package file is still a regular file, remove the link, move the
+     file back, remove its row, and append an `op:unadopt` entry. Since
+     1.7.1 the row is removed from the manifest that holds it, a named
+     `*.cyml` included, not always `hapi.cyml`. Two manifests holding it,
+     or a symlinked manifest, are refused before anything changes. The
+     file moves back without replacing anything that appeared at the
+     target meanwhile (F-083).
    - Anything else (user-mutated state) → silently skipped.
+   - A target hapi cannot probe is an error, not a skip (1.7.1, F-077).
+     Through 1.7.0 it counted as already at its state, the run exited 0,
+     and `--steps` / `--to` sealed it past any later rollback.
 
 The "only act if state still matches" gate is what makes rollback
 **safe**: it never touches state a user or another tool changed since
@@ -51,7 +66,15 @@ rolled back 3 / 3 entries
 
 Same end state as `hapi unlink dotfiles-zsh` in this trivial
 case — the difference matters when the trail contains multiple
-packages or interleaved ops:
+packages or interleaved ops.
+
+Reversing a link that `link --force --backup-to` made does not bring
+back the file it replaced. Since 1.7.1 the line says where that file's
+snapshot is (F-110):
+
+```
+  - /home/me/.zshrc  (was link; the file it replaced is in /home/me/bk/20261029-120000-zsh-.zshrc)
+```
 
 ## Example: rollback through link → unlink → link
 
@@ -113,7 +136,10 @@ in between. This is the form for scripts: a label is untouched by
 whatever checkpoints anyone else adds.
 
 - **The most recent marker with the label** is the one. A script that
-  reuses `pre-deploy` on every run gets its own latest checkpoint.
+  reuses `pre-deploy` on every run gets its own latest checkpoint. It is
+  the only one: through 1.7.0, when that marker lay in a range an earlier
+  rollback had undone, the walk went on to an older checkpoint of the
+  same name and reversed further back (F-088).
 - **A label is 1 to 64 characters** from `A-Z a-z 0-9 . _ -`, and does not
   start with `-`. Anything else is exit 2.
 - **Unknown label:** exit 1, nothing changed.
@@ -206,7 +232,7 @@ fixed.
 | code | meaning                                                       |
 |------|---------------------------------------------------------------|
 | 0    | rollback completed (any per-entry skips were silent), or there was nothing to roll back |
-| 1    | at least one entry hit an IO error mid-reversal; an adopt was reverted but its manifest row could not be removed (the reason is printed); the closing marker could not be written; the trail is not writable (nothing was changed); the trail refused a reversal's entry (below); or, with `--to` / `--steps`, an unknown label or more steps than the trail holds (nothing was changed) |
+| 1    | at least one entry hit an IO error mid-reversal, or a target could not be probed; an adopt was reverted but its manifest row could not be removed (the reason is printed), or its manifest is ambiguous or a symlink (nothing was changed); the closing marker could not be written; the trail is not writable (nothing was changed); the trail refused a reversal's entry (below); or, with `--to` / `--steps`, an unknown label or more steps than the trail holds (nothing was changed) |
 | 2    | bad usage: a positional argument, `--steps` that is not a whole number from 1 to 999999999, a `--to` that is not a label, or `--steps` with `--to` |
 
 ### When the trail refuses an entry
@@ -219,6 +245,9 @@ on disk, unrecorded, reported only as an IO error. The one exception is
 an `adopt` reversal, which is three steps (the link, the file, the
 manifest row) and is not taken back. Instead it is reported exactly: the
 file is back and its row removed, but the trail still says adopted.
+Since 1.7.1, when the row could not be removed either, it says that
+instead: `the file is back, its row is NOT removed, and the trail still
+says adopted` (F-083).
 
 ## See also
 

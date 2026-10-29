@@ -45,7 +45,28 @@ enum HapiLinkAction {
     LINK_ACT_SAME_TARGET = 10;
     LINK_ACT_SOURCE_LOOP = 11;
     LINK_ACT_OTHER_PACKAGE = 12;
+    LINK_ACT_TRAIL = 13;
 }
+
+# Set by sync while it plans a package: a conflict's advice is then
+# `hapi link --force`, which sync itself does not take (F-097).
+var _hlnk_in_sync = 0;
+fn hlnk_set_in_sync(v): i64 { _hlnk_in_sync = v; return 0; }
+
+# Where --backup-to's directory physically is, set once per planned run
+# (F-084). Snapshots are written there, not through the spelling: a link
+# this same run made could otherwise lead the spelled path into a
+# package's working tree.
+var _hlnk_backup_phys = 0;
+fn _hlnk_backup_place(): i64 {
+    if (_hlnk_backup_phys != 0) { return _hlnk_backup_phys; }
+    return hapi_backup_dir();
+}
+
+# Where the audit trail is, set once per planned run (F-081): its path
+# lexically normalized, and its physical place. 0 when there is none.
+var _hlnk_trail_lex = 0;
+var _hlnk_trail_phys = 0;
 
 # Test/CI override for the scope root. When set, takes
 # precedence over getenv("HOME"). Reset to 0 to restore the
@@ -232,33 +253,12 @@ fn _hlnk_plan_new(): i64 {
     return p;
 }
 
-fn _hlnk_cstr_eq(a, b): i64 {
-    if (a == 0 || b == 0) { return 0; }
-    var an = strlen(a);
-    var bn = strlen(b);
-    if (an != bn) { return 0; }
-    return memeq(a, b, an);
-}
+fn _hlnk_cstr_eq(a, b): i64 { return hapi_cstr_eq(a, b); }
 
 # Resolve the user's `<package>` argument to an absolute path
 # to the manifest file. Mirrors the inspect-command resolver:
 # if it ends in .cyml use as-is, else append /hapi.cyml.
-fn _hlnk_resolve_manifest(arg): i64 {
-    var n = strlen(arg);
-    if (n >= 5) {
-        if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
-          && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
-          && load8(arg + n - 1) == 108) {
-            return fsl_canonical_arg(arg);
-        }
-    }
-    var abs_arg = fsl_canonical_arg(arg);
-    # 0 = a relative argument with no determinable cwd (agnos without a
-    # usable PWD). Refuse rather than build a trail entry whose
-    # `abs_source` is not absolute (F-027).
-    if (abs_arg == 0) { return 0; }
-    return _fsl_path_join(abs_arg, "hapi.cyml");
-}
+fn _hlnk_resolve_manifest(arg): i64 { return fsl_manifest_of_arg(arg); }
 
 # Build one plan item from one HapiLink + the resolved
 # absolute package dir + absolute scope root.
@@ -269,7 +269,11 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     var src_cstr = _fsl_str_to_cstr(hapi_link_source(lnk));
     var tgt_cstr = _fsl_str_to_cstr(hapi_link_target(lnk));
     var abs_src = _fsl_path_join(pkg_dir_abs, src_cstr);
-    var abs_tgt = _fsl_path_join(scope_root_abs, tgt_cstr);
+    # Lexically normalized (F-111): a target spelled with `//` or `./`
+    # made its directories under one spelling and recorded them under
+    # another, so unlink could not remove them. The parser has already
+    # refused `..`.
+    var abs_tgt = fsl_lexical_normalize(_fsl_path_join(scope_root_abs, tgt_cstr));
     var tgt_parent = _fsl_path_dirname(abs_tgt);
     var rel = fsl_link_text(abs_tgt, abs_src);
     # What this run writes: the relative text, or under --absolute (1.6.0)
@@ -291,6 +295,10 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     # scope the state of the target is not our business.
     if (cap_target_allowed(tgt_parent, scope_root_abs) == 0) {
         store64(plan + 32, LINK_ACT_ESCAPE);
+        # A path that cannot be followed at all — a symlink loop, a
+        # component hapi cannot probe — is refused the same way, but is
+        # not an escape, and HAPI_ALLOWED_ROOTS cannot help it (F-097).
+        if (fsl_resolve_path(tgt_parent) == 0) { store64(plan + 40, 1); }
         return plan;
     }
 
@@ -314,6 +322,21 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     if (fsl_lands_in(abs_tgt, pkg_dir_abs) == 1) {
         store64(plan + 32, LINK_ACT_INTO_PACKAGE);
         return plan;
+    }
+
+    # A target that is the audit trail, or a directory holding it, is
+    # hapi's own record (F-081): `--force` deleted the trail, or replaced
+    # a symlinked `~/.local/state` and moved it into the package, and a
+    # row for `.local` was planned as a create the trail's own mkdir then
+    # took first.
+    if (_hlnk_trail_lex != 0) {
+        var tphys = load64(plan + 48);
+        if (_fsl_within(_hlnk_trail_lex, fsl_lexical_normalize(abs_tgt)) == 1
+            || (tphys != 0 && _hlnk_trail_phys != 0 && _fsl_within(_hlnk_trail_phys, tphys) == 1)) {
+            store64(plan + 32, LINK_ACT_TRAIL);
+            store64(plan + 40, _hlnk_trail_lex);
+            return plan;
+        }
     }
 
     # A source that leads back to its own target would make the link
@@ -365,11 +388,16 @@ fn _hlnk_print_conflict(plan): i64 {
         eprint(rel, strlen(rel));
         _hlnk_eputs(")");
     } elif (action == LINK_ACT_CONFLICT_FILE) {
-        _hlnk_eputs("(existing regular file)");
+        if (fsl_is_regular(abs_tgt) == 1) { _hlnk_eputs("(existing regular file)"); }
+        else { _hlnk_eputs("(existing file, not a regular one: a FIFO, socket or device)"); }
     } elif (action == LINK_ACT_CONFLICT_DIR) {
         _hlnk_eputs("(existing directory)");
     } elif (action == LINK_ACT_ESCAPE) {
-        _hlnk_eputs("(resolves outside the scoped root)");
+        if (load64(plan + 40) == 1) {
+            _hlnk_eputs("(cannot be followed: a symlink loop, or a path hapi cannot probe)");
+        } else {
+            _hlnk_eputs("(resolves outside the scoped root)");
+        }
     } elif (action == LINK_ACT_NO_SOURCE) {
         var abs_src = load64(plan + 8);
         _hlnk_eputs("(source missing: ");
@@ -379,6 +407,11 @@ fn _hlnk_print_conflict(plan): i64 {
         var outer = load64(plan + 40);
         _hlnk_eputs("(beneath another row's target: ");
         if (outer != 0) { eprint(outer, strlen(outer)); }
+        _hlnk_eputs(")");
+    } elif (action == LINK_ACT_TRAIL) {
+        var tl = load64(plan + 40);
+        _hlnk_eputs("(the audit trail is at or beneath it: ");
+        if (tl != 0) { eprint(tl, strlen(tl)); }
         _hlnk_eputs(")");
     } elif (action == LINK_ACT_SOURCE_LOOP) {
         var ends = load64(plan + 40);
@@ -470,7 +503,24 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
         _hlnk_eputs("hapi: $HOME is unset; cannot resolve link targets\n");
         return Err(1);
     }
+    # A relative scope root put every target under the cwd (F-109): from
+    # another directory, link made `./home` and wrote there. Only an
+    # absolute HOME, or a --root already made absolute, is a scope root.
+    if (load8(scope_root) != 47) {
+        _hlnk_eputs("hapi: the scope root is not an absolute path: ");
+        _hlnk_eputs(scope_root);
+        _hlnk_eputs("\n");
+        return Err(1);
+    }
     var scope_root_abs = fsl_to_absolute(scope_root);
+    # An absent scope root whose parent is absent too would be made with
+    # its ancestors, outside the root that was granted (F-111).
+    if (hapi_exists(scope_root_abs) == 0 && hapi_exists(_fsl_path_dirname(scope_root_abs)) == 0) {
+        _hlnk_eputs("hapi: the scope root does not exist, nor its parent: ");
+        eprint(scope_root_abs, strlen(scope_root_abs));
+        _hlnk_eputs("\n  create it first; nothing was changed\n");
+        return Err(1);
+    }
 
     var links = hapi_mf_links(m);
     var nlinks = vec_len(links);
@@ -487,6 +537,23 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
     # says where every package's sources are; it is read once, and only
     # when a row reached through a symlink would write.
     var others = 0;
+    _hlnk_trail_lex = 0;
+    _hlnk_trail_phys = 0;
+    var tpath = audit_trail_path();
+    if (tpath != 0) {
+        _hlnk_trail_lex = fsl_lexical_normalize(tpath);
+        _hlnk_trail_phys = fsl_physical_target(tpath);
+    }
+    _hlnk_backup_phys = 0;
+    if (hapi_backup_dir() != 0) {
+        _hlnk_backup_phys = fsl_resolve_path(hapi_backup_dir());
+        if (_hlnk_backup_phys == 0) {
+            _hlnk_eputs("hapi: the --backup-to directory cannot be resolved: ");
+            eprint(hapi_backup_dir(), strlen(hapi_backup_dir()));
+            _hlnk_eputs("\n  (a file where a directory should be, or a loop); nothing was changed\n");
+            return Err(1);
+        }
+    }
     var i = 0;
     while (i < nlinks) {
         var p = _hlnk_plan_one(vec_get(links, i), pkg_dir_abs, scope_root_abs);
@@ -520,8 +587,7 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
         var act = load64(p + 32);
         if (act == LINK_ACT_CREATE) { create_count = create_count + 1; }
         elif (act == LINK_ACT_NOOP) { noop_count = noop_count + 1; }
-        elif (act == LINK_ACT_ERROR) { conflict_count = conflict_count + 1; }
-        else { conflict_count = conflict_count + 1; }
+        else { conflict_count = conflict_count + 1; }     # every refusal, ERROR included
         i = i + 1;
     }
 
@@ -531,17 +597,42 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
     # deleted a file outside $HOME before 1.0.8 — so this must be
     # reported on its own terms, pointing at `--root` instead.
     var escaped = 0;
+    var unfollowed = 0;
     var ke = 0;
     while (ke < nlinks) {
         var ple = vec_get(plans, ke);
         if (load64(ple + 32) == LINK_ACT_ESCAPE) {
-            if (escaped == 0) {
-                _hlnk_eputs("hapi: refusing to link outside the scoped root:\n");
-            }
-            _hlnk_print_conflict(ple);
-            escaped = 1;
+            if (load64(ple + 40) == 1) { unfollowed = unfollowed + 1; }
+            else { escaped = escaped + 1; }
         }
         ke = ke + 1;
+    }
+    if (escaped == 0 && unfollowed > 0) {
+        _hlnk_eputs("hapi: refusing to link: a target's path cannot be followed:\n");
+        var ku = 0;
+        while (ku < nlinks) {
+            var plu = vec_get(plans, ku);
+            if (load64(plu + 32) == LINK_ACT_ESCAPE) { _hlnk_print_conflict(plu); }
+            ku = ku + 1;
+        }
+        _hlnk_eputs("  a symlink loop, or a directory hapi cannot search, is on its path.\n");
+        _hlnk_eputs("  --force does NOT override this; nothing was changed.\n");
+        return Err(1);
+    }
+    if (escaped > 0) {
+        escaped = 0;
+        var kf = 0;
+        while (kf < nlinks) {
+            var plf = vec_get(plans, kf);
+            if (load64(plf + 32) == LINK_ACT_ESCAPE) {
+                if (escaped == 0) {
+                    _hlnk_eputs("hapi: refusing to link outside the scoped root:\n");
+                }
+                _hlnk_print_conflict(plf);
+                escaped = 1;
+            }
+            kf = kf + 1;
+        }
     }
     if (escaped == 1) {
         _hlnk_eputs("  scope: ");
@@ -690,6 +781,55 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
         return Err(1);
     }
 
+    # --backup-to's directory must not be a target, sit beneath one, or be
+    # in the package (F-084): its mkdir took a path a row was planned to
+    # create, or a snapshot of a 0600 secret landed in the package's git
+    # working tree.
+    if (_hlnk_backup_phys != 0) {
+        var bad = 0;
+        var rp = fsl_resolve_path(pkg_dir_abs);
+        if (rp != 0 && _fsl_within(_hlnk_backup_phys, rp) == 1) { bad = 1; }
+        var kb2 = 0;
+        while (kb2 < nlinks) {
+            var plb2 = vec_get(plans, kb2);
+            var pp = load64(plb2 + 48);
+            if (pp != 0 && _fsl_within(_hlnk_backup_phys, pp) == 1) { bad = 1; }
+            kb2 = kb2 + 1;
+        }
+        if (bad == 1) {
+            _hlnk_eputs("hapi: refusing to link `");
+            var bn = hapi_mf_name(m);
+            eprint(str_data(bn), str_len(bn));
+            _hlnk_eputs("` — the --backup-to directory is in the package, or at or\n");
+            _hlnk_eputs("  beneath a target this run would link: ");
+            eprint(_hlnk_backup_phys, strlen(_hlnk_backup_phys));
+            _hlnk_eputs("\n  choose a directory outside both; nothing was changed\n");
+            return Err(1);
+        }
+    }
+    # A dry run answers as the real run would (F-094): a snapshot it could
+    # not write there stops the real run.
+    if (hapi_dry_run() == 1 && force == 1 && _hlnk_backup_phys != 0) {
+        var needs = 0;
+        var kd = 0;
+        while (kd < nlinks) {
+            if (load64(vec_get(plans, kd) + 32) == LINK_ACT_CONFLICT_FILE) { needs = 1; }
+            kd = kd + 1;
+        }
+        if (needs == 1 && hapi_could_create_under(_fsl_path_join(_hlnk_backup_phys, "x")) == 0) {
+            _hlnk_eputs("hapi: the --backup-to directory is not writable: ");
+            eprint(_hlnk_backup_phys, strlen(_hlnk_backup_phys));
+            _hlnk_eputs("  (dry-run)\n");
+            return Err(1);
+        }
+    }
+    if (_hlnk_refuse_kind(m, plans, LINK_ACT_TRAIL,
+          "` — a target is the audit trail, or holds it:\n") == 1) {
+        _hlnk_eputs("  linking it would delete or move hapi's own record. --force\n");
+        _hlnk_eputs("  does NOT override this. Point the target elsewhere, or set\n");
+        _hlnk_eputs("  XDG_STATE_HOME to keep the trail out of the way.\n");
+        return Err(1);
+    }
     if (_hlnk_refuse_kind(m, plans, LINK_ACT_OTHER_PACKAGE,
           "` — a target resolves into another package's source:\n") == 1) {
         _hlnk_eputs("  a link that package made leads this target into its files.\n");
@@ -706,6 +846,19 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
         return Err(1);
     }
 
+    # A target hapi could not examine — a regular file where a directory
+    # is expected (ENOTDIR), a directory it cannot search (EACCES) — is
+    # refused on its own terms (F-076). Through 1.7.0 it sat in the
+    # conflict list, which advised --force, and --force then skipped it in
+    # silence and exited 0, the row neither linked nor reported.
+    if (_hlnk_refuse_kind(m, plans, LINK_ACT_ERROR,
+          "` — a target could not be examined:\n") == 1) {
+        _hlnk_eputs("  something on its path is not a directory hapi can search: a\n");
+        _hlnk_eputs("  file where a directory should be, or no permission. --force\n");
+        _hlnk_eputs("  does NOT override this; nothing was changed.\n");
+        return Err(1);
+    }
+
     # If any conflicts and --force isn't on, refuse and list them.
     if (conflict_count > 0 && force == 0) {
         _hlnk_eputs("hapi: refusing to link `");
@@ -715,7 +868,12 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
         fmt_int_fd(2, conflict_count);
         _hlnk_eputs(" conflict");
         if (conflict_count > 1) { _hlnk_eputs("s"); }
-        _hlnk_eputs(" (rerun with --force to override):\n");
+        if (_hlnk_in_sync == 1) {
+            # sync never overwrites; `sync --force` is a usage error (F-097).
+            _hlnk_eputs(" (sync never overwrites; `hapi link --force` on the package does):\n");
+        } else {
+            _hlnk_eputs(" (rerun with --force to override):\n");
+        }
         var k = 0;
         while (k < nlinks) {
             var pl = vec_get(plans, k);
@@ -765,6 +923,13 @@ fn hlnk_run_plans(run): i64 { return load64(run + 32); }
 
 # The abs_target of every row in the plan, for `sync --prune`.
 fn hlnk_plan_abs_target(plan): i64 { return load64(plan + 16); }
+fn hlnk_plan_place(plan): i64 { return load64(plan + 48); }
+
+# Set when this process removed links before a link run executes (sync
+# --prune): every row is then checked against its plan-time place, not
+# only those after the run's first write.
+var _hlnk_tree_changed = 0;
+fn hlnk_note_tree_changed(): i64 { _hlnk_tree_changed = 1; return 0; }
 
 # How many rows the run will write: creates, and with --force the
 # conflicts it replaces. Skipped when 0, so a no-op or a dry-run never
@@ -791,7 +956,7 @@ fn _hlnk_will_write(run, force): i64 {
 # instead of leaving a symlink on disk that no recovery verb can see
 # (F-018). `what` names the refused step. Returns 0, or 1 refused.
 fn hlnk_preflight(what): i64 {
-    var pf_t, pf_v = audit_preflight_r();
+    var pf_t, pf_v = audit_preflight_now_r();
     if (is_err_result(pf_t) == 1) {
         _hlnk_eputs("hapi: audit trail is not writable; refusing to ");
         _hlnk_eputs(what);
@@ -805,6 +970,68 @@ fn hlnk_preflight(what): i64 {
 
 # Write a planned run: each create (and, with --force, each replaced
 # conflict), one audit entry per link, then the summary line.
+# Does the trail already record this row's link for this package (F-079)?
+# The trail's last word on `abs_tgt` — the last line naming it — must be
+# this package's link or adopt. `trail` holds the trail's raw bytes; the
+# lines are matched on the exact bytes the writer emits for each field,
+# so a line hapi wrote is found without parsing the trail, which a warm
+# `sync` per package could not afford.
+fn _hlnk_recorded(trail, tlen, pkg, abs_tgt): i64 {
+    var nt = audit_field_bytes("abs_target", abs_tgt);
+    var np = audit_field_bytes("pkg", pkg);
+    if (nt == 0 || np == 0) { return 0; }
+    var at = _hlnk_last_at(trail, tlen, nt);
+    if (at < 0) { return 0; }
+    var ls = at;
+    while (ls > 0 && load8(trail + ls - 1) != 10) { ls = ls - 1; }
+    var le = at;
+    while (le < tlen && load8(trail + le) != 10) { le = le + 1; }
+    var ln = le - ls;
+    if (_hlnk_has_at(trail + ls, ln, np) == 0) { return 0; }
+    if (_hlnk_has_at(trail + ls, ln, "\"op\":\"link\"") == 1) { return 1; }
+    if (_hlnk_has_at(trail + ls, ln, "\"op\":\"adopt\"") == 1) { return 1; }
+    return 0;
+}
+
+# The offset of the last occurrence of `needle` in buf[0..n), or -1. A
+# warm run calls this once per linked row, over the whole trail, so it
+# skips instead of stepping: when the window at `i` fails, the byte at
+# `i` can only begin a match ending further left if it occurs at some
+# offset j >= 1 of the needle, so the window moves left by the smallest
+# such j, or by the needle's whole length when there is none. A byte-
+# by-byte scan made a warm `sync` 1.8x slower than 1.7.0.
+var _hlnk_shift = 0;          # 256 shift distances, allocated once
+
+fn _hlnk_last_at(buf, n, needle): i64 {
+    var k = strlen(needle);
+    if (k < 2) { return 0 - 1; }
+    if (_hlnk_shift == 0) { _hlnk_shift = alloc(256 * 8); }
+    var c = 0;
+    while (c < 256) { store64(_hlnk_shift + c * 8, k); c = c + 1; }
+    var j = k - 1;
+    while (j >= 1) { store64(_hlnk_shift + load8(needle + j) * 8, j); j = j - 1; }
+    var first = load8(needle);
+    var i = n - k;
+    while (i >= 0) {
+        var b = load8(buf + i);
+        if (b == first) {
+            if (memeq(buf + i, needle, k) == 1) { return i; }
+        }
+        i = i - load64(_hlnk_shift + b * 8);
+    }
+    return 0 - 1;
+}
+
+fn _hlnk_has_at(buf, n, needle): i64 {
+    var k = strlen(needle);
+    var i = 0;
+    while (i + k <= n) {
+        if (load8(buf + i) == load8(needle) && memeq(buf + i, needle, k) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Replace what is at `abs_tgt` with a symlink to `text`, in one step: the
 # link is made under a temporary name beside it, then renamed over it.
 # Either the old file is still there, untouched, or the new link is. The
@@ -835,6 +1062,9 @@ fn _hlnk_execute(run, force): i64 {
     var pkg_name_cstr = _fsl_str_to_cstr(hapi_mf_name(m));
     var pkg_ver_cstr = _fsl_str_to_cstr(hapi_mf_version(m));
     var written = 0;
+    var claimed = 0;
+    var trail = 0 - 1;            # the trail's bytes, read at the first no-op row
+    var tlen = 0;
 
     var j = 0;
     while (j < nlinks) {
@@ -843,6 +1073,50 @@ fn _hlnk_execute(run, force): i64 {
         var abs_tgt = load64(pl + 16);
         var abs_src = load64(pl + 8);
         var rel = load64(pl + 24);
+
+        # A row already linked as hapi writes it, which the trail does not
+        # record for this package, is recorded now (F-079). Through 1.7.0
+        # a no-op wrote nothing, so after a trail was lost (F-006), a
+        # `[package].name` was renamed or `$HOME` moved, no verb ever
+        # recorded the links again: unlink found none, prune removed none,
+        # and list credited the old name. The proof is the one removal
+        # uses: the link's text is exactly what hapi writes for this row.
+        # The next run finds it recorded and writes nothing.
+        if (act == LINK_ACT_NOOP) {
+            if (trail == 0 - 1) {
+                trail = 0;
+                var tp = audit_trail_path();
+                if (tp != 0) {
+                    if (link_probe_kind(link_probe(tp)) == HAPI_LP_ABSENT) {
+                        trail = alloc(1);
+                        tlen = 0;
+                    } else {
+                        trail = manifest_read(tp, &tlen);
+                    }
+                }
+            }
+            if (trail != 0 && _hlnk_recorded(trail, tlen, pkg_name_cstr, abs_tgt) == 0) {
+                _hlnk_puts("  ~ ");
+                print(abs_tgt, strlen(abs_tgt));
+                _hlnk_puts("  (already linked; now recorded");
+                if (hapi_dry_run() == 1) { _hlnk_puts("; dry-run"); }
+                _hlnk_puts(")\n");
+                if (hapi_dry_run() == 0) {
+                    var clnk = load64(pl);
+                    var cl_t, cl_v = audit_append_link_full_r(pkg_name_cstr, pkg_ver_cstr,
+                      manifest_hash,
+                      _fsl_str_to_cstr(hapi_link_source(clnk)), _fsl_str_to_cstr(hapi_link_target(clnk)),
+                      abs_src, abs_tgt, 0, 0, fsl_shape_of(load64(pl + 40)));
+                    if (is_err_result(cl_t) == 1) {
+                        _hlnk_eputs("hapi: audit-trail write failed recording ");
+                        eprint(abs_tgt, strlen(abs_tgt));
+                        _hlnk_eputs("\n  the link is as it was; the trail still does not record it\n");
+                        return 1;
+                    }
+                }
+                claimed = claimed + 1;
+            }
+        }
 
         var should_create = 0;
         var replace = 0;
@@ -858,13 +1132,14 @@ fn _hlnk_execute(run, force): i64 {
         # `alias/inner` land wherever the new `.x` points. So once
         # anything is written, each row's physical location is checked
         # again, and the run stops before a row that moved.
-        if ((should_create == 1 || forced == 1) && written > 0 && hapi_dry_run() == 0) {
+        if ((should_create == 1 || forced == 1) && (written > 0 || _hlnk_tree_changed == 1)
+            && hapi_dry_run() == 0) {
             var was = load64(pl + 48);
             var now = fsl_physical_target(abs_tgt);
             if (was == 0 || now == 0 || _hlnk_cstr_eq(was, now) == 0) {
                 _hlnk_eputs("hapi: stopped before ");
                 eprint(abs_tgt, strlen(abs_tgt));
-                _hlnk_eputs(": a link this run made changed where it leads\n");
+                _hlnk_eputs(": an earlier step of this run changed where it leads\n");
                 if (was != 0) { _hlnk_eputs("  planned at "); eprint(was, strlen(was)); _hlnk_eputs("\n"); }
                 if (now != 0) { _hlnk_eputs("  now at     "); eprint(now, strlen(now)); _hlnk_eputs("\n"); }
                 _hlnk_eputs("  the rows before it were linked and recorded; nothing else changed\n");
@@ -879,7 +1154,7 @@ fn _hlnk_execute(run, force): i64 {
             # so the bytes survive without our help.
             if (act == LINK_ACT_CONFLICT_FILE && hapi_backup_dir() != 0) {
                 backup_path = hapi_backup_compose_path(
-                  hapi_backup_dir(), pkg_name_cstr, abs_tgt);
+                  _hlnk_backup_place(), pkg_name_cstr, abs_tgt);
                 if (hapi_dry_run() == 0) {
                     var brc = hapi_backup_copy(abs_tgt, backup_path);
                     if (brc < 0) {
@@ -936,6 +1211,9 @@ fn _hlnk_execute(run, force): i64 {
                         _hlnk_eputs("hapi: could not replace ");
                         eprint(abs_tgt, strlen(abs_tgt));
                         _hlnk_eputs(" (--force); it was left as it was\n");
+                        # The file is still there, so its snapshot is not
+                        # needed, and no entry would name it (F-084).
+                        if (backup_path != 0) { hapi_unlink(backup_path); }
                         return 1;
                     }
                 } else {
@@ -1005,7 +1283,13 @@ fn _hlnk_execute(run, force): i64 {
     fmt_int(nlinks);
     _hlnk_puts(" (");
     fmt_int(noop_count);
-    _hlnk_puts(" already up-to-date)\n");
+    _hlnk_puts(" already up-to-date");
+    if (claimed > 0) {
+        _hlnk_puts(", ");
+        fmt_int(claimed);
+        _hlnk_puts(" now recorded");
+    }
+    _hlnk_puts(")\n");
     return 0;
 }
 
@@ -1013,7 +1297,7 @@ fn cmd_link(pkg_arg, force): i64 {
     var pr_t, pr_v = _hlnk_plan_run(pkg_arg, force);
     if (is_err_result(pr_t) == 1) { return pr_v; }
     var run = pr_v;
-    if (hapi_dry_run() == 0 && _hlnk_will_write(run, force) > 0) {
+    if (_hlnk_will_write(run, force) > 0) {
         if (hlnk_preflight("link") != 0) { return 1; }
     }
     return _hlnk_execute(run, force);

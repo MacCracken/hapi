@@ -10,7 +10,8 @@ line (pin `6.7.18`). A 14-unit audit with paired verifiers
 ([2026-10-29 audit](../audit/2026-10-29-audit.md)) found the resolver
 dropping the first byte of every relative symlink text (F-065), which had
 left the capability boundary open for relative links since 1.1.1. 1.7.1
-repairs the audit's tier 1, F-064 – F-075, and adds no surface:
+repairs all three of the audit's tiers, F-064 – F-116, and adds no verb
+or flag. Tier 1 is containment and data loss:
 
 - an unprobeable component ends the walk (F-066);
 - rows are compared at their physical places (F-067);
@@ -24,10 +25,29 @@ repairs the audit's tier 1, F-064 – F-075, and adds no surface:
 - `link` hashes what it parsed (F-075);
 - the suites clean up after themselves (F-064).
 
+Tier 2 (F-076 – F-090) is correctness and error handling. A probe that
+fails is never read as absent, a short trail write is taken back, a
+closed output pipe no longer kills hapi, `rollback --to` honours only a
+label's newest checkpoint, and an adopt's reversal finds its manifest.
+Two behaviours changed by the maintainer's choice:
+
+- `unlink` retires a link it finds already gone with an `op:unlink`
+  carrying `"absent":"1"`, which rollback never re-creates (F-078);
+- `link` records a link hapi wrote that the trail does not record for
+  the package (F-079). A lost trail (F-006), a renamed package or a
+  moved `$HOME` heals on the next `sync`.
+
+Tier 3 (F-091 – F-116) covers robustness, messages, refactors, test gaps
+and CI. It refuses FIFOs instead of waiting on them and rejects control
+bytes in manifest values. A `--dry-run` fails where the real run's trail
+write would. The trail's `\u` escapes are decoded, and a rewritten
+manifest keeps its mode and refuses a hard link.
+
 Removal still accepts the text 1.1.1–1.7.0 wrote under a relative
-symlinked parent. Tiers 2 and 3 are planned as 1.7.2 and 1.7.3. Both
-suites pass on x86_64 and on aarch64 under qemu, and `tests/agnos.tcyr`
-also passes on agnos under mirshi. CI and release run on `ubuntu-26.04`.
+symlinked parent. Seven items are accepted, and the roadmap tracks them.
+Both suites pass on x86_64 and on aarch64 under qemu, and
+`tests/agnos.tcyr` also passes on agnos under mirshi. CI and release run
+on `ubuntu-26.04`.
 
 Before it, 1.7.0 added `hapi fmt` ([ADR 0008](../adr/0008-hapi-fmt.md)). Before it, 1.6.0 added `--absolute` (a link of either shape is hapi's; the
 trail records `"shape":"absolute"`). 1.5.0 added `status --quiet`, `checkpoint --label` and
@@ -152,8 +172,9 @@ denial (1). `status` exits 1 on drift, which is an assertion, not a
 predicate; `status --quiet` (1.5.0) is the predicate.
 
 Two accepted keys do nothing, and a state snapshot is the right place to
-say so: `--backup-to` is **inert on `sync`** (no `--force` there, so no
-destructive step to snapshot — F-026), and `package.ignore` is parsed,
+say so: `--backup-to` is **inert on `sync`** (sync never overwrites: its
+`--force` only lifts `--prune`'s limit, so no destructive step to snapshot
+— F-026), and `package.ignore` is parsed,
 echoed by `inspect` and folded into the manifest hash but honoured by no
 verb (**reserved until v2.0** — F-025, ADR 0001).
 
@@ -213,8 +234,6 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   adopt / unadopt / rollback-marker entries; manifest hash via
   `hapi_mf_canonicalize` + sha1 with `sha1c:` prefix as of
   v0.8.0; XDG path resolution with test override hook).
-  `audit_manifest_hash_raw(path)` retains the v0.x `sha1:`
-  raw-bytes variant for trail-format diagnostics.
   `audit_report_unwritten` is the F-061 report for a mutation whose
   entry the trail refused after the pre-flight passed, and the test hook
   `audit_test_fail_appends` opens exactly that window.
@@ -315,8 +334,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   manifest, re-serialize to fixed byte form, sha1 the result.
   Pre-v0.8.0 entries written under the legacy `sha1:` raw-bytes
   prefix continue to be tolerated by readers per the migration
-  contract. `audit_manifest_hash_raw(path)` retains the legacy
-  computation for diagnostics.
+  contract.
 - **Entry ops**: `link`, `unlink`, `adopt`, `unadopt`,
   `rollback-marker`
 - **Additive fields**: `backup_path` on `link` / `adopt` entries
@@ -329,21 +347,23 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   The reader also records each entry's line (`hae_lineno`). `shape`
   (1.6.0): `"absolute"` on `link` / `adopt` entries that wrote an
   absolute link text and `unlink` / `unadopt` entries that removed one;
-  absent for the relative default.
+  absent for the relative default. `absent` (1.7.1): `"1"` on an
+  `unlink` entry that retires a link already gone; rollback skips it.
 - **Readers**: `unlink`, `rollback`, `list`, `status`, `sync`
   — every verb that consults the trail walks via
   `src/audit_reader.cyr`.
-- **Recovery boundary (F-006)**: the trail is ephemeral local
-  state — a wiped `$XDG_STATE_HOME` (e.g. a drive move) leaves it
-  empty even when the relative links survive, and an idempotent
-  re-`sync` does not rebuild it. `status` is the post-recovery
-  source of truth, not `list` / `rollback`. Accepted boundary —
-  [`docs/audit/2026-05-24-audit.md`](../audit/2026-05-24-audit.md),
-  [`issues/2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](issues/2026-05-24-audit-trail-lost-on-state-dir-wipe.md).
+- **Recovery (F-006, closed by F-079 in 1.7.1)**: the trail is local
+  state, and a wiped `$XDG_STATE_HOME` empties it even when the links
+  survive. Since 1.7.1 the next `link` or `sync` records each link whose
+  text is exactly what hapi writes for the row, so the trail is rebuilt
+  ([issue, archived](issues/archived/2026-05-24-audit-trail-lost-on-state-dir-wipe.md)).
+- **One environment, one trail**: the location is read per run, so a
+  shell that sets `XDG_STATE_HOME` and a cron job that does not keep two
+  trails, neither seeing the other's (ADR 0002 § Location).
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. **1,797 assertions across 172 test
+- `tests/hapi.tcyr` — primary suite. **2,052 assertions across 207 test
   groups.** Re-derive rather than recount by hand — these figures have
   rotted twice, and the per-tier breakdown below drifted 16 groups
   short before the 2026-08-26 sweep:
@@ -356,16 +376,17 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   ```
 
   Groups by tier (first word of the group name), as measured at 1.7.1:
-  link 18, rollback 13, cli 13, sync 11, manifest 10, cap 9,
-  manifest_write 8, check 8, backup 7, adopt 8, status 6, fs_link 6,
-  dry-run 6, audit 6, `--absolute` 6, unlink 5, canonical 5,
-  audit_reader 5, fmt 4, created_dir 4, audit-repair 4, list 3, scratch 2,
-  resolve 2, checkpoint 2, agnos_compat 1. The two `scratch` groups run
+  link 26, rollback 16, manifest 14, cli 14, sync 13, manifest_write 9,
+  check 9, cap 9, adopt 9, unlink 8, status 7, fs_link 7, backup 7,
+  audit 7, dry-run 6, audit_reader 6, `--absolute` 6, fmt 5, canonical 5,
+  created_dir 4, audit-repair 4, list 3, scratch 2, resolve 2,
+  checkpoint 2, `--backup-to` 2, and one each of main, guards,
+  agnos_compat, adopt's and `--dry-run`. The two `scratch` groups run
   last: they remove every directory the run made under /tmp and assert
   that nothing of it is left (F-064, `tests/scratch.cyr`). The `cli` tier (1.2.0) runs `hapi_cli_run` with a
   synthetic argv and its stdout / stderr captured through `dup2`, so the
   v1.0 messages are asserted byte for byte.
-- `tests/agnos.tcyr` — **98 assertions across 15 groups**, all
+- `tests/agnos.tcyr` — **100 assertions across 16 groups**, all
   target-neutral: the agnos-conditional paths (no-follow open,
   exclusive create, absent trail, trail and manifest round trips,
   backup copy, the fs shims, `link` / `status` / `unlink` with the
@@ -383,7 +404,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 beside it as shell harnesses. **CI runs both.**
 
 The suite itself also runs on aarch64 — `cyrius test --aarch64` under
-`qemu-aarch64` (1,797 / 1,797 and 98 / 98 at 1.7.1). **CI runs it** as of 1.0.12
+`qemu-aarch64` (2,052 / 2,052 and 100 / 100 at 1.7.1). **CI runs it** as of 1.0.12
 (`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
 qemu fails the step, it never skips). Before that the aarch64 step was
 compile-only, which is how the `O_NOFOLLOW` literal went unseen from
@@ -395,8 +416,11 @@ too.
   while hapi is syscall-only by rule. Measured before the fix: 16
   concurrent adopts → 16 files moved, 16 symlinks, 16 trail entries and
   **1** manifest row; 16/16 after. Since 1.7.0 it also races 16 adopts
-  against four `fmt` loops on one package; without `fmt`'s lock it loses
-  1 – 3 rows a run.
+  against four `fmt` loops on one package. One round missed a lockless
+  `fmt` in 5 of 12 runs, so since 1.7.1 it runs five, and a lockless
+  `fmt` fails 8 runs of 8. Since 1.7.1 it also races two adopts that
+  derive one package-side name (F-071), `list` against appends (F-102),
+  and a closed output pipe (F-085); each section fails on 1.7.0.
 - `scripts/agnos-smoke.sh` — runs the `--agnos` build under mirshi.
   Five checks: the binary loads and the agnos arg reader delivers argv,
   the envp gap is asserted rather than assumed, a relative package

@@ -33,19 +33,7 @@ fn _hfm_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hfm_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
 
 # Same resolver as status / check — a *.cyml path or a package directory.
-fn _hfm_resolve_manifest(arg): i64 {
-    var n = strlen(arg);
-    if (n >= 5) {
-        if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
-            && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
-            && load8(arg + n - 1) == 108) {
-            return fsl_canonical_arg(arg);
-        }
-    }
-    var abs_arg = fsl_canonical_arg(arg);
-    if (abs_arg == 0) { return 0; }    # relative, with no knowable cwd (F-027)
-    return _fsl_path_join(abs_arg, "hapi.cyml");
-}
+fn _hfm_resolve_manifest(arg): i64 { return fsl_manifest_of_arg(arg); }
 
 # Print each recorded drop as `  line N: <what><tail>`.
 fn _hfm_print_drops(drops, to_err, tail): i64 {

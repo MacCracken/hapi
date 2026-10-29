@@ -92,7 +92,10 @@ rm -rf "$PKG" "$SMOKE_HOME"; PKG=""; SMOKE_HOME=""
 #    silently.
 out=$(run link ./relative-pkg | head -2)
 case "$out" in
-    *"cannot resolve a relative package path"*|*"HOME is unset"*|*"could not read manifest"*|*"no such"*)
+    # Only a refusal that names the cause (F-112): "could not read manifest"
+    # or "no such" also fit a relative path mis-resolved against `/`, so a
+    # getcwd that fell back to the root passed this check.
+    *"cannot resolve a relative package path"*|*"HOME is unset"*)
         echo "  ok    relative package argument refused, not silently mis-resolved" ;;
     *)
         echo "  FAIL  relative argument produced: '$out'"; FAIL=1 ;;

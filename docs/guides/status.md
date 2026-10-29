@@ -23,11 +23,16 @@ hapi status <package-dir|hapi.cyml> [--quiet] [--root <path>]
 |----------------|--------------------------------------------------------|
 | `OK`           | symlink points where `hapi link` would write, in either shape: relative, or absolute (`--absolute`, 1.6.0) |
 | `BROKEN`       | symlink text is right, but the **source is gone**      |
-| `MISSING`      | no file at the target                                  |
+| `MISSING`      | no file at the target; since 1.7.1 the row adds `(source missing: <path>)` when the source is gone too, so `sync` would refuse it rather than re-create it |
 | `WRONG`        | symlink points elsewhere                               |
 | `FILE`         | a regular file lives at the target                     |
 | `DIR`          | a directory lives at the target                        |
-| `ERROR`        | probe failed (permission, etc.)                        |
+| `REFUSED`      | the target's parent resolves outside the scope root, or cannot be followed, so `link` refuses the row (1.7.1) |
+| `ERROR`        | probe failed (permission, etc.), of the target or, since 1.7.1, of a correct link's source |
+
+Through 1.7.0 `status` read the target alone. A row whose parent led
+outside the scope showed `OK` or `MISSING`, and a source hapi could not
+probe showed `BROKEN`, which `--quiet` let pass (F-108).
 
 **After upgrading to 1.7.1**, a link an older hapi made under a *relative*
 symlinked parent (`~/.config -> dotfiles/config`) may show `WRONG`.
@@ -72,15 +77,15 @@ Exit code 1 communicates drift; the next call should be
 |------|---------------------------------------------------------------|
 | 0    | every row classified `OK`                                     |
 | 1    | one or more rows drifted, or manifest parse failed            |
-| 2    | bad usage (no path argument)                                  |
+| 2    | bad usage (no path argument, or an empty one)                 |
 
 With `--quiet` (1.5.0), drift no longer fails:
 
 | code | meaning                                                       |
 |------|---------------------------------------------------------------|
 | 0    | the rows were checked, drifted or not                         |
-| 1    | an actual error: a manifest that will not resolve or parse, `$HOME` unset, or a target that could not be checked (an `ERROR` row; one line on stderr says how many) |
-| 2    | bad usage (no path argument)                                  |
+| 1    | an actual error: a manifest that will not resolve or parse, `$HOME` unset or not absolute, or a row that could not be checked (an `ERROR` or, since 1.7.1, a `REFUSED` row; a line on stderr for each kind says how many) |
+| 2    | bad usage (no path argument, or an empty one)                 |
 
 ## Exit-1 is an assertion, not a predicate
 
@@ -115,8 +120,11 @@ without writing anything, which is exactly what a pre-flight
 wants:
 
 ```sh
-hapi link --dry-run pkg && hapi link --force pkg   # composes
+hapi link --dry-run --force pkg && hapi link --force pkg   # composes
 ```
+
+The dry run must carry the same flags as the real run: without `--force`
+it refuses the conflicts the real run would replace.
 
 Rule of thumb: reach for `status` when you want *"is this clean?"*,
 `status --quiet` when you want to *see* the drift without failing on it,

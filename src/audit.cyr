@@ -24,6 +24,7 @@ include "lib/sha1.cyr"
 include "lib/chrono.cyr"
 include "lib/result.cyr"
 include "src/manifest.cyr"
+include "src/dry_run.cyr"      # audit_preflight_now_r
 
 enum HapiAuditError {
     HapiAuditMkdirFailed;
@@ -239,6 +240,20 @@ fn _audit_emit_field(out, pos_ptr, cap, key, value): i64 {
     return 0;
 }
 
+# The exact bytes the writer emits for the field `key` = `value`:
+# `"key":"value"`, escaped. A reader that only needs to find a field can
+# search for these instead of parsing every line (hlnk_recorded).
+fn audit_field_bytes(key, value): i64 {
+    var cap = 16 + strlen(key) + 6 * _audit_vlen(value);
+    var out = alloc(cap + 1);
+    var pos = 0;
+    _audit_ovf = 0;
+    _audit_emit_field(out, &pos, cap, key, value);
+    if (_audit_ovf == 1) { return 0; }
+    store8(out + pos, 0);
+    return out;
+}
+
 fn _audit_emit_comma(out, pos_ptr, cap): i64 {
     return _audit_put8(out, pos_ptr, cap, 44);
 }
@@ -276,6 +291,16 @@ fn audit_entry_size(pkg, pkg_version, manifest_hash,
 fn _audit_format_link_op(out, cap, op, pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target,
   backup_path, created_dir, shape): i64 {
+    return _audit_format_link_op_x(out, cap, op, pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, backup_path, created_dir, shape, 0);
+}
+
+# _audit_format_link_op, plus `absent` (1.7.1): 1 writes "absent":"1" on
+# an op:unlink that retires a link already gone, which rollback never
+# re-creates.
+fn _audit_format_link_op_x(out, cap, op, pkg, pkg_version, manifest_hash,
+  source, target, abs_source, abs_target,
+  backup_path, created_dir, shape, absent): i64 {
     var pos = 0;
     _audit_ovf = 0;
     var ts = iso8601_now();
@@ -314,6 +339,12 @@ fn _audit_format_link_op(out, cap, op, pkg, pkg_version, manifest_hash,
         _audit_emit_comma(out, &pos, cap);
         _audit_emit_field(out, &pos, cap, "shape", shape);
     }
+    # 1.7.1 (ADR 0002 addendum): "1" on an op:unlink that retires a link
+    # already gone; no field otherwise.
+    if (absent == 1) {
+        _audit_emit_comma(out, &pos, cap);
+        _audit_emit_field(out, &pos, cap, "absent", "1");
+    }
     _audit_put8(out, &pos, cap, 125);         # }
     _audit_put8(out, &pos, cap, 10);          # \n
     if (_audit_ovf == 1) { return 0 - 1; }
@@ -340,47 +371,6 @@ fn audit_format_link_created(out, cap, pkg, pkg_version, manifest_hash,
     return _audit_format_link_op(out, cap, "link",
       pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target, backup_path, created_dir, 0);
-}
-
-# A link entry with every additive field: `created_dir` (1.4.0) and
-# `shape` (1.6.0; "absolute", or 0 for the relative default).
-fn audit_format_link_full(out, cap, pkg, pkg_version, manifest_hash,
-  source, target, abs_source, abs_target,
-  backup_path, created_dir, shape): i64 {
-    return _audit_format_link_op(out, cap, "link",
-      pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, backup_path, created_dir, shape);
-}
-
-# Compose an unlink entry. Same shape as link with op="unlink".
-# No `backup_path` field on unlink — there's no destructive
-# overwrite to snapshot.
-fn audit_format_unlink(out, cap, pkg, pkg_version, manifest_hash,
-  source, target, abs_source, abs_target): i64 {
-    return _audit_format_link_op(out, cap, "unlink",
-      pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, 0, 0, 0);
-}
-
-# Compose an adopt entry. Same shape as link with op="adopt".
-# Per ADR 0004 adopt records as a single atomic entry.
-# `backup_path` is an optional additive field as on link.
-fn audit_format_adopt(out, cap, pkg, pkg_version, manifest_hash,
-  source, target, abs_source, abs_target,
-  backup_path): i64 {
-    return _audit_format_link_op(out, cap, "adopt",
-      pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, backup_path, 0, 0);
-}
-
-# Compose an unadopt entry — the rollback-reverse of adopt.
-# Same shape; op="unadopt". No backup_path field — rollback
-# reverses a move; nothing is destructively overwritten.
-fn audit_format_unadopt(out, cap, pkg, pkg_version, manifest_hash,
-  source, target, abs_source, abs_target): i64 {
-    return _audit_format_link_op(out, cap, "unadopt",
-      pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, 0, 0, 0);
 }
 
 # Compose a rollback-marker entry. Minimal fields — just `ts`
@@ -462,7 +452,7 @@ fn _audit_append_durable(path, buf, n): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     flags = flags | O_APPEND;
     #endif
-    var fd = file_open(path, flags, 0x1A4);
+    var fd = hapi_open_regular(path, flags, 0x1A4);    # F-091
     if (fd < 0) { return fd; }
     # The lock is what makes the append atomic on agnos (no AO_APPEND
     # there), so an append without it is refused, not attempted. agnos's
@@ -473,6 +463,13 @@ fn _audit_append_durable(path, buf, n): i64 {
     }
 
     var end = xlseek(fd, 0, 2);                 # SEEK_END
+    # A failed seek would write at offset 0, over the trail's head, on
+    # agnos, which has no O_APPEND (F-103).
+    if (end < 0) {
+        file_unlock(fd);
+        file_close(fd);
+        return 0 - 5;
+    }
     if (end > 0) {
         var probe = alloc(1);
         xlseek(fd, end - 1, 0);                 # SEEK_SET
@@ -495,13 +492,47 @@ fn _audit_append_durable(path, buf, n): i64 {
     var w = file_write(fd, buf, n);
     var frc = 0;
     if (w == n) { frc = xfsync(fd); }
+    # An append that did not complete, or whose fsync failed, is taken
+    # back (F-082): the trail is cut to the size it had, under the lock
+    # still held. Through 1.7.0 a short write left hapi's own partial
+    # line, so every later write refused the torn tail; and an fsync
+    # failure left a whole entry for a mutation its caller then undid.
+    # agnos has no ftruncate, and keeps 1.7.0's behaviour.
+    if (w != n || frc < 0) {
+        if (w > 0) {
+            sys_ftruncate(fd, end);
+            xfsync(fd);
+        }
+    }
     file_unlock(fd);
     var crc = file_close(fd);
     if (w < 0) { return w; }
     if (w != n) { return 0 - 5; }
     if (frc < 0) { return frc; }
-    if (crc < 0) { return crc; }
+    # The trail's first write made the file: its name is durable only
+    # once its directory is (F-103).
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (end == 0) { _audit_fsync_parent(path); }
+    #endif
+    # A close error after a complete, fsynced write does not undo it: the
+    # entry is on disk, and taking the mutation back would part the trail
+    # from the filesystem (F-082).
     return w;
+}
+
+fn _audit_fsync_parent(path): i64 {
+    var n = strlen(path);
+    var cut = n - 1;
+    while (cut > 0 && load8(path + cut) != 47) { cut = cut - 1; }
+    if (cut <= 0) { return 0; }
+    var dir = alloc(cut + 1);
+    memcpy(dir, path, cut);
+    store8(dir + cut, 0);
+    var dfd = file_open(dir, O_RDONLY, 0);
+    if (dfd < 0) { return dfd; }
+    xfsync(dfd);
+    file_close(dfd);
+    return 0;
 }
 
 # Can the trail be appended to at all? Opens, locks, runs the torn-tail
@@ -514,6 +545,38 @@ fn audit_preflight_r(): Result {
     var rc = _audit_append_durable(audit_trail_path(), "", 0);
     if (rc < 0) { return Err(HapiAuditWriteFailed); }
     return Ok(0);
+}
+
+# The pre-flight for a --dry-run (F-094): would the trail take a write?
+# Nothing is created or written. An existing trail must open for writing
+# and end on a whole line; an absent one must have a directory it could
+# be made in. Through 1.7.0 a dry run skipped the pre-flight, so it
+# exited 0 where the real run refused an unwritable or torn trail.
+fn audit_preflight_dry_r(): Result {
+    var path = audit_trail_path();
+    if (path == 0) { return Err(HapiAuditMkdirFailed); }
+    if (hapi_exists(path) == 0) {
+        if (hapi_could_create_under(path) == 1) { return Ok(0); }
+        return Err(HapiAuditMkdirFailed);
+    }
+    var fd = hapi_open_regular(path, O_RDWR, 0);
+    if (fd < 0) { return Err(HapiAuditWriteFailed); }
+    var end = xlseek(fd, 0, 2);
+    var ok = 1;
+    if (end > 0) {
+        var probe = alloc(1);
+        xlseek(fd, end - 1, 0);
+        if (file_read(fd, probe, 1) != 1 || load8(probe) != 10) { ok = 0; }
+    }
+    file_close(fd);
+    if (ok == 0) { return Err(HapiAuditWriteFailed); }
+    return Ok(0);
+}
+
+# The pre-flight for this run: the dry one under --dry-run (F-094).
+fn audit_preflight_now_r(): Result {
+    if (hapi_dry_run() == 1) { return audit_preflight_dry_r(); }
+    return audit_preflight_r();
 }
 
 # Test hook: when 1, every append is refused as a failed write, while the
@@ -609,11 +672,19 @@ fn audit_append_unlink_shaped_r(pkg, pkg_version, manifest_hash,
     return _audit_append_bytes(buf, n);
 }
 
-fn audit_append_adopt_r(pkg, pkg_version, manifest_hash,
-  source, target, abs_source, abs_target,
-  backup_path): Result {
-    return audit_append_adopt_shaped_r(pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, backup_path, 0);
+# An op:unlink that retires a link already gone (F-078): `unlink` and
+# `sync --prune` found the target absent. It records that hapi no longer
+# claims the link, so `list` and `unlink` stop counting it, and its
+# `absent` field tells rollback there is nothing to re-create: the link
+# was gone before this run.
+fn audit_append_unlink_absent_r(pkg, pkg_version, manifest_hash,
+  source, target, abs_source, abs_target): Result {
+    var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, 0) + 48;
+    var buf = alloc(cap);
+    var n = _audit_format_link_op_x(buf, cap, "unlink", pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, 0, 0, 0, 1);
+    return _audit_append_bytes(buf, n);
 }
 
 # An adopt entry with `shape` (1.6.0): "absolute" under `adopt --absolute`.
@@ -628,12 +699,6 @@ fn audit_append_adopt_shaped_r(pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target,
       backup_path, 0, shape);
     return _audit_append_bytes(buf, n);
-}
-
-fn audit_append_unadopt_r(pkg, pkg_version, manifest_hash,
-  source, target, abs_source, abs_target): Result {
-    return audit_append_unadopt_shaped_r(pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, 0);
 }
 
 # An unadopt entry with `shape` (1.6.0), as on unlink.
@@ -665,11 +730,9 @@ fn audit_append_marker_r(label, from): Result {
 # 0 if the manifest doesn't parse or read fails.
 #
 # Per ADR 0002, the canonical hash makes cosmetic edits (whitespace,
-# comments, link-row reordering) produce the same hash. The
-# previous variant `audit_manifest_hash_raw(path)` (sha1 over
-# raw file bytes; prefix `sha1:`) is kept for trail-format
-# diagnostics; new entries use the canonical hash. Readers
-# tolerate both prefixes during the M7 → M8 transition.
+# comments, link-row reordering) produce the same hash. The raw-bytes
+# `sha1:` variant had no caller and was removed in 1.7.1; no reader
+# inspects a hash's prefix.
 fn audit_manifest_hash(path): i64 {
     var mr_t, mr_v = hapi_mf_parse_file_r(path);
     if (is_err_result(mr_t) == 1) { return 0; }
@@ -712,33 +775,3 @@ fn audit_manifest_hash_of(m): i64 {
     return out;
 }
 
-# Legacy raw-bytes hash. `sha1:` + 40 hex chars over the file's
-# raw bytes (no parse, no canonicalization). Kept for trail-
-# format diagnostics — a reader walking pre-M7 entries that
-# wants to re-verify the hash against the on-disk file uses
-# this. Returns 0 on read failure.
-fn audit_manifest_hash_raw(path): i64 {
-    var buf = alloc(262144);
-    var n = file_read_all(path, buf, 262144);
-    if (n <= 0) { return 0; }
-
-    var digest[20];
-    sha1(buf, n, &digest);
-
-    var out = alloc(46);
-    var prefix = "sha1:";
-    memcpy(out, prefix, 5);
-    var i = 0;
-    while (i < 20) {
-        var b = load8(&digest + i);
-        var hi = b / 16;
-        var lo = b - hi * 16;
-        if (hi < 10) { store8(out + 5 + i * 2, 48 + hi); }
-        else { store8(out + 5 + i * 2, 87 + hi); }
-        if (lo < 10) { store8(out + 5 + i * 2 + 1, 48 + lo); }
-        else { store8(out + 5 + i * 2 + 1, 87 + lo); }
-        i = i + 1;
-    }
-    store8(out + 45, 0);
-    return out;
-}

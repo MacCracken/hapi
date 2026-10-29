@@ -62,6 +62,22 @@ fn _fsl_agnos_parent_is_dir(path): i64 {
 # but not a symlink" signal. We follow up with a directory probe
 # (open + getdents) to split FILE vs DIRECTORY, because --force
 # treats those differently.
+# link_probe's readlink and stat buffers, allocated once (F-096). Through
+# 1.7.0 each call took a fresh 4 KiB and a stat buffer from an allocator
+# that never frees: about 275 KB per planned row, and a 2,000-row dry run
+# grew to 548 MB and crashed. The probe copies the link's text out, so
+# nothing it returns points into these.
+var _fsl_rl = 0;
+var _fsl_st = 0;
+fn _fsl_rl_buf(): i64 {
+    if (_fsl_rl == 0) { _fsl_rl = alloc(4096); }
+    return _fsl_rl;
+}
+fn _fsl_st_buf(): i64 {
+    if (_fsl_st == 0) { _fsl_st = alloc(STAT_BUFSZ); }
+    return _fsl_st;
+}
+
 fn link_probe(path): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     # agnos readlink#70 (the introspection peer of symlink#63) reads a symlink's
@@ -75,7 +91,7 @@ fn link_probe(path): i64 {
     # Before readlink#70, agnos exposed neither lstat nor readlink to ring-3, so this
     # branch stat-classified and could neither SEE an existing link nor read its
     # target for the status/reconcile compare — #70 (agnos kernel) closed that.
-    var buf = alloc(4096);
+    var buf = _fsl_rl_buf();
     var n = hapi_readlink(path, buf, 4096);
     if (n > 0) {
         var t = alloc(n + 1);
@@ -83,7 +99,7 @@ fn link_probe(path): i64 {
         store8(t + n, 0);
         return _fsl_probe_new(HAPI_LP_SYMLINK, t);
     }
-    var st = alloc(STAT_BUFSZ);
+    var st = _fsl_st_buf();
     var rc = sys_stat(path, strlen(path), st);
     if (rc < 0) {
         # agnos says -1 for every failure, so "absent" has to be earned:
@@ -98,7 +114,7 @@ fn link_probe(path): i64 {
     if ((load64(st + STAT_MODE) & 0xF000) == 0x4000) { return _fsl_probe_new(HAPI_LP_DIRECTORY, 0); }
     return _fsl_probe_new(HAPI_LP_FILE, 0);
     #else
-    var buf = alloc(4096);
+    var buf = _fsl_rl_buf();
     var n = sys_readlink(path, buf, 4096);
     if (n > 0) {
         var t = alloc(n + 1);
@@ -120,7 +136,7 @@ fn link_probe(path): i64 {
         # directory — a FIFO, a socket, a device — stays FILE, as before.
         # sys_stat is the per-arch peer (x86_64 stat, arm64 fstatat), and
         # STAT_MODE its per-arch offset.
-        var st = alloc(STAT_BUFSZ);
+        var st = _fsl_st_buf();
         if (sys_stat(path, st) < 0) { return _fsl_probe_new(HAPI_LP_ERROR, 0); }
         if ((load64(st + STAT_MODE) & 0xF000) == 0x4000) { return _fsl_probe_new(HAPI_LP_DIRECTORY, 0); }
         return _fsl_probe_new(HAPI_LP_FILE, 0);
@@ -143,7 +159,51 @@ fn fsl_source_present(path): i64 {
     var k = link_probe_kind(link_probe(path));
     if (k == HAPI_LP_FILE) { return 1; }
     if (k == HAPI_LP_DIRECTORY) { return 1; }
-    if (k == HAPI_LP_SYMLINK) { return 1; }
+    # A source that is a symlink is present only if what it names is
+    # (F-087). Through 1.7.0 any symlink counted, so a dangling one was
+    # linked to at exit 0 — a link to nothing — and status said OK.
+    if (k == HAPI_LP_SYMLINK) {
+        var st = alloc(STAT_BUFSZ);
+        #ifdef CYRIUS_TARGET_AGNOS
+        if (sys_stat(path, strlen(path), st) >= 0) { return 1; }
+        #else
+        if (sys_stat(path, st) >= 0) { return 1; }
+        #endif
+        return 0;
+    }
+    return 0;
+}
+
+# 1 when `s` ends in `.cyml`.
+fn fsl_has_cyml_suffix(s): i64 {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    if (n < 5) { return 0; }
+    return memeq(s + n - 5, ".cyml", 5);
+}
+
+# The manifest a package argument names, for link, status, adopt and fmt:
+# a `*.cyml` path as given, made absolute, or `<dir>/hapi.cyml`. 0 for a
+# relative argument with no knowable cwd (F-027): the caller refuses
+# rather than record an `abs_source` that is not absolute. (check keeps
+# its own: it resolves nothing, and its messages print the argument as
+# given.)
+fn fsl_manifest_of_arg(arg): i64 {
+    if (fsl_has_cyml_suffix(arg) == 1) { return fsl_canonical_arg(arg); }
+    var abs_arg = fsl_canonical_arg(arg);
+    if (abs_arg == 0) { return 0; }
+    return _fsl_path_join(abs_arg, "hapi.cyml");
+}
+
+# 1 when `path` is a regular file (stat follows the last component).
+fn fsl_is_regular(path): i64 {
+    var st = alloc(STAT_BUFSZ);
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (sys_stat(path, strlen(path), st) < 0) { return 0; }
+    #else
+    if (sys_stat(path, st) < 0) { return 0; }
+    #endif
+    if ((load64(st + STAT_MODE) & 0xF000) == 0x8000) { return 1; }
     return 0;
 }
 
@@ -224,11 +284,12 @@ fn _fsl_getcwd(): i64 {
     #else
     var buf = alloc(4096);
     var n = syscall(SYS_GETCWD, buf, 4096);
-    if (n < 0) {
-        var fb = alloc(2);
-        store8(fb, 46); store8(fb + 1, 0);
-        return fb;
-    }
+    # A cwd that cannot be known is 0 here too (F-109), as on agnos.
+    # Through 1.7.0 a failed getcwd gave ".", so a relative --root became
+    # a relative scope: a relative abs_target in the trail, and link texts
+    # that dangled. Linux can also answer "(unreachable)/..." for a cwd
+    # outside the process's root; only an absolute answer is one.
+    if (n < 0 || load8(buf) != 47) { return 0; }
     # On Linux, getcwd writes a null-terminated path; the return
     # value is the length including the trailing null. The buf is
     # already what we want — just clone it tight.
@@ -393,7 +454,14 @@ fn _fsl_resolve(path, legacy): i64 {
         if (kind == HAPI_LP_ERROR && legacy == 0) { return 0; }
         if (kind == HAPI_LP_SYMLINK) {
             hops = hops + 1;
-            if (hops > 40) { return 0; }
+            # The kernel's ELOOP budget: 40 on Linux, 8 on agnos (F-110),
+            # where a deeper chain was planned as reachable and the run
+            # then failed part-way.
+            var cap = 40;
+            #ifdef CYRIUS_TARGET_AGNOS
+            cap = 8;
+            #endif
+            if (hops > cap) { return 0; }
             var tgt = link_probe_target(probe);
             if (tgt == 0) { return 0; }
             # Continue from the link's text, then the components we have
@@ -466,14 +534,6 @@ fn _fsl_within(path, prefix): i64 {
     if (pn == fn_) { return 1; }
     if (load8(path + fn_) == 47) { return 1; }
     return 0;
-}
-
-fn fsl_resolved_within(path, scope_root): i64 {
-    var rp = fsl_resolve_path(path);
-    if (rp == 0) { return 0; }
-    var rs = fsl_resolve_path(scope_root);
-    if (rs == 0) { return 0; }
-    return _fsl_within(rp, rs);
 }
 
 # The final component of `path` (no slash), or `path` itself when it has
@@ -806,7 +866,23 @@ fn fsl_mkdir_parents_mode_r(file_path, mode, created_out): i64 {
             store8(tmp + j, 0);
             var rc = hapi_mkdir_made(tmp, mode);
             store8(tmp + j, 47);
-            if (rc < 0) { return rc; }
+            if (rc < 0) {
+                # The directories this call already made are taken back
+                # (F-111): through 1.7.0 a chain that failed part-way left
+                # them, unrecorded, so no verb ever removed them.
+                if (top > 0) {
+                    var k = j - 1;
+                    while (k >= top) {
+                        if (k == top || load8(tmp + k) == 47) {
+                            store8(tmp + k, 0);
+                            hapi_rmdir(tmp);
+                            store8(tmp + k, 47);
+                        }
+                        k = k - 1;
+                    }
+                }
+                return rc;
+            }
             if (rc == 0) { top = 0 - 1; }
             elif (top < 0) { top = j; }
         }
@@ -880,7 +956,28 @@ fn _fsl_made_ok(abs_target, top): i64 {
     var tn = strlen(top);
     if (tn == 0 || tn >= strlen(abs_target)) { return 0; }
     if (load8(top) != 47 || load8(abs_target + tn) != 47) { return 0; }
+    # A chain with a `.` or `..` component, or an empty one, is not one
+    # hapi made (F-111): on agnos an rmdir of `.` freed a live directory's
+    # inode, and a doubled `/` made the chain unremovable.
+    if (_fsl_has_dot_seg(abs_target) == 1) { return 0; }
     return memeq(abs_target, top, tn);
+}
+
+fn _fsl_has_dot_seg(p): i64 {
+    var n = strlen(p);
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) == 47) {
+            var j = i + 1;
+            if (j < n && load8(p + j) == 47) { return 1; }                 # `//`
+            if (j < n && load8(p + j) == 46) {
+                if (j + 1 == n || load8(p + j + 1) == 47) { return 1; }    # `/.`
+                if (load8(p + j + 1) == 46 && (j + 2 == n || load8(p + j + 2) == 47)) { return 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # 1 when every directory from `abs_target`'s parent up to `top` is still a
@@ -891,12 +988,19 @@ fn _fsl_made_ok(abs_target, top): i64 {
 # wherever the symlink led — a path judged on its spelling where the
 # kernel acts on where it goes, the F-015 / F-051 shape. Directories above
 # `top` were the user's before hapi came, and may be symlinks.
+# The deepest directories may be gone already: unlink and prune remove a
+# link's own chain right after the link (finding 229), and the pass after
+# the loop walks it again for what a later row's link kept. What is still
+# there must be real directories.
 fn _fsl_chain_is_real(abs_target, top): i64 {
     var tn = strlen(top);
     var dir = _fsl_path_dirname(abs_target);
+    var met = 0;
     var go = 1;
     while (go == 1) {
-        if (link_probe_kind(link_probe(dir)) != HAPI_LP_DIRECTORY) { return 0; }
+        var k = link_probe_kind(link_probe(dir));
+        if (k == HAPI_LP_DIRECTORY) { met = 1; }
+        elif (k != HAPI_LP_ABSENT || met == 1) { return 0; }
         if (strlen(dir) <= tn) { go = 0; }
         else { dir = _fsl_path_dirname(dir); }
     }

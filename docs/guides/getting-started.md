@@ -27,6 +27,9 @@ cyrius test                            # run tests/*.tcyr
 - `src/cap.cyr` — `--root` capability check
 - `src/backup.cyr` — `--backup-to` pre-`--force` snapshots
 - `tests/hapi.{tcyr,bcyr,fcyr}` — tests / benchmarks / fuzz
+- `tests/agnos.tcyr` — the target-neutral suite, also built for agnos
+- `tests/scratch.cyr` — records each suite's scratch directories under
+  `/tmp` and removes them when the run ends (1.7.1)
 
 ## Adding a command
 

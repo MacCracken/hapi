@@ -13,10 +13,11 @@ _Nothing yet._
 > that the path resolver dropped the first byte of every relative symlink's text, so
 > a relative link out of `$HOME` read as inside it. That reopened the capability
 > boundary for `link --force`, `adopt`, `--root` and the allowlist, on every release
-> since 1.1.1. This release fixes it, with the rest of the audit's containment and
-> data-loss tier (F-065 to F-075). The other tiers are planned in the
-> [roadmap](docs/development/roadmap.md) as 1.7.2 and 1.7.3. No flag, verb, manifest
-> field or trail field was added.
+> since 1.1.1. This release repairs every tier the audit found, F-064 to F-116:
+> containment and data loss, then correctness and error handling, then robustness,
+> messages, refactors, test gaps and CI. No flag or verb was added. The trail gains
+> one additive field, `absent`, and `link` now records links it finds unrecorded, which
+> closes F-006.
 
 ### Upgrading
 
@@ -29,6 +30,18 @@ _Nothing yet._
   upgrading.
 - **A link 1.1.1–1.7.0 placed outside the scope** through such a parent is found by
   `hapi list` and removed by `hapi unlink <pkg>`.
+- **The first `link` or `sync` after upgrading may write trail entries** for links that
+  are already correct but that the trail does not record for that package: after a
+  lost trail (F-006), a renamed `[package].name`, or a moved `$HOME`. Each is recorded
+  once (`now recorded`), and later runs write nothing (F-079).
+- **Some manifests that parsed now refuse.** These are a value with no closing quote,
+  a control byte in a name, version, source, target or ignore pattern, and an
+  `[[entries]]` line, which no longer moves the header's end (F-074, F-086, F-092). In
+  each case the manifest's meaning was unclear or unsafe before.
+- **`--strict` is stricter**: `check --strict` also fails on keys before any section,
+  keys given twice, and text after a value (F-107).
+- **Downgrading:** a pre-1.7.1 `rollback` reads an `"absent":"1"` unlink as an
+  ordinary one, and can re-create a link you had deleted by hand (F-078).
 
 ### Changed
 
@@ -107,6 +120,88 @@ _Nothing yet._
   ADR 0001 describes has one.
 - **`link` records the hash of the manifest it applied (F-075).** It re-read the file
   to hash it, so the trail's hash could describe rows other than the ones it linked.
+- **Tier 2, correctness and error handling.**
+  - F-076: `link --force` skipped a row it could not probe and exited 0. Such a row is
+    now refused.
+  - F-077: `rollback` counted an entry it could not probe as already at its expected
+    state and sealed it. It is now an error.
+  - F-078: `unlink` of a link already gone reported a removal and wrote nothing, so the
+    link stayed live forever. It is now retired, with `"absent":"1"`, and `rollback`
+    leaves it gone.
+  - F-079: links hapi wrote but the trail does not record for this package are
+    recorded. A `--force` takeover also ends the old package's claim, so its `unlink`
+    and prune no longer refuse forever. Finding a row's record means one search of the
+    trail per row on a warm run; it skips rather than steps, since a byte-by-byte
+    search made a warm `sync` 1.8× slower than 1.7.0 (now 1.4×, `docs/benchmarks.md`).
+  - F-080: prune's scope and identity were lexical. A `$HOME` prune removed a
+    `--root ~/sub` run's links, re-spelling a kept row pruned it, the limit counted
+    links already gone, and kept rows were not checked again after the prune's own
+    removals.
+  - F-081: a row or an adopt could target the audit trail, or a directory holding it.
+  - F-082: a failed trail append is taken back, so a short write no longer leaves a
+    torn tail that blocks every later write.
+  - F-083: the adopt reversal edits the manifest that holds the row, a named `*.cyml`
+    included. It is all-or-none for a symlinked manifest, moves the file back without
+    replacing anything, and its messages no longer contradict each other.
+  - F-084: snapshots keep their source's mode, so a 0600 secret is no longer
+    world-readable. They are fsynced, a failed one leaves nothing behind, and the
+    backup directory may not be in the package or under a target.
+  - F-085: SIGPIPE is ignored, so `| head` no longer kills `unlink`, prune or `rollback`
+    mid-run.
+  - F-086: the header ends at the first `---` line for every reader.
+  - F-087: a dangling source counts as missing.
+  - F-088: `rollback --to` stops only at the label's newest checkpoint.
+  - F-089: on agnos, an absent trail has to be earned.
+  - F-090: adopt reads its appended row back, and refuses the scope root itself.
+- **Tier 3, robustness and messages.**
+  - F-091: a FIFO never blocks a read, and adopt moves only regular files.
+  - F-092: values hold no control bytes.
+  - F-094: `--dry-run` exits as the real run would.
+  - F-095: `check`'s orphans, staging files and named manifests are reported exactly.
+  - F-096: `link_probe` no longer grows memory per call.
+  - F-097: refusals say what happened: a loop as a loop, `sync`'s conflicts point at
+    `link --force`, and an unsearchable package fails the run.
+  - F-098: an empty argument or `--backup-to` value is exit 2.
+  - F-099 to F-104: the trail reader rejects joined lines and non-JSON escapes,
+    decodes `\u` to UTF-8, treats a dangling trail link as an error, reads under a
+    shared lock and checks its allocation. Appends check their seek and fsync a new
+    trail's directory, and printed trail fields are sanitized.
+  - F-105: manifest rewrites keep the file's mode, refuse a hard-linked manifest,
+    check fsync, keep the comments after a removed row, and find an indented
+    `[[link]]`.
+  - F-106: `unlink <path>` names the package the path holds, and an adopt-only
+    package points at `rollback`. `list --root` counts only that scope.
+  - F-107: a byte-order mark is skipped, and `check --strict` fails on what the
+    parser skips.
+  - F-108: `status` calls a refused row `REFUSED`, and `--quiet` fails on it.
+  - F-109: a relative scope root, or an unknowable cwd, is refused.
+  - F-110: an EXDEV adopt says why; a file named `...` is refused; duplicate package
+    roots are merged; agnos's hop cap is 8; snapshot names fit NAME_MAX; rollback no
+    longer re-creates a link to a source that is gone, and names a reversed link's
+    snapshot.
+  - F-111: a target with `//` or `./` is normalized, a failed `mkdir` chain takes back
+    what it made, and an absent scope root with an absent parent is refused.
+  - F-113: no-arg `sync`'s note that the trail holds a package no root holds compares
+    where the directories resolve. A package linked through a symlink to its root is
+    no longer reported unscanned.
+  - F-114: under `--dry-run`, two snapshots with one name are shown with the names the
+    real run gives them (`-2` on the second), not one path for both.
+  - F-115: `fmt` counts each skipped line's number on from the previous skip, so it is
+    linear in the header. 20,000 comment lines took 10.4 s and take 9 ms.
+  - F-116: `unlink` and `sync --prune` remove a link's made directories right after
+    its `op:unlink` is recorded, not after the whole loop. A run stopped partway no
+    longer leaves directories that no later verb removes.
+- **Tier 3, refactors, test gaps and CI.**
+  - Refactors, with every golden case byte-identical: the four manifest-argument
+    resolvers, and the seven string comparators, each became one shared function.
+    The dead functions and the identity helper went, and `checkpoint.cyr`'s helpers
+    no longer share `check.cyr`'s prefix.
+  - The guards the audit found unpinned are pinned.
+  - F-112: CI verifies `cyrius.lock`, runs lint, fuzz, bench and the DCE release
+    build, and gives the release's CI gate read-only permissions. The agnos smoke's
+    check 3 accepts only a refusal that names its cause. The concurrency harness's
+    `fmt` race runs five rounds: one round missed a lockless `fmt` in 5 runs of 12, and
+    five catch it in 8 of 8.
 - **The test suites no longer leave their scratch directories in `/tmp` (F-064).**
   Through 1.7.0 neither `tests/hapi.tcyr` nor `tests/agnos.tcyr` removed anything it
   made, so each run left about 150 directories, around 2,600 inodes. `/tmp` is a tmpfs

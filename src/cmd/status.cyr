@@ -22,7 +22,8 @@
 #
 # `--quiet` (1.5.0) keeps the rows and changes only the exit code: drift
 # exits 0, and 1 means an actual error — a manifest that will not resolve
-# or parse, no $HOME, or a target that could not be checked (ERROR). It is
+# or parse, no $HOME, a target that could not be checked (ERROR), or since
+# 1.7.1 a row link refuses outright (REFUSED, F-108). It is
 # the predicate a `status && link --force` chain wants; the default stays
 # the assertion CI wants (guides/status.md).
 
@@ -35,30 +36,9 @@ fn _hst_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
 
 # Same resolver as inspect/link — accept a *.cyml path or a
 # package directory.
-fn _hst_resolve_manifest(arg): i64 {
-    var n = strlen(arg);
-    if (n >= 5) {
-        if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
-            && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
-            && load8(arg + n - 1) == 108) {
-            return fsl_canonical_arg(arg);
-        }
-    }
-    var abs_arg = fsl_canonical_arg(arg);
-    # 0 = a relative argument with no determinable cwd (agnos without a
-    # usable PWD). Refuse rather than build a trail entry whose
-    # `abs_source` is not absolute (F-027).
-    if (abs_arg == 0) { return 0; }
-    return _fsl_path_join(abs_arg, "hapi.cyml");
-}
+fn _hst_resolve_manifest(arg): i64 { return fsl_manifest_of_arg(arg); }
 
-fn _hst_cstr_eq(a, b): i64 {
-    if (a == 0 || b == 0) { return 0; }
-    var an = strlen(a);
-    var bn = strlen(b);
-    if (an != bn) { return 0; }
-    return memeq(a, b, an);
-}
+fn _hst_cstr_eq(a, b): i64 { return hapi_cstr_eq(a, b); }
 
 fn cmd_status(pkg_arg): i64 { return cmd_status_run(pkg_arg, 0); }
 
@@ -101,6 +81,15 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
         _hst_eputs("hapi: $HOME is unset; cannot resolve link targets\n");
         return 1;
     }
+    # A relative scope root put every target under the cwd (F-109): from
+    # another directory, link made `./home` and wrote there. Only an
+    # absolute HOME, or a --root already made absolute, is a scope root.
+    if (load8(scope_root) != 47) {
+        _hst_eputs("hapi: the scope root is not an absolute path: ");
+        _hst_eputs(scope_root);
+        _hst_eputs("\n");
+        return 1;
+    }
     var scope_root_abs = fsl_to_absolute(scope_root);
 
     var links = hapi_mf_links(m);
@@ -108,6 +97,7 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
     var ok = 0;
     var drift = 0;
     var unchecked = 0;    # ERROR rows: the probe itself failed
+    var nrefused = 0;     # REFUSED rows: link refuses them outright
 
     var i = 0;
     while (i < nlinks) {
@@ -124,8 +114,18 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
         var detail = 0;
         var row_ok = 0;
         var broken = 0;
-        if (kind == HAPI_LP_ABSENT) {
+        var refused = 0;
+        var no_src = 0;
+        # A row `link` refuses outright is reported so (F-108): through
+        # 1.7.0 status read the target alone, and called a row whose parent
+        # leads outside the scope OK or MISSING.
+        if (cap_target_allowed(_fsl_path_dirname(abs_tgt), scope_root_abs) == 0) {
+            status_lit = "REFUSED";
+            refused = 1;
+            kind = HAPI_LP_ERROR;
+        } elif (kind == HAPI_LP_ABSENT) {
             status_lit = "MISSING";
+            if (fsl_source_present(abs_src) == 0) { no_src = 1; }
         } elif (kind == HAPI_LP_SYMLINK) {
             var existing = link_probe_target(probe);
             # Either shape naming the source is OK (1.6.0): `--absolute`
@@ -136,7 +136,12 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
                 # unchanged. This is an ADDITIONAL probe: a dangling link
                 # holds exactly the right target text, so the compare
                 # passes while the file it names is gone (F-022).
-                if (fsl_source_present(abs_src) == 0) {
+                if (link_probe_kind(link_probe(abs_src)) == HAPI_LP_ERROR) {
+                    # A source hapi cannot probe is not known to be gone
+                    # (F-108): it was BROKEN, which --quiet let pass.
+                    status_lit = "ERROR  ";
+                    kind = HAPI_LP_ERROR;
+                } elif (fsl_source_present(abs_src) == 0) {
                     status_lit = "BROKEN ";
                     broken = 1;
                 } else {
@@ -157,7 +162,9 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
         _hst_puts(status_lit);
         _hst_puts("  ");
         _hst_puts(abs_tgt);
-        if (broken == 1) {
+        if (refused == 1) {
+            _hst_puts("  (resolves outside the scoped root, or cannot be followed; link refuses it)");
+        } elif (broken == 1 || no_src == 1) {
             _hst_puts("  (source missing: ");
             _hst_puts(abs_src);
             _hst_puts(")");
@@ -172,7 +179,8 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
 
         if (row_ok == 1) { ok = ok + 1; }
         else { drift = drift + 1; }
-        if (kind == HAPI_LP_ERROR) { unchecked = unchecked + 1; }
+        if (refused == 1) { nrefused = nrefused + 1; }
+        elif (kind == HAPI_LP_ERROR) { unchecked = unchecked + 1; }
         i = i + 1;
     }
 
@@ -188,11 +196,20 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
     }
     _hst_puts("\n");
     if (quiet == 1) {
-        if (unchecked == 0) { return 0; }
-        _hst_eputs("hapi: ");
-        fmt_int_fd(2, unchecked);
-        if (unchecked == 1) { _hst_eputs(" target could not be checked (ERROR above)\n"); }
-        else { _hst_eputs(" targets could not be checked (ERROR above)\n"); }
+        if (unchecked == 0 && nrefused == 0) { return 0; }
+        if (unchecked > 0) {
+            _hst_eputs("hapi: ");
+            fmt_int_fd(2, unchecked);
+            if (unchecked == 1) { _hst_eputs(" target could not be checked (ERROR above)\n"); }
+            else { _hst_eputs(" targets could not be checked (ERROR above)\n"); }
+        }
+        if (nrefused > 0) {
+            _hst_eputs("hapi: ");
+            fmt_int_fd(2, nrefused);
+            if (nrefused == 1) { _hst_eputs(" row resolves"); }
+            else { _hst_eputs(" rows resolve"); }
+            _hst_eputs(" outside the scope or cannot be followed (REFUSED above)\n");
+        }
         return 1;
     }
     if (drift > 0) { return 1; }

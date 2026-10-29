@@ -108,10 +108,12 @@ grep -q GARBAGE "$PKG/hapi.cyml" && { echo "  FAIL  stale tmp content leaked int
 # `hapi fmt` rewrites the whole header, so an adopt that appended a row
 # between fmt's read and its commit would lose that row. Both take the
 # package-directory lock across their read-modify-write; this proves it,
-# with the same large body widening the window.
-echo "1.7.0: $N concurrent adopts racing four fmt loops against one package"
-HOME2="$WORK/home2"; STATE2="$WORK/state2"; PKG2="$WORK/pkg2"
-mkdir -p "$HOME2" "$STATE2" "$PKG2"
+# with the same large body widening the window. One round missed a
+# lockless fmt in 5 of 12 runs (2026-10-29 audit, finding 207), so it
+# runs several, each from a fresh copy.
+FROUNDS=5
+echo "1.7.0: $N concurrent adopts racing four fmt loops against one package, $FROUNDS rounds"
+HOME2="$WORK/home2"; STATE2="$WORK/state2"; PKG2="$WORK/pkg2"; BODY2="$WORK/pkg2.cyml"
 {
     printf '[package]\nversion = "1.0.0"\nname = "conc2"\n\n---\n'
     i=0
@@ -119,33 +121,47 @@ mkdir -p "$HOME2" "$STATE2" "$PKG2"
         awk 'BEGIN{s="";for(i=0;i<1000;i++)s=s "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";print s}'
         i=$((i + 1))
     done
-} > "$PKG2/hapi.cyml"
-i=1
-while [ $i -le $N ]; do echo "content $i" > "$HOME2/.f$i"; i=$((i + 1)); done
-# Adopts queue on the lock, so they commit one after another over a
-# while; four fmt loops keep rewriting across that whole stretch, rather
-# than all finishing before the first adopt commits.
-i=1
-while [ $i -le $N ]; do
-    HOME="$HOME2" XDG_STATE_HOME="$STATE2" "$HAPI" adopt ".f$i" "$PKG2" > /dev/null 2>&1 &
-    i=$((i + 1))
+} > "$BODY2"
+rowsbad=0; movedbad=0; straybad=0; parsebad=0; fmtbad=0; bodybad=0
+r=1
+while [ $r -le $FROUNDS ]; do
+    rm -rf "$HOME2" "$STATE2" "$PKG2"
+    mkdir -p "$HOME2" "$STATE2" "$PKG2"
+    cp "$BODY2" "$PKG2/hapi.cyml"
+    i=1
+    while [ $i -le $N ]; do echo "content $i" > "$HOME2/.f$i"; i=$((i + 1)); done
+    # Adopts queue on the lock, so they commit one after another over a
+    # while; four fmt loops keep rewriting across that whole stretch,
+    # rather than all finishing before the first adopt commits.
+    i=1
+    while [ $i -le $N ]; do
+        HOME="$HOME2" XDG_STATE_HOME="$STATE2" "$HAPI" adopt ".f$i" "$PKG2" > /dev/null 2>&1 &
+        i=$((i + 1))
+    done
+    w=1
+    while [ $w -le 4 ]; do
+        ( k=0; while [ $k -lt 30 ]; do "$HAPI" fmt "$PKG2" > /dev/null 2>&1; k=$((k + 1)); done ) &
+        w=$((w + 1))
+    done
+    wait
+    "$HAPI" fmt "$PKG2" > /dev/null 2>&1 || true
+    rows3=$(grep -c '^\[\[link\]\]' "$PKG2/hapi.cyml" || true)
+    moved3=$(find "$PKG2" -maxdepth 1 -name 'f*' | wc -l | tr -d ' ')
+    stray3=$(find "$PKG2" -maxdepth 1 -name '*.tmp*' | wc -l | tr -d ' ')
+    [ "$rows3" = "$N" ] || rowsbad=$((rowsbad + 1))
+    [ "$rows3" = "$moved3" ] || movedbad=$((movedbad + 1))
+    [ "$stray3" = "0" ] || straybad=$((straybad + 1))
+    "$HAPI" check "$PKG2" > /dev/null 2>&1 || parsebad=$((parsebad + 1))
+    "$HAPI" fmt --check "$PKG2" > /dev/null 2>&1 || fmtbad=$((fmtbad + 1))
+    grep -q yyyyy "$PKG2/hapi.cyml" || bodybad=$((bodybad + 1))
+    r=$((r + 1))
 done
-w=1
-while [ $w -le 4 ]; do
-    ( k=0; while [ $k -lt 30 ]; do "$HAPI" fmt "$PKG2" > /dev/null 2>&1; k=$((k + 1)); done ) &
-    w=$((w + 1))
-done
-wait
-"$HAPI" fmt "$PKG2" > /dev/null 2>&1 || true
-rows3=$(grep -c '^\[\[link\]\]' "$PKG2/hapi.cyml" || true)
-moved3=$(find "$PKG2" -maxdepth 1 -name 'f*' | wc -l | tr -d ' ')
-stray3=$(find "$PKG2" -maxdepth 1 -name '*.tmp*' | wc -l | tr -d ' ')
-check "manifest rows"      "$rows3"  "$N"
-check "rows == files moved" "$rows3" "$moved3"
-check "stray tmp files"    "$stray3" "0"
-"$HAPI" check "$PKG2" > /dev/null 2>&1 && echo "  ok    the manifest parses" || { echo "  FAIL  the manifest does not parse"; FAIL=1; }
-"$HAPI" fmt --check "$PKG2" > /dev/null 2>&1 && echo "  ok    and it is formatted" || { echo "  FAIL  not formatted after a final fmt"; FAIL=1; }
-grep -q yyyyy "$PKG2/hapi.cyml" && echo "  ok    body preserved" || { echo "  FAIL  body lost"; FAIL=1; }
+check "rounds short of $N manifest rows"     "$rowsbad"  "0"
+check "rounds where rows != files moved"     "$movedbad" "0"
+check "rounds leaving a stray tmp file"      "$straybad" "0"
+check "rounds whose manifest does not parse" "$parsebad" "0"
+check "rounds not formatted after a fmt"     "$fmtbad"   "0"
+check "rounds that lost the body"            "$bodybad"  "0"
 
 # ── 1.7.1: adopts deriving one package-side name (F-071) ────────────
 # adopt's checks ran before the package lock, and its move was a plain
@@ -177,6 +193,52 @@ while [ $r -le $ROUNDS ]; do
 done
 check "contents lost"                    "$lost"   "0"
 check "rounds without exactly one adopt" "$notone" "0"
+
+# ── 1.7.1: readers racing appends (F-102) ───────────────────────────
+# A reader took no lock, so `list` during another hapi's append saw a
+# trail that grew mid-read and refused it as unreadable. Readers take a
+# shared lock now. Sixteen packages link while four `list` loops read.
+echo "1.7.1: four list loops racing sixteen links"
+HOME4="$WORK/home4"; STATE4="$WORK/state4"
+mkdir -p "$HOME4" "$STATE4"
+i=1
+while [ $i -le 16 ]; do
+    mkdir -p "$WORK/p4/$i"
+    printf '[package]\nname = "p%s"\nversion = "1.0.0"\n' "$i" > "$WORK/p4/$i/hapi.cyml"
+    k=1
+    while [ $k -le 20 ]; do
+        printf '\n[[link]]\nsource = "f%s"\ntarget = ".p%s-f%s"\n' "$k" "$i" "$k" >> "$WORK/p4/$i/hapi.cyml"
+        echo "$i $k" > "$WORK/p4/$i/f$k"
+        k=$((k + 1))
+    done
+    i=$((i + 1))
+done
+HOME="$HOME4" XDG_STATE_HOME="$STATE4" "$HAPI" checkpoint > /dev/null 2>&1
+: > "$WORK/list_fail"
+w=1
+while [ $w -le 4 ]; do
+    ( k=0; while [ $k -lt 40 ]; do
+        HOME="$HOME4" XDG_STATE_HOME="$STATE4" "$HAPI" list > /dev/null 2>&1 || echo x >> "$WORK/list_fail"
+        k=$((k + 1)); done ) &
+    w=$((w + 1))
+done
+i=1
+while [ $i -le 16 ]; do
+    HOME="$HOME4" XDG_STATE_HOME="$STATE4" "$HAPI" link "$WORK/p4/$i" > /dev/null 2>&1 &
+    i=$((i + 1))
+done
+wait
+check "list runs that failed mid-append" "$(wc -l < "$WORK/list_fail" | tr -d ' ')" "0"
+
+# ── 1.7.1: a closed output pipe (F-085) ─────────────────────────────
+# Two processes again: hapi, and a reader that has gone. At SIGPIPE's
+# default action hapi died there (exit 141), mid-run for unlink, prune
+# and rollback. It ignores SIGPIPE now and finishes. The delay makes the
+# reader gone before hapi writes.
+echo "1.7.1: hapi writing to a pipe whose reader has gone"
+( sleep 0.2; "$HAPI" --help 2> /dev/null && rc=0 || rc=$?; echo "$rc" > "$WORK/pipe_rc" ) | true
+sleep 0.5
+check "exit status with its reader gone" "$(cat "$WORK/pipe_rc" 2>/dev/null)" "0"
 
 if [ $FAIL -eq 0 ]; then
     echo "PASS: concurrency harness"

@@ -72,8 +72,8 @@ hapi link pkg                      # a row targeting .config/foo
 Lexically `.config/foo` looks like it is inside `$HOME`. Physically it
 is not. hapi resolves the target's parent **component by component**,
 following a symlink at each one (hop-capped at 40, the kernel's own
-ELOOP budget), and refuses when the resolved location falls outside the
-scope:
+ELOOP budget; 8 on agnos since 1.7.1, its kernel's), and refuses when the
+resolved location falls outside the scope:
 
 ```
 hapi: refusing to link outside the scoped root:
@@ -108,6 +108,37 @@ Since 1.1.1 the resolution is the kernel's in three more places:
 - **`/` contains everything.** `--root /` (with `HAPI_ALLOWED_ROOTS=/`)
   and agnos's default `HOME=/` work; through 1.1.0 they refused every
   row.
+
+1.7.1 repaired the resolver itself and closed the gaps around it:
+
+- **A relative symlink's text is followed whole** (F-065). 1.1.1 – 1.7.0
+  dropped its first byte, so `../outside` was walked as `./outside`, and
+  a relative link out of `$HOME` read as inside it. Every check above
+  was made on the wrong path, the `--root` and allowlist grants
+  included.
+- **A component hapi cannot probe ends the walk** (F-066). Past 4096
+  resolved bytes `readlink` fails, and hapi kept the component as a
+  plain name while the kernel followed it out of the scope. It is now
+  refused, as the hop cap is. `link` says so in its own words, `a
+  target's path cannot be followed`, rather than as an escape that
+  `HAPI_ALLOWED_ROOTS` could grant (F-097).
+- **Rows are compared where they physically are** (F-067), so a row
+  written through another row's new link is refused, and a target
+  inside another package's source (F-070) or at the audit trail (F-081)
+  is refused too. See [`link.md`](link.md#--force).
+- **The scope root must be an absolute path** (F-109). A relative
+  `HOME` put every target under the working directory; it is refused,
+  as is a relative path when the working directory cannot be known. A
+  scope root that does not exist, under a parent that does not exist
+  either, is refused rather than made with its ancestors (F-111).
+- **The audit trail lives only under an absolute base** (F-072). A
+  relative `XDG_STATE_HOME` is ignored, as the XDG spec says, and a
+  relative or empty `HOME` gives no trail at all. Through 1.7.0 the
+  trail fell back to `/tmp/.local/state` or the working directory,
+  places another user can own, whose planted entries then drove
+  `rollback`. With no location, every verb that needs the trail
+  refuses: `no audit-trail location: $XDG_STATE_HOME and $HOME are
+  unset or not absolute`.
 
 ## Why an env var?
 

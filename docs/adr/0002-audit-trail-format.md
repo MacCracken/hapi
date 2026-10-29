@@ -70,6 +70,16 @@ semantics). hapi never reads or writes anywhere else for its
 own state; nothing in the trail is sensitive enough to warrant
 non-default permissions.
 
+**One environment, one trail** (2026-10-29 audit, finding 222). The
+location is read from the environment of each run. A shell that sets
+`XDG_STATE_HOME` and a cron job or systemd unit that does not write two
+trails, and neither run can see the other's: `unlink` reports success
+and leaves the other trail's links, `list` undercounts, and `rollback`
+sees half. Set `XDG_STATE_HOME` where every hapi run sees it
+(`~/.config/environment.d`, `~/.profile`), or leave it unset everywhere.
+Since 1.7.1 the next `link` or `sync` records links the trail in use does
+not (F-079), which repairs the count but not a rollback window.
+
 ### Per-entry shape
 
 One JSON object per line, no nested objects, no arrays of objects.
@@ -420,3 +430,25 @@ fallback needs an absolute HOME. With neither there is no trail.
 Readers report *no audit-trail location*, writers fail their pre-flight,
 and no verb that needs the trail acts. The line shape, the fields and
 the reader contract are unchanged.
+
+## Addendum — 2026-10-29 (1.7.1): `absent`, link's claims, and `unadopt`
+
+**`"absent":"1"` on an `op:unlink`** (F-078). `unlink` and `sync --prune`
+write it when they find a link already gone, so the trail stops counting
+it. Through 1.7.0 the entry stayed live forever: `list` counted it, and
+every `unlink` reported a removal again. Rollback skips such an entry,
+because the link was gone before that run. It is an additive string
+field. A pre-1.7.1 rollback reads it as an ordinary unlink and would
+re-create a link that was gone. That is the downgrade caveat.
+
+**`link` records a link it finds** (F-079). When a row is already linked
+exactly as hapi writes it, but the trail's last word on that target is
+not this package's link or adopt, `link` appends an ordinary `op:link`.
+The proof is the one removal accepts: the link's text is hapi's for the
+row. That re-records a trail after it is lost (F-006), and after a
+`[package].name` or `$HOME` is renamed. The next run writes nothing. No
+new field or op is involved.
+
+**`unadopt`** (finding 181) is the op `rollback` writes when it reverses
+an adopt (ADR 0004). It has the same fields as `adopt`, and the op list
+above omitted it.

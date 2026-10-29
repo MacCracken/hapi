@@ -20,34 +20,40 @@
 include "src/audit.cyr"
 include "src/dry_run.cyr"
 
-fn _hck_puts(s): i64 { print(s, strlen(s)); return 0; }
-fn _hck_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+fn _hcp_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn _hcp_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
 
 fn cmd_checkpoint(): i64 { return cmd_checkpoint_label(0); }
 
 # `label` 0 writes the plain marker, byte for byte what 1.4.0 wrote.
 fn cmd_checkpoint_label(label): i64 {
     if (hapi_dry_run() == 1) {
-        _hck_puts("checkpoint");
-        _hck_say_label(label);
-        _hck_puts(" (dry-run; no entry written)\n");
+        # As the real run would answer (F-094).
+        var pf_t, pf_v = audit_preflight_dry_r();
+        if (is_err_result(pf_t) == 1) {
+            _hcp_eputs("hapi: audit-trail write failed (could not append checkpoint)\n");
+            return 1;
+        }
+        _hcp_puts("checkpoint");
+        _hcp_say_label(label);
+        _hcp_puts(" (dry-run; no entry written)\n");
         return 0;
     }
     var r_t, r_v = audit_append_marker_r(label, 0);
     if (is_err_result(r_t) == 1) {
-        _hck_eputs("hapi: audit-trail write failed (could not append checkpoint)\n");
+        _hcp_eputs("hapi: audit-trail write failed (could not append checkpoint)\n");
         return 1;
     }
-    _hck_puts("checkpoint");
-    _hck_say_label(label);
-    _hck_puts(" written\n");
+    _hcp_puts("checkpoint");
+    _hcp_say_label(label);
+    _hcp_puts(" written\n");
     return 0;
 }
 
-fn _hck_say_label(label): i64 {
+fn _hcp_say_label(label): i64 {
     if (label == 0) { return 0; }
-    _hck_puts(" `");
-    _hck_puts(label);
-    _hck_puts("`");
+    _hcp_puts(" `");
+    _hcp_puts(label);
+    _hcp_puts("`");
     return 0;
 }

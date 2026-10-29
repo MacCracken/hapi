@@ -29,6 +29,10 @@ jobs:
   # ────────────────────────────────────────────────────────────────
   ci:
     name: CI gate
+    # The gate builds and runs tag-pinned third-party code (mirshi, the
+    # cyrius installer); it needs no write token (F-112).
+    permissions:
+      contents: read
     uses: ./.github/workflows/ci.yml
 
   # ────────────────────────────────────────────────────────────────

@@ -7,10 +7,10 @@ trail, no filesystem touches beyond reading it.
 ## Synopsis
 
 ```sh
-hapi list
+hapi list [--root <path>]
 ```
 
-No arguments.
+No positional arguments.
 
 ## What it does
 
@@ -24,6 +24,15 @@ No arguments.
    is the package that currently owns it.
 4. Prints one row per package with the live count, plus a
    scope-root header line.
+
+With `--root <path>`, only the links inside that directory count
+(1.7.1, F-106). Through 1.7.0 `list --root X` printed `scope: X` and
+counted every link in the trail, wherever it was. Without `--root`,
+every live link the trail records is counted, including one an
+allowlisted destination outside `$HOME` holds.
+
+The trail is read under its shared lock (1.7.1), so a `list` while
+another hapi appends no longer fails on a half-written line (F-102).
 
 A package whose entries are all eventually `unlink`-ed shows
 `0 live links` but still appears — the trail says hapi *did*
@@ -59,7 +68,7 @@ scope: /home/macro
 | code | meaning                                                       |
 |------|---------------------------------------------------------------|
 | 0    | trail walked (empty trail is not an error)                    |
-| 1    | `$HOME` unset, or audit-read failure                          |
+| 1    | `$HOME` unset, a scope root that is not absolute, or audit-read failure |
 
 ## See also
 

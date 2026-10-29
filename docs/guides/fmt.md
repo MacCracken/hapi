@@ -101,7 +101,12 @@ The list comes from the parser itself, which records everything it skips:
 - a key given twice, of which only the last counts;
 - text after a value or a section header;
 - a value that is not a double-quoted string;
-- a non-string element in an array.
+- a non-string element in an array;
+- since 1.7.1, a UTF-8 byte-order mark at the start of the file, which
+  the parser now skips (F-107).
+
+Since 1.7.1 [`check --strict`](check.md) fails on each of these but
+comments, so CI can catch what `fmt` would drop.
 
 None of these change what hapi reads from the manifest, which is why the
 hash ignores them, but they are yours. `--force` drops them, listing each
@@ -113,7 +118,11 @@ parser keeps a `\` as written, and the canonical form escapes it again,
 so formatting would change the value and its hash (ADR 0001 has no
 un-escape; that is a v2.0 change). Also refused, as by every write: a
 manifest that does not parse, and a `hapi.cyml` that is a symlink, which
-the rewrite would replace with a private copy.
+the rewrite would replace with a private copy. Since 1.7.1 so is a
+manifest with other hard links, which a rewrite would leave holding the
+old text: `hapi.cyml has other hard links; a rewrite would leave them
+with the old text` (F-105). The rewrite keeps the manifest's permission
+bits (through 1.7.0 it came back `0644`) and fails if its fsync fails.
 
 Before writing, `fmt` proves its result: the header it would write must
 parse back to the same canonical bytes. A header that would not (for
@@ -151,8 +160,8 @@ changes.
 | code | meaning |
 |---|---|
 | 0 | formatted, or already formatted (`--check`: formatted) |
-| 1 | `--check`: not formatted; or a refusal: content to drop without `--force`, a backslash, a manifest that does not parse, a symlinked manifest, an IO failure |
-| 2 | bad usage: no package, an extra argument, an unknown flag |
+| 1 | `--check`: not formatted; or a refusal: content to drop without `--force`, a backslash, a manifest that does not parse, a symlinked or hard-linked manifest, an IO failure |
+| 2 | bad usage: no package, an empty argument, an extra argument, an unknown flag |
 
 ## See also
 

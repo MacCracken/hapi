@@ -239,3 +239,12 @@ and rewriting it without `--force`. That is new planner behaviour in a
 patch release. The old text also proves only that an older hapi computed
 it, not that the link still names the right file, so the user decides, as
 with F-046.
+
+**Correction (1.7.1, finding 175).** The 1.6.0 addendum says a hapi
+before 1.6.0 makes `unlink` and `rollback` refuse an absolute link with
+exit 1. `unlink` does. `rollback` skips it as already at its state, with
+exit 0. Neither removes it. A `rollback --steps` or `--to` before 1.6.0
+also seals the entry it skipped, so no later rollback reaches it, and an
+absolute adopt can then never be reversed (finding 226). The shipped
+versions cannot change; the guides say not to roll back absolute links
+with them.

@@ -2,7 +2,9 @@
 
 Create the symlinks declared in a package's `hapi.cyml` manifest.
 Idempotent: re-running on an already-linked package produces no
-changes (and no audit-trail growth).
+changes (and no audit-trail growth). The one exception is a link
+that is already right but that the trail does not record. The
+first run records it, and runs after that write nothing (below).
 
 ## Synopsis
 
@@ -17,17 +19,30 @@ For each `[[link]]` row in the manifest:
 
 1. Resolve the source: `<absolute-package-dir>/<source>`.
    If the source is **not present on disk the row is refused** — the
-   symlink would dangle, and `--force` does not override that.
+   symlink would dangle, and `--force` does not override that. Since
+   1.7.1 a source that is itself a dangling symlink counts as missing
+   (F-087).
 2. Resolve the target: `$HOME/<target>` (the scoped root), and refuse
    if its parent **resolves outside** that root once symlinks are
    followed per component. `--force` does not override that either;
-   see [`capability.md`](capability.md).
+   see [`capability.md`](capability.md). A parent that cannot be
+   followed at all, a symlink loop or a component hapi cannot probe,
+   is refused as such (`a target's path cannot be followed`), not as
+   an escape that `HAPI_ALLOWED_ROOTS` could grant (1.7.1, F-097).
+   Since 1.7.1 a target spelled with `./` or `//` is normalized first,
+   so `./.x//y` is linked, printed and recorded as `~/.x/y` (F-111).
 3. Probe the target with `readlink(2)` to classify:
    - **absent** — create the symlink
    - **symlink naming the source**, relative or (since 1.6.0) absolute — no-op
    - **symlink to a different path** — conflict
    - **regular file** — conflict
+   - **a FIFO, socket or device** — conflict, shown as `(existing
+     file, not a regular one: a FIFO, socket or device)` (1.7.1, F-091)
    - **directory** — conflict (never overrideable; see below)
+   - **something it cannot examine** (a file where a directory should
+     be, a directory it cannot search) — refused, `a target could not
+     be examined`; `--force` does not override it. Through 1.7.0
+     `--force` skipped such a row in silence and exited 0 (F-076).
 4. If any conflict and `--force` is not set, refuse the run,
    list every conflict to stderr, exit 1, write nothing.
 5. Otherwise, create each new symlink and append one
@@ -43,9 +58,9 @@ dotfile repo stays portable across machines and clone paths.
 
 ```sh
 $ hapi link docs/examples/dotfiles-zsh
-  + /home/user/.zshrc -> ../Repos/hapi/docs/examples/dotfiles-zsh/zshrc
-  + /home/user/.zshenv -> ../Repos/hapi/docs/examples/dotfiles-zsh/zshenv
-  + /home/user/.config/zsh -> ../../Repos/hapi/docs/examples/dotfiles-zsh/config/zsh
+  + /home/user/.zshrc -> Repos/hapi/docs/examples/dotfiles-zsh/zshrc
+  + /home/user/.zshenv -> Repos/hapi/docs/examples/dotfiles-zsh/zshenv
+  + /home/user/.config/zsh -> ../Repos/hapi/docs/examples/dotfiles-zsh/config/zsh
 linked 3 / 3 (0 already up-to-date)
 
 $ hapi link docs/examples/dotfiles-zsh
@@ -54,6 +69,27 @@ linked 0 / 3 (3 already up-to-date)
 
 The second invocation is a true no-op: no syscalls modify the
 filesystem, no audit entries are written, exit 0.
+
+### Links the trail does not record
+
+A link already in place, with exactly the text hapi would write, that
+the trail does not record for this package is recorded now (1.7.1,
+F-079):
+
+```sh
+$ hapi link docs/examples/dotfiles-zsh
+  ~ /home/user/.zshrc  (already linked; now recorded)
+linked 0 / 3 (3 already up-to-date, 1 now recorded)
+```
+
+It is one `op:link` entry, as if this run had made the link. That is
+how a lost trail (a wiped `$XDG_STATE_HOME`, F-006), a renamed
+`[package].name` or a moved `$HOME` heals: through 1.7.0 a no-op wrote
+nothing, so `unlink` found no links, prune removed none and `list`
+credited the old name. The proof is the one `unlink` uses to remove a
+link: the exact text. A link with any other text is a conflict, as
+before. The next run finds it recorded and writes nothing. A
+`--dry-run` prints the line with `; dry-run` and writes nothing.
 
 ## `--force`
 
@@ -94,6 +130,11 @@ destructive:
   package A's `.config/nvim -> A/nvim`, package B's row
   `.config/nvim/init.lua` is A's file. hapi reads the trail for a row
   reached through a symlink, and refuses (F-070).
+- **The target is the audit trail, or a directory holding it** (1.7.1).
+  `--force` deleted the trail, or moved a symlinked `~/.local/state` into
+  the package (F-081). Point the target elsewhere, or set
+  `XDG_STATE_HOME` to keep the trail out of the way.
+- **The target could not be examined** (1.7.1, F-076; above).
 - **The row's source leads back to its own target** (1.7.1). The layout
   people migrate from, `pkg/bashrc -> ~/.bashrc` with the row
   `bashrc -> .bashrc`, would delete the only copy and leave a link to
@@ -103,9 +144,10 @@ destructive:
 `--force` replaces a file or a link in one step (1.7.1, F-068): the new
 link is made beside it and renamed over it, so if the link cannot be
 made the old file is still there. Once a run has written anything, each
-later row is checked again before it is written. A row whose place an
-earlier write changed stops the run: "a link this run made changed where
-it leads" (F-067).
+later row is checked again before it is written, and so is every row of a
+`sync --prune` that removed a link first. A row whose place an
+earlier step changed stops the run: "an earlier step of this run changed
+where it leads" (F-067).
 
 ### Under a symlinked parent
 
@@ -179,9 +221,13 @@ keeps working.
 - The entry records it: `"shape":"absolute"` (ADR 0002, 1.6.0 addendum).
 
 **Older versions** do not know the absolute shape. A hapi before 1.6.0
-calls an absolute link drift in `status`, a conflict in `link`, and
-`unlink` and `rollback` leave it in place with exit 1. Nothing is lost,
-but remove absolute links with 1.6.0 or later.
+calls an absolute link drift in `status` and a conflict in `link`;
+`unlink` leaves it in place with exit 1, and `rollback` skips it as
+already at its state, exit 0. A `rollback --steps` or `--to` from such a
+version also seals the entry it skipped, so after upgrading again no
+rollback reaches it, and an absolute adopt can then never be reversed
+(finding 226). Do not roll back absolute links with a hapi before 1.6.0.
+`hapi unlink` from 1.6.0 or later still removes them.
 
 ## Audit trail
 
@@ -195,6 +241,12 @@ input to [`hapi unlink`](unlink.md) and [`hapi rollback`](rollback.md).
 The trail is append-only — `hapi link` never edits or truncates
 existing entries. A re-run that does nothing writes no new
 lines.
+
+The location comes from each run's environment. If your shell sets
+`XDG_STATE_HOME` but a cron job or systemd unit does not, they keep two
+trails, and neither sees the other's links. Set it where every run sees
+it (`~/.config/environment.d`, `~/.profile`), or nowhere (ADR 0002,
+*One environment, one trail*).
 
 ### Directories it makes
 
@@ -210,6 +262,19 @@ That record is what lets `unlink`, `sync --prune` and `rollback` remove
 those directories again, and only those: see
 [`unlink.md`](unlink.md#directories-hapi-made). If writing the entry fails,
 the link is taken back, and since 1.4.0 so are the directories it made.
+Since 1.7.1 a `mkdir` chain that fails partway takes back the
+directories it had made, deepest first (F-111).
+
+### The scope root
+
+The scope root is `$HOME`, or `--root`'s directory. Since 1.7.1 it must
+be an absolute path, and a relative `HOME` is refused: `hapi: the scope
+root is not an absolute path: <root>` (F-109). Through 1.7.0 every target
+was put under the working directory instead. A scope root that does not
+exist is made with the first link, but only when its parent exists. If
+the parent is missing too, the run is refused, because making both would
+create directories outside the granted root: `hapi: the scope root does
+not exist, nor its parent: <root>` (F-111).
 
 ## Exit codes
 
@@ -219,10 +284,12 @@ the link is taken back, and since 1.4.0 so are the directories it made.
 | 1    | manifest parse failure, conflict without `--force`, IO error,    |
 |      | audit-trail write failure, a row that moved mid-run, or one of   |
 |      | the refusals `--force` does **not** override (above): an existing|
-|      | directory, a missing source, a target outside the scope root, in |
-|      | the package, beneath or the same as another row's, in another    |
-|      | package's source, or a source that leads back to its target      |
-| 2    | bad usage — missing argument, an unknown flag, an extra          |
+|      | directory, a missing source, a target outside the scope root or  |
+|      | whose path cannot be followed, in the package, beneath or the    |
+|      | same as another row's, in another package's source, the audit    |
+|      | trail, one that could not be examined, or a source that leads    |
+|      | back to its target; or a relative or unreachable scope root      |
+| 2    | bad usage — missing or empty (`''`) argument, an unknown flag, an extra |
 |      | positional, or a flag-shaped value after `--root`/`--backup-to`  |
 |      | (`--absolute` takes no value: `--absolute=1` is an unknown flag) |
 

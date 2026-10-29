@@ -60,14 +60,35 @@ fn _hsy_read_trail(what): Result {
     return Ok(tr_v);
 }
 
+# Is the entry's target one of this run's rows? Compared lexically
+# normalized and at its physical place (F-080): through 1.7.0 the raw
+# strings were compared, so re-spelling a kept row (`.a` as `./.a`)
+# pruned its link while the summary said up to date.
 fn _hsy_in_plan(plans, abs_tgt): i64 {
+    var nt = fsl_lexical_normalize(abs_tgt);
+    var pt = fsl_physical_target(abs_tgt);
     var n = vec_len(plans);
     var i = 0;
     while (i < n) {
-        if (_hul_cstr_eq(hlnk_plan_abs_target(vec_get(plans, i)), abs_tgt) == 1) { return 1; }
+        var pl = vec_get(plans, i);
+        if (_hul_cstr_eq(fsl_lexical_normalize(hlnk_plan_abs_target(pl)), nt) == 1) { return 1; }
+        if (pt != 0 && _hul_cstr_eq(hlnk_plan_place(pl), pt) == 1) { return 1; }
         i = i + 1;
     }
     return 0;
+}
+
+# Was the entry written for this run's scope? Its abs_target is the scope
+# it was linked under plus its row's target (F-080). Through 1.7.0 any
+# target lexically inside the scope counted, so a `$HOME` prune removed
+# the links a `--root ~/sub` run made, rows still in the manifest, and
+# said they had left it.
+fn _hsy_entry_in_scope(e, scope): i64 {
+    var tgt = hae_abs_target(e);
+    var rel = hae_target(e);
+    if (rel == 0) { return _fsl_within(tgt, scope); }
+    var want = fsl_lexical_normalize(_fsl_path_join(scope, rel));
+    return _hul_cstr_eq(fsl_lexical_normalize(tgt), want);
 }
 
 fn _hsy_refuse_prune_head(m, why): i64 {
@@ -104,7 +125,9 @@ fn _hsy_print_targets(entries): i64 {
 # $HOME would prune what a `--root` run made. A link planned for a row
 # still in the manifest is never a candidate.
 fn _hsy_prune_one(pkg_arg, force): i64 {
+    hlnk_set_in_sync(1);
     var pr_t, pr_v = _hlnk_plan_run(pkg_arg, 0);
+    hlnk_set_in_sync(0);
     if (is_err_result(pr_t) == 1) { return pr_v; }
     var run = pr_v;
     var m = hlnk_run_manifest(run);
@@ -119,20 +142,26 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
     var owned = 0;               # this package's live links, in this scope
     var prune = vec_new();       # ...whose row left the manifest, still ours on disk
     var mutated = vec_new();     # ...whose row left, but the link is not ours any more
+    var gone = vec_new();        # ...whose row left, and the link is already gone
     var i = 0;
     while (i < vec_len(live)) {
         var e = vec_get(live, i);
         var src = hae_abs_source(e);
         var tgt = hae_abs_target(e);
         if (src != 0 && tgt != 0) {
-            if (_fsl_within(src, pkg_dir) == 1 && _fsl_within(tgt, scope) == 1) {
-                owned = owned + 1;
+            if (_fsl_within(src, pkg_dir) == 1 && _hsy_entry_in_scope(e, scope) == 1) {
+                var probe = link_probe(tgt);
+                var kind = link_probe_kind(probe);
+                # The limit counts links that are there (F-080): one
+                # already gone is not at stake, and counting it let a
+                # truncated manifest past "more than half".
+                if (kind != HAPI_LP_ABSENT) { owned = owned + 1; }
                 if (_hsy_in_plan(plans, tgt) == 0) {
-                    var probe = link_probe(tgt);
-                    var kind = link_probe_kind(probe);
                     if (kind == HAPI_LP_SYMLINK && _hul_is_ours(e, link_probe_target(probe)) == 1) {
                         vec_push(prune, e);
-                    } elif (kind != HAPI_LP_ABSENT) {
+                    } elif (kind == HAPI_LP_ABSENT) {
+                        vec_push(gone, e);
+                    } else {
                         vec_push(mutated, e);
                     }
                 }
@@ -162,7 +191,7 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
         return 1;
     }
 
-    if (hapi_dry_run() == 0 && _hlnk_will_write(run, 0) + np > 0) {
+    if (_hlnk_will_write(run, 0) + np > 0) {
         if (hlnk_preflight("sync") != 0) { return 1; }
     }
 
@@ -175,33 +204,60 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
         var rc = _hul_remove_one(pe);
         if (rc == 0 || rc == 2) {
             _hsy_puts("  - ");
-            _hsy_puts(hae_abs_target(pe));
+            _hsy_puts(hae_shown(hae_abs_target(pe)));
             if (hapi_dry_run() == 1) { _hsy_puts("  (dry-run)"); }
             _hsy_puts("\n");
             if (rc == 0 && hapi_dry_run() == 0) {
                 vec_push(gone_tgts, hae_abs_target(pe));
                 vec_push(gone_dirs, hae_created_dir(pe));
+                hul_remove_created_dirs_of(hae_abs_target(pe), hae_created_dir(pe));
             }
         } elif (rc == 1) {
             _hsy_eputs("  ! ");
-            _hsy_eputs(hae_abs_target(pe));
+            _hsy_eputs(hae_shown(hae_abs_target(pe)));
             _hsy_eputs("  (changed since it was planned; skipped)\n");
             refused = refused + 1;
         } elif (rc == 0 - 1) {
             _hsy_eputs("hapi: could not prune ");
-            _hsy_eputs(hae_abs_target(pe));
+            _hsy_eputs(hae_shown(hae_abs_target(pe)));
             _hsy_eputs(" (IO error)\n");
+            # The directories of the links it did remove go too (F-110).
+            hul_remove_created_dirs(gone_tgts, gone_dirs);
             return 1;
         } else {
             hul_report_unwritten(pe, rc);
+            hul_remove_created_dirs(gone_tgts, gone_dirs);
             return 1;
         }
         j = j + 1;
+    }
+    # A dropped row whose link is already gone is retired (F-078), so the
+    # trail stops counting it.
+    var g = 0;
+    while (g < vec_len(gone)) {
+        var ge = vec_get(gone, g);
+        _hsy_puts("  = ");
+        _hsy_puts(hae_shown(hae_abs_target(ge)));
+        _hsy_puts("  (already absent");
+        if (hapi_dry_run() == 1) { _hsy_puts("; dry-run"); }
+        _hsy_puts(")\n");
+        if (hapi_dry_run() == 0) {
+            var gt_t, gt_v = hul_retire(ge);
+            if (is_err_result(gt_t) == 1) {
+                audit_report_unwritten(hae_abs_target(ge), 1, 0);
+                return 1;
+            }
+        }
+        g = g + 1;
     }
     # Before the creates: a directory a dropped row made and a kept row
     # still needs is not empty, so it stays; one emptied now would only be
     # re-made by a create, unclaimed.
     hul_remove_created_dirs(gone_tgts, gone_dirs);
+    # The kept rows were planned before these removals; a link a removal
+    # took away can change where one leads, so each is checked again
+    # before it is written (F-080, the F-067 backstop).
+    if (vec_len(gone_tgts) > 0) { hlnk_note_tree_changed(); }
     var lrc = _hlnk_execute(run, 0);
     _hsy_puts("pruned ");
     fmt_int(np - refused);
@@ -214,7 +270,12 @@ fn _hsy_one(pkg_arg, prune, force): i64 {
     _hsy_puts("syncing ");
     _hsy_puts(pkg_arg);
     _hsy_puts("...\n");
-    if (prune == 0) { return cmd_link(pkg_arg, 0); }
+    if (prune == 0) {
+        hlnk_set_in_sync(1);
+        var lrc = cmd_link(pkg_arg, 0);
+        hlnk_set_in_sync(0);
+        return lrc;
+    }
     return _hsy_prune_one(pkg_arg, force);
 }
 
@@ -265,6 +326,13 @@ fn _hsy_scan_root(root, found): i64 {
             var mk = link_probe_kind(link_probe(mf));
             if (dk == HAPI_LP_DIRECTORY) {
                 if (mk == HAPI_LP_FILE) { vec_push(found, dir); }
+                elif (mk == HAPI_LP_ERROR) {
+                    # A package hapi cannot search is synced, and fails on
+                    # its own terms (F-097): through 1.7.0 it was skipped
+                    # with a wrong reason, and the run said it succeeded.
+                    vec_push(found, dir);
+                }
+                elif (mk == HAPI_LP_SYMLINK) { _hsy_note(mf, "a symlink; the scan follows no symlink"); }
                 elif (mk != HAPI_LP_ABSENT) { _hsy_note(mf, "not a regular file; the scan follows no symlink"); }
             } elif (dk == HAPI_LP_SYMLINK && mk != HAPI_LP_ABSENT) {
                 _hsy_note(dir, "a symlink; the scan follows none — sync it by path");
@@ -323,6 +391,15 @@ fn _hsy_report_unscanned(found): i64 {
         }
         i = i + 1;
     }
+    # Held is decided on where the directories resolve (finding 42): a
+    # package linked as `alias/pkg`, with `alias` a symlink to a root,
+    # was scanned as `root/pkg` and still reported as held by no root.
+    var fphys = vec_new();
+    var f0 = 0;
+    while (f0 < vec_len(found)) {
+        vec_push(fphys, fsl_resolve_path(vec_get(found, f0)));
+        f0 = f0 + 1;
+    }
     var told = vec_new();
     var a = 0;
     while (a < vec_len(names)) {
@@ -331,10 +408,14 @@ fn _hsy_report_unscanned(found): i64 {
         while (b < vec_len(live)) {
             var le = vec_get(live, b);
             var dir = _hsy_entry_pkg_dir(le);
+            var dphys = 0;
+            if (dir != 0) { dphys = fsl_resolve_path(dir); }
             var held = 0;
             var f = 0;
             while (f < vec_len(found)) {
                 if (dir != 0 && _hul_cstr_eq(vec_get(found, f), dir) == 1) { held = 1; }
+                var fp = vec_get(fphys, f);
+                if (dphys != 0 && fp != 0 && _hul_cstr_eq(fp, dphys) == 1) { held = 1; }
                 f = f + 1;
             }
             if (dir != 0 && held == 0) {
@@ -393,7 +474,20 @@ fn _hsy_all(prune, force): i64 {
                     _hsy_eputs("\n");
                     return 2;
                 }
-                vec_push(roots, fsl_lexical_normalize(r));
+                # A root given twice, or two spellings of one, is one
+                # root (F-110): every package in it was its own twin,
+                # both refused, and the total counted twice.
+                var nr = fsl_lexical_normalize(r);
+                var pr = fsl_resolve_path(nr);
+                var dup = 0;
+                var rj = 0;
+                while (rj < vec_len(roots)) {
+                    var other = fsl_resolve_path(vec_get(roots, rj));
+                    if (pr != 0 && other != 0 && _hul_cstr_eq(pr, other) == 1) { dup = 1; }
+                    if (_hul_cstr_eq(nr, vec_get(roots, rj)) == 1) { dup = 1; }
+                    rj = rj + 1;
+                }
+                if (dup == 0) { vec_push(roots, nr); }
             }
             start = i + 1;
         }

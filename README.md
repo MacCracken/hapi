@@ -64,7 +64,10 @@ either shape counts as hapi's link. 1.7.0 adds `hapi fmt`, which rewrites a
 manifest's header in canonical form without changing its hash, and 1.7.1
 repairs the [2026-10-29 P(-1) pass](docs/audit/2026-10-29-audit.md): a
 relative symlink's text had lost its first byte in the resolver since
-1.1.1, which left the capability boundary open for relative links. The releases
+1.1.1, which left the capability boundary open for relative links. It
+repairs all three tiers, F-064 – F-116. Two of them change behaviour:
+`unlink` retires a link that is already gone, and `link` records a link
+of its own that the trail had lost. The releases
 before 1.2.0 added teeth: 1.0.5 → 1.0.10 closed all
 twenty findings of the
 [2026-08-25 P(-1) audit](docs/audit/2026-08-25-audit.md), and 1.1.1
@@ -81,7 +84,7 @@ for the v1.0 surface.
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/hapi   # compile
 ./build/hapi --help                    # see the verb set
-cyrius test                            # 1797 + 98 assertions, two suites
+cyrius test                            # 2052 + 100 assertions, two suites
 ```
 
 A worked example lives at
@@ -100,7 +103,7 @@ file with `hapi adopt ~/.somerc somepackage`.
 - [`docs/audit/`](docs/audit/) — the P(-1) security audit passes
   (index + five dated passes). The
   [2026-10-29 pass](docs/audit/2026-10-29-audit.md) is the current one:
-  F-064 – F-075, repaired in 1.7.1, with two more tiers planned. Before
+  F-064 – F-116, all three tiers repaired in 1.7.1. Before
   it, the [2026-10-28 pass](docs/audit/2026-10-28-audit.md)'s findings
   F-035 – F-059 were repaired in 1.1.1, its 1.2.0
   addendum re-walks the argument surface under cmdit (F-060), and its
@@ -112,8 +115,8 @@ file with `hapi adopt ~/.somerc somepackage`.
 - [`docs/development/state.md`](docs/development/state.md) — live
   state snapshot.
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) —
-  the plan: 1.7.2 and 1.7.3 (the rest of the 2026-10-29 audit), 1.8.0
-  (recovering a lost trail), upstream-gated work, and v2.0 candidates.
+  the plan: the items accepted in 1.7.1 that a later 1.x minor may
+  take, upstream-gated work, and v2.0 candidates.
 
 ## License
 

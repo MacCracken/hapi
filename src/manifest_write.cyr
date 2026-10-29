@@ -21,6 +21,7 @@ include "lib/io.cyr"
 include "lib/string.cyr"
 include "lib/alloc.cyr"
 include "lib/syscalls.cyr"
+include "src/agnos_compat.cyr"   # hapi_open_regular
 
 enum HapiMfWriteError {
     HapiMfwReadFailed = 1;
@@ -30,6 +31,7 @@ enum HapiMfWriteError {
     HapiMfwUnrepresentable = 5;
     HapiMfwStagingExists = 6;
     HapiMfwManifestIsSymlink = 7;
+    HapiMfwHardLinked = 8;
 }
 
 # Can `s` be written into a `hapi.cyml` string value and read back as
@@ -79,6 +81,9 @@ fn hapi_mfw_err_msg(code): i64 {
     }
     if (code == HapiMfwStagingExists) {
         return "a staging file from an interrupted write is in the way (hapi.cyml.<pid>.tmp)";
+    }
+    if (code == HapiMfwHardLinked) {
+        return "hapi.cyml has other hard links; a rewrite would leave them with the old text";
     }
     return "unknown manifest-write error";
 }
@@ -168,7 +173,7 @@ fn manifest_read_was_torn(): i64 { return _hmw_torn; }
 
 fn _hmw_slurp(path, out_len): i64 {
     _hmw_torn = 0;
-    var fd = file_open(path, O_RDONLY, 0);
+    var fd = hapi_open_regular(path, O_RDONLY, 0);       # F-091
     if (fd < 0) { return 0; }
     var size = xlseek(fd, 0, 2);              # SEEK_END
     if (size < 0) { file_close(fd); return 0; }
@@ -228,7 +233,23 @@ fn _hmw_write_atomic(path, buf, n): i64 {
     memcpy(tmp + pos, pids, pl); pos = pos + pl;
     memcpy(tmp + pos, ".tmp\x00", 5);
 
-    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0x1A4);
+    # The rewrite keeps the manifest's permission bits, and refuses one
+    # with other hard links (F-105): through 1.7.0 every rewrite (adopt,
+    # rollback of an adopt, fmt) reset it to 0644 & ~umask, and the rename
+    # left its other names holding the old text.
+    var mode = 0x1A4;
+    #ifndef CYRIUS_TARGET_AGNOS
+    var ost = alloc(STAT_BUFSZ);
+    if (sys_stat(path, ost) >= 0) {
+        mode = load64(ost + STAT_MODE) & 0x1FF;
+        var nlink = load64(ost + STAT_NLINK);
+        #ifdef CYRIUS_ARCH_AARCH64
+        nlink = nlink & 0xFFFFFFFF;
+        #endif
+        if (nlink > 1) { return 0 - HapiMfwHardLinked; }
+    }
+    #endif
+    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_EXCL, mode);
     if (fd < 0) {
         # Say so when it is a leftover in the way (F-038): the pid in the
         # name is reused, so a crashed run's staging file refuses every
@@ -240,7 +261,8 @@ fn _hmw_write_atomic(path, buf, n): i64 {
     }
     var wrc = file_write(fd, buf, n);
     if (wrc != n) { file_close(fd); hapi_unlink(tmp); return 0 - HapiMfwWriteFailed; }
-    hapi_fsync(fd);
+    # The fsync's answer counts (F-105): it was discarded.
+    if (hapi_fsync(fd) < 0) { file_close(fd); hapi_unlink(tmp); return 0 - HapiMfwWriteFailed; }
     var crc = file_close(fd);
     if (crc < 0) { hapi_unlink(tmp); return 0 - HapiMfwWriteFailed; }
 
@@ -464,9 +486,12 @@ fn _hmw_skip_hws(buf, end, pos_ptr): i64 {
 # requested values.
 fn _hmw_scan_link_block(buf, end, block_start, want_src, want_tgt, match_ptr): i64 {
     # Walk to end-of-line after [[link]]
-    var p = block_start + 8;     # skip "[[link]]"
+    var p = block_start;
+    _hmw_skip_hws(buf, end, &p);
+    p = p + 8;                   # skip "[[link]]"
     while (p < end && load8(buf + p) != 10) { p = p + 1; }
     if (p < end) { p = p + 1; }
+    _hmw_block_content_end = p;
 
     var src_match = 0;
     var tgt_match = 0;
@@ -499,6 +524,7 @@ fn _hmw_scan_link_block(buf, end, block_start, want_src, want_tgt, match_ptr): i
                 }
                 while (p < end && load8(buf + p) != 10) { p = p + 1; }
                 if (p < end) { p = p + 1; }
+                _hmw_block_content_end = p;
             } elif (_hmw_starts(buf, end, p, "target") == 1) {
                 p = p + 6;
                 _hmw_skip_hws(buf, end, &p);
@@ -510,9 +536,11 @@ fn _hmw_scan_link_block(buf, end, block_start, want_src, want_tgt, match_ptr): i
                 }
                 while (p < end && load8(buf + p) != 10) { p = p + 1; }
                 if (p < end) { p = p + 1; }
+                _hmw_block_content_end = p;
             } else {
                 while (p < end && load8(buf + p) != 10) { p = p + 1; }
                 if (p < end) { p = p + 1; }
+                _hmw_block_content_end = p;
             }
         }
     }
@@ -531,13 +559,23 @@ fn _hmw_find_link_block(buf, end, from): i64 {
         if (p > 0) {
             if (load8(buf + p - 1) != 10) { at_bol = 0; }
         }
-        if (at_bol == 1 && _hmw_starts(buf, end, p, "[[link]]") == 1) {
-            return p;
+        if (at_bol == 1) {
+            # Indented, as the parser reads it (F-105): through 1.7.0
+            # removal could not find `  [[link]]`, so rollback reported an
+            # adopt reversed and left its row, its source gone.
+            var q = p;
+            _hmw_skip_hws(buf, end, &q);
+            if (_hmw_starts(buf, end, q, "[[link]]") == 1) { return p; }
         }
         p = p + 1;
     }
     return 0 - 1;
 }
+
+# The end of the last line of the block _hmw_scan_link_block just walked
+# that held a key: a row's removal ends there, so the comments and blank
+# lines after it, which belong to what follows, stay (F-105).
+var _hmw_block_content_end = 0;
 
 # Remove a [[link]] block matching `source` and `target` exactly.
 # Trims the preceding blank line(s) along with the block so the
@@ -574,7 +612,7 @@ fn _hmw_remove_unlocked(manifest_path, source, target): i64 {
             var block_end = _hmw_scan_link_block(buf, hdr_end, blk, source, target, &matched);
             if (matched == 1) {
                 found_start = blk;
-                found_end = block_end;
+                found_end = _hmw_block_content_end;
                 go = 0;
             } else {
                 scan = block_end;

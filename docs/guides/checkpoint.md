@@ -76,8 +76,8 @@ dotfiles-zsh link too. The marker is the bookmark that says
 
 | code | meaning                                                       |
 |------|---------------------------------------------------------------|
-| 0    | marker appended                                               |
-| 1    | audit-trail write failed (mkdir or write error)               |
+| 0    | marker appended (`--dry-run`: the trail would take it)        |
+| 1    | audit-trail write failed (mkdir or write error); since 1.7.1 `--dry-run` fails the same way when the trail would refuse the write (F-094) |
 | 2    | bad usage: a positional argument, or a `--label` that is not a label |
 
 ## See also

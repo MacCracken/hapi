@@ -23,6 +23,7 @@
 #     nothing.
 
 include "lib/io.cyr"
+include "src/agnos_compat.cyr"   # hapi_open_regular, hapi_open_absent
 include "lib/string.cyr"
 include "lib/alloc.cyr"
 include "lib/vec.cyr"
@@ -99,10 +100,12 @@ fn hapi_ar_err_msg(code): i64 {
 #        reader, not a field of the line)
 #   +112 shape (cstring or 0; 1.6.0, "absolute" on an entry whose link
 #        text is absolute)
+#   +120 absent (cstring or 0; 1.7.1, "1" on an op:unlink that retired a
+#        link already gone)
 fn _hae_new(): i64 {
-    var e = alloc(120);
+    var e = alloc(128);
     var i = 0;
-    while (i < 120) { store64(e + i, 0); i = i + 8; }
+    while (i < 128) { store64(e + i, 0); i = i + 8; }
     return e;
 }
 fn hae_op(e): i64 { return load64(e); }
@@ -123,14 +126,36 @@ fn hae_shape(e): i64 { return load64(e + 112); }
 # 1 when the entry's link text is absolute (1.6.0). Any other `shape`,
 # and none, is the relative default.
 fn hae_absolute(e): i64 { return _har_cstr_eq(hae_shape(e), "absolute"); }
+# 1 on an op:unlink that retired a link already gone (1.7.1, F-078).
+fn hae_absent(e): i64 { return _har_cstr_eq(load64(e + 120), "1"); }
 
-fn _har_cstr_eq(a, b): i64 {
-    if (a == 0 || b == 0) { return 0; }
-    var an = strlen(a);
-    var bn = strlen(b);
-    if (an != bn) { return 0; }
-    return memeq(a, b, an);
+# A trail field as hapi prints it (F-104): a control byte is shown as `?`.
+# The trail is hapi's own, written from manifests that hold none since
+# F-092, but one an older hapi or a hand wrote may, and its text would
+# reach the terminal raw. 1.5.0 kept only `label` and `ts` back.
+fn hae_shown(s): i64 {
+    if (s == 0) { return ""; }
+    var n = strlen(s);
+    var i = 0;
+    var clean = 1;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c < 32 || c == 127) { clean = 0; }
+        i = i + 1;
+    }
+    if (clean == 1) { return s; }
+    var out = alloc(n + 1);
+    i = 0;
+    while (i < n) {
+        var c2 = load8(s + i);
+        if (c2 < 32 || c2 == 127) { store8(out + i, 63); } else { store8(out + i, c2); }
+        i = i + 1;
+    }
+    store8(out + n, 0);
+    return out;
 }
+
+fn _har_cstr_eq(a, b): i64 { return hapi_cstr_eq(a, b); }
 
 # Parse a hex digit. Returns 0-15, or -1 on non-hex.
 fn _har_hex(c): i64 {
@@ -148,7 +173,12 @@ fn _har_read_str(buf, len, pos_ptr, out_cstr): i64 {
     var pos = load64(pos_ptr);
     if (pos >= len || load8(buf + pos) != 34) { return 0 - 1; }
     pos = pos + 1;
-    # Two-pass: count needed bytes, then alloc, then fill.
+    # Two passes: measure and validate, then fill. `\uXXXX` decodes to
+    # UTF-8, a surrogate pair to its one code point (F-100). Through 1.7.0
+    # only the low byte of the code point was kept and a malformed escape
+    # was accepted, so a non-ASCII path re-serialized by any standard JSON
+    # tool read back as a different path. hapi's writer emits `\u00XX`
+    # only for control bytes, which still decode to that one byte.
     var scan = pos;
     var out_len = 0;
     var go = 1;
@@ -160,15 +190,27 @@ fn _har_read_str(buf, len, pos_ptr, out_cstr): i64 {
             if (scan >= len) { return 0 - 1; }
             var esc = load8(buf + scan);
             if (esc == 117) {
-                # \uXXXX — for our writer, only control bytes (0x00-0x1F),   #skip-lint
-                # which encode in 1 UTF-8 byte. Allow general \u00XX → 1 byte.
-                if (scan + 4 >= len) { return 0 - 1; }
+                var cp = _har_u4(buf, len, scan + 1);
+                if (cp < 0) { return 0 - 1; }
+                scan = scan + 5;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    if (scan + 1 >= len || load8(buf + scan) != 92 || load8(buf + scan + 1) != 117) { return 0 - 1; }
+                    var lo = _har_u4(buf, len, scan + 2);
+                    if (lo < 0xDC00 || lo > 0xDFFF) { return 0 - 1; }
+                    scan = scan + 6;
+                    out_len = out_len + 4;
+                } elif (cp >= 0xDC00 && cp <= 0xDFFF) {
+                    return 0 - 1;                             # a lone low surrogate
+                } else {
+                    out_len = out_len + _har_utf8_len(cp);
+                }
+            } elif (esc == 34 || esc == 92 || esc == 47 || esc == 98 || esc == 102
+                    || esc == 110 || esc == 114 || esc == 116) {
                 out_len = out_len + 1;
-                scan = scan + 4;
+                scan = scan + 1;
             } else {
-                out_len = out_len + 1;
+                return 0 - 1;                                 # not a JSON escape
             }
-            scan = scan + 1;
         } else {
             out_len = out_len + 1;
             scan = scan + 1;
@@ -177,6 +219,7 @@ fn _har_read_str(buf, len, pos_ptr, out_cstr): i64 {
     if (go == 1) { return 0 - 1; }   # unterminated
 
     var out = alloc(out_len + 1);
+    if (out == 0) { return 0 - 1; }
     var rp = pos;
     var wp = 0;
     var go2 = 1;
@@ -189,21 +232,17 @@ fn _har_read_str(buf, len, pos_ptr, out_cstr): i64 {
             if (esc == 110) { store8(out + wp, 10); wp = wp + 1; rp = rp + 1; }
             elif (esc == 114) { store8(out + wp, 13); wp = wp + 1; rp = rp + 1; }
             elif (esc == 116) { store8(out + wp, 9);  wp = wp + 1; rp = rp + 1; }
-            elif (esc == 34)  { store8(out + wp, 34); wp = wp + 1; rp = rp + 1; }
-            elif (esc == 92)  { store8(out + wp, 92); wp = wp + 1; rp = rp + 1; }
-            elif (esc == 47)  { store8(out + wp, 47); wp = wp + 1; rp = rp + 1; }
+            elif (esc == 98)  { store8(out + wp, 8);  wp = wp + 1; rp = rp + 1; }
+            elif (esc == 102) { store8(out + wp, 12); wp = wp + 1; rp = rp + 1; }
             elif (esc == 117) {
-                rp = rp + 1;
-                var h1 = _har_hex(load8(buf + rp));
-                var h2 = _har_hex(load8(buf + rp + 1));
-                var h3 = _har_hex(load8(buf + rp + 2));
-                var h4 = _har_hex(load8(buf + rp + 3));
-                var cp = h1 * 4096 + h2 * 256 + h3 * 16 + h4;
-                # Writer only emits \u00XX (control bytes). Treat
-                # anything wider as a single byte too — we don't
-                # need full UTF-8 expansion for the audit trail.
-                store8(out + wp, cp); wp = wp + 1;
-                rp = rp + 4;
+                var cp = _har_u4(buf, len, rp + 1);
+                rp = rp + 5;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    var lo = _har_u4(buf, len, rp + 2);
+                    cp = 0x10000 + (cp - 0xD800) * 1024 + (lo - 0xDC00);
+                    rp = rp + 6;
+                }
+                wp = wp + _har_utf8_put(out + wp, cp);
             } else {
                 store8(out + wp, esc); wp = wp + 1; rp = rp + 1;
             }
@@ -215,6 +254,48 @@ fn _har_read_str(buf, len, pos_ptr, out_cstr): i64 {
     store64(out_cstr, out);
     store64(pos_ptr, rp);
     return 0;
+}
+
+# The code point of the four hex digits at buf[at..at+4), or -1.
+fn _har_u4(buf, len, at): i64 {
+    if (at + 4 > len) { return 0 - 1; }
+    var cp = 0;
+    var i = 0;
+    while (i < 4) {
+        var h = _har_hex(load8(buf + at + i));
+        if (h < 0) { return 0 - 1; }
+        cp = cp * 16 + h;
+        i = i + 1;
+    }
+    return cp;
+}
+
+fn _har_utf8_len(cp): i64 {
+    if (cp < 0x80) { return 1; }
+    if (cp < 0x800) { return 2; }
+    if (cp < 0x10000) { return 3; }
+    return 4;
+}
+
+# Write `cp` as UTF-8 at `out`; returns the bytes written.
+fn _har_utf8_put(out, cp): i64 {
+    if (cp < 0x80) { store8(out, cp); return 1; }
+    if (cp < 0x800) {
+        store8(out, 0xC0 + cp / 64);
+        store8(out + 1, 0x80 + (cp & 63));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        store8(out, 0xE0 + cp / 4096);
+        store8(out + 1, 0x80 + ((cp / 64) & 63));
+        store8(out + 2, 0x80 + (cp & 63));
+        return 3;
+    }
+    store8(out, 0xF0 + cp / 262144);
+    store8(out + 1, 0x80 + ((cp / 4096) & 63));
+    store8(out + 2, 0x80 + ((cp / 64) & 63));
+    store8(out + 3, 0x80 + (cp & 63));
+    return 4;
 }
 
 # Skip whitespace in a buffer at *pos. JSON allows space/tab/LF/CR.
@@ -247,6 +328,7 @@ fn _har_assign_field(entry, key, value): i64 {
     elif (_har_cstr_eq(key, "label") == 1)        { store64(entry + 88, value); }
     elif (_har_cstr_eq(key, "from") == 1)         { store64(entry + 96, value); }
     elif (_har_cstr_eq(key, "shape") == 1)        { store64(entry + 112, value); }
+    elif (_har_cstr_eq(key, "absent") == 1)       { store64(entry + 120, value); }
     # Unknown fields silently dropped — additive growth per ADR 0002.
     return 0;
 }
@@ -261,7 +343,12 @@ fn _har_parse_line(buf, len): i64 {
     if (pos >= len || load8(buf + pos) != 123) { return 0; }
     pos = pos + 1;
     _har_skip_ws(buf, len, &pos);
-    if (pos < len && load8(buf + pos) == 125) { return entry; }
+    if (pos < len && load8(buf + pos) == 125) {
+        pos = pos + 1;
+        _har_skip_ws(buf, len, &pos);
+        if (pos != len) { return 0; }                  # F-099
+        return entry;
+    }
 
     var go = 1;
     while (go == 1) {
@@ -281,6 +368,11 @@ fn _har_parse_line(buf, len): i64 {
         elif (c == 44) { pos = pos + 1; _har_skip_ws(buf, len, &pos); }
         else { return 0; }
     }
+    # Nothing but whitespace after the closing `}` (F-099): two entries
+    # joined on one line read as the first, so unlink reported success
+    # and left the second's link, still live in the trail.
+    _har_skip_ws(buf, len, &pos);
+    if (pos != len) { return 0; }
     return entry;
 }
 
@@ -300,7 +392,7 @@ fn audit_read_r(path): Result {
     _har_corrupt_line = 0;
     var entries = vec_new();
 
-    var fd = file_open(path, O_RDONLY, 0);
+    var fd = hapi_open_regular(path, O_RDONLY, 0);       # F-091
     if (fd < 0) {
         # ENOENT is the legitimate "no trail yet" case. Anything else —
         # EACCES, EIO, EMFILE — is a real failure and must not read as
@@ -309,6 +401,12 @@ fn audit_read_r(path): Result {
         return Err(HapiArOpenFailed);
     }
 
+    # A shared lock, so a read during another hapi's append sees whole
+    # lines (F-102): through 1.7.0 none was taken, and a trail that grew
+    # mid-read was refused as unreadable. agnos's flock is exclusive-only.
+    #ifndef CYRIUS_TARGET_AGNOS
+    xflock(fd, LOCK_SH);
+    #endif
     var size = xlseek(fd, 0, 2);                  # SEEK_END
     if (size < 0) { file_close(fd); return Err(HapiArReadFailed); }
     if (xlseek(fd, 0, 0) < 0) { file_close(fd); return Err(HapiArReadFailed); }
@@ -318,6 +416,7 @@ fn audit_read_r(path): Result {
     # and the read is detected rather than silently truncated.
     var cap = size + 1;
     var buf = alloc(cap);
+    if (buf == 0) { file_close(fd); return Err(HapiArReadFailed); }   # F-102: too large to hold
     var total = 0;
     var rgo = 1;
     var rerr = 0;
@@ -392,7 +491,7 @@ fn audit_read_from_r(path, from, lineno0): Result {
     var entries = vec_new();
     _har_end = from;
     _har_lines = lineno0;
-    var fd = file_open(path, O_RDONLY, 0);
+    var fd = hapi_open_regular(path, O_RDONLY, 0);       # F-091
     if (fd < 0) {
         if (hapi_open_absent(path, fd) == 1) {
             if (from > 0) { return Err(HapiArShrunk); }
@@ -400,6 +499,9 @@ fn audit_read_from_r(path, from, lineno0): Result {
         }
         return Err(HapiArOpenFailed);
     }
+    #ifndef CYRIUS_TARGET_AGNOS
+    xflock(fd, LOCK_SH);                          # F-102
+    #endif
     var size = xlseek(fd, 0, 2);
     if (size < 0) { file_close(fd); return Err(HapiArReadFailed); }
     if (size < from) { file_close(fd); return Err(HapiArShrunk); }
@@ -408,6 +510,7 @@ fn audit_read_from_r(path, from, lineno0): Result {
     var want = size - from;
     var cap = want + 1;
     var buf = alloc(cap);
+    if (buf == 0) { file_close(fd); return Err(HapiArReadFailed); }
     var total = 0;
     var rgo = 1;
     var rerr = 0;

@@ -413,7 +413,34 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     if (cmdit_get_bool(vh, f_dry) == 1) { hapi_set_dry_run(1); }
     if (cmdit_get_bool(vh, f_abs) == 1) { hapi_set_absolute(1); }
     var backup = cmdit_get_str(vh, f_backup);
-    if (backup != 0) { hapi_set_backup_dir(backup); }
+    if (backup != 0) {
+        # An empty value put snapshots at the filesystem root (F-098); a
+        # relative one is made absolute here, once — agnos, with no cwd,
+        # failed it only after 999 probes, under a made-up `-999` name.
+        if (strlen(backup) == 0) {
+            _hapi_eputs("hapi: --backup-to needs a directory, not an empty value\n");
+            return 2;
+        }
+        var babs = fsl_to_absolute(backup);
+        if (babs == 0) {
+            _hapi_eputs("hapi: cannot resolve a relative --backup-to here; pass an absolute path\n");
+            return 1;
+        }
+        hapi_set_backup_dir(babs);
+    }
+
+    # An empty argument is not a path (F-098): it meant the current
+    # directory to link, status, sync and fmt, and /hapi.cyml to inspect
+    # and check.
+    var pi = 0;
+    while (pi < 2) {
+        var pv = cmdit_positional(vh, pi);
+        if (pv != 0 && strlen(pv) == 0) {
+            _hapi_eputs("hapi: an empty argument is not a path or a package name\n");
+            return 2;
+        }
+        pi = pi + 1;
+    }
 
     var p0 = cmdit_positional(vh, 0);
     if (v == HAPI_V_INSPECT)    { return cmd_inspect(p0); }

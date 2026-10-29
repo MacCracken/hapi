@@ -503,6 +503,21 @@ fn test_fmt_round_trip() {
 # F-071: adopt's move never replaces the package-side name. A file, a
 # link or a dangling link already there refuses it; an absent name takes
 # it, and the old name is gone.
+# F-089: on agnos any stat failure read as an absent trail, so a trail
+# under a regular file read as empty. It is an error on every target.
+fn test_trail_under_a_file_is_an_error() {
+    test_group("audit: a trail under a regular file is an error, not empty (F-089)");
+
+    var d = _ta_scratch();
+    var f = _fsl_path_join(d, "file");
+    _ta_write(f, "x");
+    var t, v = audit_read_r(_fsl_path_join(f, "audit.jsonl"));
+    assert_eq(is_err_result(t), 1, "reading it is an error");
+    var t2, v2 = audit_read_r(_fsl_path_join(d, "none/audit.jsonl"));
+    assert_eq(is_err_result(t2), 0, "while a trail that is not there yet is empty");
+    return 0;
+}
+
 fn test_rename_noreplace() {
     test_group("adopt's move never replaces what is at the package-side name (F-071)");
 
@@ -558,6 +573,7 @@ fn main(): i64 {
     test_absolute_round_trip();
     test_fmt_round_trip();
     test_rename_noreplace();
+    test_trail_under_a_file_is_an_error();
     test_scratch_cleanup();         # last: it removes every scratch directory
     return assert_summary();
 }

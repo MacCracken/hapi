@@ -1213,12 +1213,16 @@ fn test_cmd_sync_recovery_after_trail_loss() {
     assert_eq(cmd_sync("docs/examples/dotfiles-zsh"), 0, "recovery sync exits 0");
     assert_eq(link_probe_kind(link_probe(zrc)), HAPI_LP_SYMLINK, "link intact after recovery sync");
 
-    # Documented limitation, issues/2026-05-24-audit-trail-lost-on-state-dir-wipe.md:
-    # an idempotent sync writes no entry, so the wiped trail is NOT
-    # rebuilt to match the live links. `status` is the source of truth
-    # after a state-dir loss, not `list` / `rollback`. If a future
-    # reseed affordance lands, this assertion is the one to revisit.
-    assert_eq(_test_file_size(audit_path), 0, "no-op recovery sync does not rebuild the trail");
+    # Since 1.7.1 (F-079, closing F-006) the re-sync records them: each
+    # link is exactly what hapi writes for its row, which is the proof
+    # removal uses, so the trail is rebuilt to match. A second sync
+    # finds them recorded and writes nothing.
+    var tr_t, tr_v = audit_read_default_r();
+    assert_eq(is_ok(tr_t), 1, "the rebuilt trail reads");
+    assert_eq(_hls_live_count(tr_v, "dotfiles-zsh"), 3, "a recovery sync records the three links again");
+    var rebuilt = _test_file_size(audit_path);
+    assert_eq(cmd_sync("docs/examples/dotfiles-zsh"), 0, "a second sync exits 0");
+    assert_eq(_test_file_size(audit_path), rebuilt, "and writes nothing");
 
     _test_clear_env();
     return 0;
@@ -5462,7 +5466,7 @@ fn test_fmt_refusals() {
 
     # The proof refuses what the backslash check cannot see: a value that
     # spans lines in a CR LF manifest would gain a CR from the conversion.
-    var ml = "[package]\r\nname = \"two\nlines\"\r\nversion = \"1\"\r\n";
+    var ml = "[package]\r\nname = \"two\"\r\nversion = \"1\"\r\ndescription = \"two\nlines\"\r\n";
     var pm = _fm_pkg(ml);
     var avm = _cli_av("hapi fmt");
     _cli_add(avm, pm);
@@ -6276,6 +6280,1247 @@ fn test_manifest_read_is_whole() {
 }
 
 # ============================================================
+# 1.7.1 — tier 2: correctness and error handling (F-076 on)
+# ============================================================
+
+# F-076: a target that could not be probed was listed as a conflict,
+# with --force advised, and --force then skipped it and exited 0.
+fn test_unprobeable_target_refused() {
+    test_group("link: a target hapi cannot examine is refused, --force or not (F-076)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    _test_write_file(_fsl_path_join(home, ".cfg"), "a regular file");
+    var pkg = _t111_pkg(_r171_cat(_r171_row("a", ".a"), _r171_row("b", ".cfg/b")));
+    _test_write_file(_fsl_path_join(pkg, "a"), "a");
+    _test_write_file(_fsl_path_join(pkg, "b"), "b");
+    assert_eq(cmd_link(pkg, 0), 1, "a path through a regular file is refused");
+    assert_eq(cmd_link(pkg, 1), 1, "and --force does not skip it");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".a"))), HAPI_LP_ABSENT,
+      "the run wrote nothing, not even the good row");
+
+    var locked = _fsl_path_join(home, "locked");
+    hapi_mkdir(locked, 0x1C0);
+    var p2 = _t111_pkg(_r171_row("b", "locked/b"));
+    _test_write_file(_fsl_path_join(p2, "b"), "b");
+    sys_chmod(locked, 0);
+    assert_eq(cmd_link(p2, 1), 1, "an unsearchable directory is refused under --force");
+    sys_chmod(locked, 0x1C0);
+    _r171_clear();
+    return 0;
+}
+
+# F-077: rollback counted an entry it could not probe as already at its
+# expected state, exited 0, and --steps / --to sealed it.
+fn test_rollback_unprobeable_is_an_error() {
+    test_group("rollback: an entry it cannot probe is an error, never sealed (F-077)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var pkg = _t111_pkg(_r171_row("f", "box/f"));
+    _test_write_file(_fsl_path_join(pkg, "f"), "f");
+    assert_eq(cmd_link(pkg, 0), 0, "linked into box/");
+    var box = _fsl_path_join(home, "box");
+    sys_chmod(box, 0);
+    assert_eq(cmd_rollback(), 1, "rollback exits 1 when it cannot look");
+    assert_eq(cmd_rollback_run(1, 0), 1, "so does --steps 1");
+    sys_chmod(box, 0x1C0);
+    assert_eq(cmd_rollback_run(1, 0), 0, "with the directory searchable again, it rolls back");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(box, "f"))), HAPI_LP_ABSENT,
+      "the link was not sealed away: it is reversed now");
+    _r171_clear();
+    return 0;
+}
+
+# F-078: an unlink of a link already gone printed a removal, wrote nothing,
+# and the entry stayed live for good.
+fn test_unlink_retires_an_absent_link() {
+    test_group("unlink: a link already gone is retired, and rollback leaves it gone (F-078)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var pkg = _t111_pkg(_r171_cat(_r171_row("x", ".x"), _r171_row("y", ".y")));
+    _test_write_file(_fsl_path_join(pkg, "x"), "x");
+    _test_write_file(_fsl_path_join(pkg, "y"), "y");
+    assert_eq(cmd_link(pkg, 0), 0, "linked");
+    assert_eq(cmd_checkpoint(), 0, "checkpoint");
+    var x = _fsl_path_join(home, ".x");
+    var y = _fsl_path_join(home, ".y");
+    hapi_unlink(x);
+    assert_eq(cmd_unlink("p"), 0, "unlink exits 0");
+    var tr_t, tr_v = audit_read_default_r();
+    assert_eq(_hls_live_count(tr_v, "p"), 0, "list counts nothing live");
+    var last = vec_get(tr_v, vec_len(tr_v) - 1);
+    var retire = vec_get(tr_v, vec_len(tr_v) - 2);
+    assert_eq(hae_absent(retire) + hae_absent(last), 1, "one entry retires the absent link");
+    var before = _test_file_size(audit_trail_path());
+    assert_eq(cmd_unlink("p"), 0, "a second unlink has nothing to do");
+    assert_eq(_test_file_size(audit_trail_path()), before, "and writes nothing");
+
+    assert_eq(cmd_rollback_run(1, 0), 0, "rollback --steps 1 undoes the unlink");
+    assert_eq(link_probe_kind(link_probe(y)), HAPI_LP_SYMLINK, "the link it removed is back");
+    assert_eq(link_probe_kind(link_probe(x)), HAPI_LP_ABSENT,
+      "the one you deleted by hand is not");
+    _r171_clear();
+    return 0;
+}
+
+# F-080: prune's scope was lexical and its identity a raw string, and its
+# limit counted links already gone.
+fn test_prune_scope_and_identity() {
+    test_group("sync --prune: its scope, its rows and its limit, as they are (F-080)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var sub = _fsl_path_join(home, "sub");
+    hapi_mkdir(sub, 0x1C0);
+    var pkg = _t111_pkg(_r171_cat(_r171_row("a", ".a"), _r171_row("b", ".b")));
+    _test_write_file(_fsl_path_join(pkg, "a"), "a");
+    _test_write_file(_fsl_path_join(pkg, "b"), "b");
+    link_set_scope_root(sub);
+    assert_eq(cmd_link(pkg, 0), 0, "linked under --root ~/sub");
+    link_set_scope_root(home);
+    assert_eq(cmd_link(pkg, 0), 0, "and under $HOME");
+    _test_write_file(_fsl_path_join(pkg, "hapi.cyml"),
+      _r171_cat(_r171_hdr("p"), _r171_cat(_r171_row("a", ".a"), _r171_row("b", "./.b"))));
+    assert_eq(cmd_sync_run(pkg, 1, 0), 0, "a $HOME prune");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(sub, ".a"))), HAPI_LP_SYMLINK,
+      "leaves the --root ~/sub run's links alone");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".b"))), HAPI_LP_SYMLINK,
+      "and a row it re-spelled is still kept");
+
+    # Four links, two deleted by hand, and the manifest emptied: two links
+    # are at stake, and both would go. That is more than half.
+    var q = _t111_pkg(_r171_cat(_r171_cat(_r171_row("a", ".qa"), _r171_row("b", ".qb")),
+      _r171_cat(_r171_row("c", ".qc"), _r171_row("e", ".qe"))));
+    _test_write_file(_fsl_path_join(q, "a"), "a");
+    _test_write_file(_fsl_path_join(q, "b"), "b");
+    _test_write_file(_fsl_path_join(q, "c"), "c");
+    _test_write_file(_fsl_path_join(q, "e"), "e");
+    _test_write_file(_fsl_path_join(q, "hapi.cyml"), _r171_cat(_r171_hdr("q"),
+      _r171_cat(_r171_cat(_r171_row("a", ".qa"), _r171_row("b", ".qb")),
+      _r171_cat(_r171_row("c", ".qc"), _r171_row("e", ".qe")))));
+    assert_eq(cmd_link(q, 0), 0, "four links");
+    hapi_unlink(_fsl_path_join(home, ".qa"));
+    hapi_unlink(_fsl_path_join(home, ".qb"));
+    _test_write_file(_fsl_path_join(q, "hapi.cyml"), _r171_hdr("q"));
+    assert_eq(cmd_sync_run(q, 1, 0), 1, "the limit holds: links already gone are not at stake");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".qc"))), HAPI_LP_SYMLINK,
+      "and the links that are there stay");
+
+    # A kept row planned through a link the same prune removes: `d` led to
+    # elsewhere/, so `d/k` was planned there. Once `d` is gone it would be
+    # written at a new place with the old text. The run stops before it.
+    var w = _t111_pkg(_r171_row("linkdir", "d"));
+    hapi_mkdir(_fsl_path_join(home, "elsewhere"), 0x1C0);
+    hapi_symlink(_fsl_path_join(home, "elsewhere"), _fsl_path_join(w, "linkdir"));
+    _test_write_file(_fsl_path_join(w, "k"), "k");
+    assert_eq(cmd_link(w, 0), 0, "d is a link to elsewhere/");
+    _test_write_file(_fsl_path_join(w, "hapi.cyml"), _r171_cat(_r171_hdr("p"), _r171_row("k", "d/k")));
+    assert_eq(cmd_sync_run(w, 1, 1), 1, "prune removes d, then stops before d/k");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, "d/k"))), HAPI_LP_ABSENT,
+      "nothing was written at d/k with a text planned for elsewhere/");
+    _r171_clear();
+    return 0;
+}
+
+# F-079: a no-op wrote nothing, so links the trail did not record for
+# this package were never recorded again; and another package's --force
+# takeover left the old owner's entry live for good.
+fn test_link_records_what_it_finds() {
+    test_group("link: a link hapi wrote but the trail does not record is recorded (F-079)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var pkg = _t111_pkg(_r171_row("x", ".x"));
+    _test_write_file(_fsl_path_join(pkg, "x"), "x");
+    assert_eq(cmd_link(pkg, 0), 0, "linked as p");
+
+    # [package].name renamed: the links are b's now.
+    _test_write_file(_fsl_path_join(pkg, "hapi.cyml"), _r171_cat(_r171_hdr("b"), _r171_row("x", ".x")));
+    var before = _test_file_size(audit_trail_path());
+    assert_eq(cmd_link(pkg, 0), 0, "a re-link under the new name");
+    assert(_test_file_size(audit_trail_path()) > before, "records the link for b");
+    var again = _test_file_size(audit_trail_path());
+    assert_eq(cmd_link(pkg, 0), 0, "a second re-link");
+    assert_eq(_test_file_size(audit_trail_path()), again, "writes nothing");
+    assert_eq(cmd_unlink("b"), 0, "unlink b finds it");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".x"))), HAPI_LP_ABSENT, "and removes it");
+
+    # The trail's last word on .x is now that unlink. The same link made
+    # again by hand is hapi's text for the row, so it is recorded again.
+    hapi_symlink(fsl_link_text(_fsl_path_join(home, ".x"), _fsl_path_join(pkg, "x")), _fsl_path_join(home, ".x"));
+    var after_unlink = _test_file_size(audit_trail_path());
+    assert_eq(cmd_link(pkg, 0), 0, "a re-link after the unlink");
+    assert(_test_file_size(audit_trail_path()) > after_unlink, "records it again: an unlink is not a claim");
+    assert_eq(cmd_unlink("b"), 0, "and unlink removes it");
+
+    # $HOME moved: the relative links moved with it; a re-link records
+    # them at their new paths, and unlink removes them there.
+    var h2 = _fsl_path_join(d, "home2");
+    hapi_mkdir(h2, 0x1C0);
+    var pk2 = _t111_pkg_at(_fsl_path_join(d, "dots"), _r171_row("y", ".y"));
+    _test_write_file(_fsl_path_join(pk2, "y"), "y");
+    assert_eq(cmd_link(pk2, 0), 0, "linked in home");
+    var moved = _fsl_path_join(h2, ".y");
+    assert_eq(hapi_rename(_fsl_path_join(home, ".y"), moved), 0, "the link moves to home2");
+    link_set_scope_root(h2);
+    assert_eq(cmd_link(pk2, 0), 0, "a re-link in home2 records it there");
+    assert_eq(cmd_unlink("p"), 0, "unlink exits 0");
+    assert_eq(link_probe_kind(link_probe(moved)), HAPI_LP_ABSENT, "the moved link is removed");
+
+    # Another package's --force over p's link takes it over: p no longer
+    # holds it, so p's unlink has nothing to refuse.
+    link_set_scope_root(home);
+    var pa = _t111_pkg(_r171_row("t", ".t"));
+    _test_write_file(_fsl_path_join(pa, "t"), "a");
+    assert_eq(cmd_link(pa, 0), 0, "p links .t");
+    var pb = _t111_pkg_at(_fsl_path_join(d, "other"), "");
+    _test_write_file(_fsl_path_join(pb, "hapi.cyml"), _r171_cat(_r171_hdr("q"), _r171_row("t", ".t")));
+    _test_write_file(_fsl_path_join(pb, "t"), "b");
+    assert_eq(cmd_link(pb, 1), 0, "q takes .t over with --force");
+    assert_eq(cmd_unlink("p"), 0, "p's unlink does not refuse a link it no longer holds");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".t"))), HAPI_LP_SYMLINK,
+      "and q's link stays");
+    _r171_clear();
+    return 0;
+}
+
+# F-081: a row could target the audit trail, or a directory holding it,
+# and --force deleted hapi's record or moved it into the package.
+fn test_rows_never_target_the_trail() {
+    test_group("link / adopt: the audit trail is never a target (F-081)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    # ~/.local/state is a symlink to ~/realst, where the trail really is.
+    var st = _fsl_path_join(home, "realst");
+    fsl_mkdir_parents(_fsl_path_join(st, "hapi/x"));
+    hapi_mkdir(_fsl_path_join(home, ".local"), 0x1C0);
+    hapi_symlink(st, _fsl_path_join(home, ".local/state"));
+    var tr = _fsl_path_join(home, ".local/state/hapi/audit.jsonl");
+    audit_set_trail_path(tr);
+    var c = _t111_pkg(_r171_row("c", ".c"));
+    _test_write_file(_fsl_path_join(c, "c"), "c");
+    assert_eq(cmd_link(c, 0), 0, "a trail exists");
+
+    var pkg = _t111_pkg(_r171_row("f", ".local/state"));
+    _test_write_file(_fsl_path_join(pkg, "f"), "f");
+    assert_eq(cmd_link(pkg, 1), 1, "replacing the symlinked directory that holds the trail is refused");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".local/state"))), HAPI_LP_SYMLINK,
+      "the symlink is left");
+    # Reached by another spelling: only its physical place says it is the trail.
+    hapi_symlink(st, _fsl_path_join(home, "lnk"));
+    var p2 = _t111_pkg(_r171_row("f", "lnk/hapi/audit.jsonl"));
+    _test_write_file(_fsl_path_join(p2, "f"), "f");
+    assert_eq(cmd_link(p2, 1), 1, "a row that is the trail by another spelling is refused");
+    assert_eq(link_probe_kind(link_probe(tr)), HAPI_LP_FILE, "the trail is still a file");
+    var a = _t111_pkg("");
+    assert_eq(cmd_adopt(tr, a), 1, "adopt refuses the trail");
+    assert_eq(link_probe_kind(link_probe(tr)), HAPI_LP_FILE, "and leaves it where it is");
+    _r171_clear();
+    return 0;
+}
+
+# RLIMIT_FSIZE, for the short write F-082 needs.
+fn _r171_fsize_limit(n): i64 {
+    var rl[16];
+    store64(&rl, n);
+    store64(&rl + 8, 0 - 1);
+    var nr = 160;
+    #ifdef CYRIUS_ARCH_AARCH64
+    nr = 164;
+    #endif
+    return syscall(nr, 1, &rl);
+}
+
+# F-082: a short trail write left hapi's own partial line, which every
+# later write then refused as a torn tail.
+fn test_short_trail_write_is_taken_back() {
+    test_group("audit: an append that does not complete is taken back (F-082)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var c = _t111_pkg(_r171_row("c", ".c"));
+    _test_write_file(_fsl_path_join(c, "c"), "c");
+    assert_eq(cmd_link(c, 0), 0, "a trail with one entry");
+    var tr = audit_trail_path();
+    var size = _test_file_size(tr);
+    hapi_ignore_signal(25);                    # SIGXFSZ: a short write, not a kill
+    assert_eq(_r171_fsize_limit(size + 10), 0, "a file-size limit ten bytes past it");
+    var at, av = audit_append_link_r("p", "1.0.0", "sha1c:00", "a", ".a", "/x/a", "/x/.a", 0);
+    _r171_fsize_limit(0 - 1);
+    assert_eq(is_err_result(at), 1, "the append fails");
+    assert_eq(_test_file_size(tr), size, "and leaves the trail exactly as it was");
+    var bt, bv = audit_append_link_r("p", "1.0.0", "sha1c:00", "a", ".a", "/x/a", "/x/.a", 0);
+    assert_eq(is_ok(bt), 1, "so the next append is not refused as a torn tail");
+    _r171_clear();
+    return 0;
+}
+
+# F-085: SIGPIPE at its default killed a run mid-way when its output pipe
+# closed. Ignored, a write to a pipe nobody reads fails with EPIPE.
+fn test_sigpipe_ignored() {
+    test_group("main: a closed output pipe is an EPIPE, not a kill (F-085)");
+
+    var fds[16];
+    assert_eq(sys_pipe(&fds), 0, "a pipe");
+    var rfd = load32(&fds);
+    var wfd = load32(&fds + 4);
+    file_close(rfd);
+    assert_eq(hapi_ignore_signal(13), 0, "SIGPIPE ignored");
+    assert_eq(file_write(wfd, "x", 1), 0 - 32, "the write answers EPIPE, and the run goes on");
+    file_close(wfd);
+    return 0;
+}
+
+# F-083: the adopt reversal always edited <dir>/hapi.cyml, and was not
+# all-or-none for a symlinked manifest.
+fn test_adopt_reversal_finds_its_manifest() {
+    test_group("rollback: an adopt is undone in the manifest that holds its row (F-083)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var pd = _fsl_path_join(d, "pkgs");
+    hapi_mkdir(pd, 0x1C0);
+    var other = _fsl_path_join(pd, "hapi.cyml");
+    _test_write_file(other, _r171_hdr("other"));
+    var named = _fsl_path_join(pd, "zsh.cyml");
+    _test_write_file(named, _r171_hdr("zsh"));
+    var rc = _fsl_path_join(home, ".zrc");
+    _test_write_file(rc, "zrc");
+    assert_eq(cmd_adopt(rc, named), 0, "adopt into a named manifest");
+    var other_size = _test_file_size(other);
+    assert_eq(cmd_rollback(), 0, "rollback undoes it");
+    assert_eq(link_probe_kind(link_probe(rc)), HAPI_LP_FILE, "the file is back");
+    var mt, mv = hapi_mf_parse_file_r(named);
+    assert_eq(vec_len(hapi_mf_links(mv)), 0, "its row is out of zsh.cyml");
+    assert_eq(_test_file_size(other), other_size, "and the other package's hapi.cyml is untouched");
+
+    # A symlinked manifest is refused before any step, not after two.
+    var pk = _t111_pkg("");
+    var mf = _fsl_path_join(pk, "hapi.cyml");
+    var e = _fsl_path_join(home, ".erc");
+    _test_write_file(e, "erc");
+    assert_eq(cmd_adopt(e, pk), 0, "adopt into p");
+    var copy = _fsl_path_join(pk, "real.cyml.txt");
+    assert_eq(hapi_rename(mf, copy), 0, "the manifest moves aside");
+    assert_eq(hapi_symlink(copy, mf), 0, "and hapi.cyml becomes a link to it");
+    assert_eq(cmd_rollback(), 1, "rollback refuses the symlinked manifest");
+    assert_eq(link_probe_kind(link_probe(e)), HAPI_LP_SYMLINK, "the adopt is left whole: the link");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(pk, "erc"))), HAPI_LP_FILE,
+      "and the file in the package");
+    _r171_clear();
+    return 0;
+}
+
+fn _r171_mode(path): i64 {
+    var st = alloc(STAT_BUFSZ);
+    if (sys_stat(path, st) < 0) { return 0 - 1; }
+    return load64(st + STAT_MODE) & 0x1FF;
+}
+
+# F-084: snapshots were always 0644, were not fsynced, survived a failed
+# copy under a whole-looking name, and were composed through links the
+# same run made.
+fn test_snapshots_keep_secrets_private() {
+    test_group("--backup-to: a snapshot keeps its mode, and only whole ones remain (F-084)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var bk = _fsl_path_join(d, "bk");
+    hapi_mkdir(bk, 0x1ED);
+    var sec = _fsl_path_join(home, ".secret");
+    var fd = file_open(sec, O_WRONLY | O_CREAT | O_TRUNC, 0x180);
+    file_write(fd, "s3cret", 6);
+    file_close(fd);
+    sys_chmod(sec, 0x180);
+    var pkg = _t111_pkg(_r171_row("s", ".secret"));
+    _test_write_file(_fsl_path_join(pkg, "s"), "pkg");
+    hapi_set_backup_dir(bk);
+    assert_eq(cmd_link(pkg, 1), 0, "link --force --backup-to replaces the secret");
+    var names = vec_new();
+    dir_list_checked(str_from(bk), names);
+    assert_eq(vec_len(names), 1, "one snapshot");
+    if (vec_len(names) == 1) {
+        var snap = _fsl_path_join(bk, _fsl_str_to_cstr(vec_get(names, 0)));
+        assert_eq(_r171_mode(snap), 0x180, "and it is 0600, as the secret was");
+    }
+
+    # A copy cut short is not left behind.
+    var big = _fsl_path_join(home, ".big");
+    var buf = alloc(65536);
+    memset(buf, 120, 65536);
+    var bf = file_open(big, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    file_write(bf, buf, 65536);
+    file_close(bf);
+    var bk2 = _fsl_path_join(d, "bk2");
+    hapi_mkdir(bk2, 0x1ED);
+    hapi_set_backup_dir(bk2);
+    var p2 = _t111_pkg(_r171_row("b", ".big"));
+    _test_write_file(_fsl_path_join(p2, "b"), "b");
+    hapi_ignore_signal(25);
+    _r171_fsize_limit(4096);
+    var rc = cmd_link(p2, 1);
+    _r171_fsize_limit(0 - 1);
+    assert_eq(rc, 1, "a snapshot that cannot be written stops the run");
+    var n2 = vec_new();
+    dir_list_checked(str_from(bk2), n2);
+    assert_eq(vec_len(n2), 0, "and leaves no partial snapshot");
+    assert_eq(_test_file_size(big), 65536, "the file is untouched");
+
+    # The backup directory may not be in the package, or beneath a target.
+    hapi_set_backup_dir(_fsl_path_join(p2, "snaps"));
+    assert_eq(cmd_link(p2, 1), 1, "a backup directory in the package is refused");
+    var p3 = _t111_pkg(_r171_row("b", ".bkparent"));
+    _test_write_file(_fsl_path_join(p3, "b"), "b");
+    hapi_set_backup_dir(_fsl_path_join(home, ".bkparent/bk"));
+    assert_eq(cmd_link(p3, 0), 1, "one beneath a target this run links is refused");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".bkparent"))), HAPI_LP_ABSENT,
+      "and nothing was linked");
+    _test_write_file(_fsl_path_join(home, ".cfgdir"), "user");
+    hapi_set_backup_dir(_fsl_path_join(home, ".cfgdir/bk"));
+    assert_eq(cmd_link(p3, 0), 1, "one that cannot be resolved is refused");
+    hapi_set_backup_dir(0);
+    var af = _fsl_path_join(home, ".adoptbk");
+    _test_write_file(af, "a");
+    var av = _cli_av("hapi adopt");
+    _cli_add(av, af);
+    _cli_add(av, _t111_pkg(""));
+    _cli_add(av, "--backup-to");
+    _cli_add(av, _fsl_path_join(home, ".cfgdir/bk"));
+    assert_eq(_cli_run(av), 1, "adopt refuses one that cannot be resolved");
+    hapi_set_backup_dir(0);
+    assert(_test_substr(_cli_err, _cli_err_n, "cannot be resolved") >= 0,
+      "...and says so, not that it is in the package");
+    assert_eq(_test_file_size(af), 1, "the file stays where it was");
+    _r171_clear();
+    return 0;
+}
+
+# F-086: the reader took bayan's header, which a `[[entries]]` line ends.
+fn test_header_ends_at_the_delimiter() {
+    test_group("manifest: the header ends at `---`, whatever the lines are (F-086)");
+
+    var d = _test_scratch_dir();
+    var mf = _fsl_path_join(d, "hapi.cyml");
+    _test_write_file(mf, _r171_cat(_r171_cat(_r171_hdr("q"), _r171_row("zshrc", ".zshrc")),
+      _r171_cat("\n[[entries]]\n", _r171_row("vimrc", ".vimrc"))));
+    var t, v = hapi_mf_parse_file_r(mf);
+    assert_eq(is_ok(t), 1, "a header with an [[entries]] line parses");
+    if (is_ok(t) == 1) { assert_eq(vec_len(hapi_mf_links(v)), 2, "with the row after that line"); }
+    _test_write_file(mf, _r171_cat(_r171_cat(_r171_hdr("q"), _r171_row("zshrc", ".zshrc")),
+      _r171_cat("\n---\n# notes\n", _r171_cat(_r171_row("example", ".ex"), "\n[[entries]]\n"))));
+    var t2, v2 = hapi_mf_parse_file_r(mf);
+    assert_eq(is_ok(t2), 1, "a body with an [[entries]] line parses");
+    if (is_ok(t2) == 1) { assert_eq(vec_len(hapi_mf_links(v2)), 1, "and its [[link]] example is not a row"); }
+    return 0;
+}
+
+# F-087: a source that is a dangling symlink counted as present.
+fn test_dangling_source_is_missing() {
+    test_group("link / check: a source that is a dangling symlink is missing (F-087)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var pkg = _t111_pkg(_r171_row("s", ".s"));
+    hapi_symlink("nowhere", _fsl_path_join(pkg, "s"));
+    assert_eq(cmd_link(pkg, 0), 1, "link refuses a source that names nothing");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".s"))), HAPI_LP_ABSENT,
+      "and plants no link to nothing");
+    assert_eq(cmd_check(pkg, 0), 1, "check reports it missing");
+    _test_write_file(_fsl_path_join(pkg, "nowhere"), "now");
+    assert_eq(cmd_link(pkg, 0), 0, "once it names a file, the row links");
+    _r171_clear();
+    return 0;
+}
+
+# F-088: rollback --to walked past the label's newest checkpoint, inside
+# a range already rolled back, to an older one of the same name.
+fn test_rollback_to_newest_label_only() {
+    test_group("rollback --to: only the label's newest checkpoint is a destination (F-088)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var x = _t111_pkg(_r171_row("x", ".x"));
+    _test_write_file(_fsl_path_join(x, "x"), "x");
+    var y = _t111_pkg_at(_fsl_path_join(d, "y"), "");
+    _test_write_file(_fsl_path_join(y, "hapi.cyml"), _r171_cat(_r171_hdr("y"), _r171_row("y", ".y")));
+    _test_write_file(_fsl_path_join(y, "y"), "y");
+    var z = _t111_pkg_at(_fsl_path_join(d, "z"), "");
+    _test_write_file(_fsl_path_join(z, "hapi.cyml"), _r171_cat(_r171_hdr("z"), _r171_row("z", ".z")));
+    _test_write_file(_fsl_path_join(z, "z"), "z");
+    assert_eq(cmd_checkpoint_label("a"), 0, "checkpoint a (older)");
+    assert_eq(cmd_link(x, 0), 0, "link x");
+    assert_eq(cmd_checkpoint_label("a"), 0, "checkpoint a (newer)");
+    assert_eq(cmd_link(y, 0), 0, "link y");
+    assert_eq(cmd_rollback_run(2, 0), 0, "rollback --steps 2: the newer a is inside what it undid");
+    assert_eq(cmd_link(z, 0), 0, "new work: link z");
+    assert_eq(cmd_rollback_run(0, "a"), 0, "rollback --to a");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".z"))), HAPI_LP_SYMLINK,
+      "does not go back to the older a: z stays");
+    _r171_clear();
+    return 0;
+}
+
+# F-090: adopt with the scope root itself as the file wrote an empty
+# target; and nothing read the appended row back.
+fn test_adopt_reads_its_row_back() {
+    test_group("adopt: the scope root is not a file to adopt, and its row reads back (F-090)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var f = _fsl_path_join(home, "somefile");
+    _test_write_file(f, "content");
+    link_set_scope_root(f);
+    var pkg = _t111_pkg("");
+    assert_eq(cmd_adopt(f, pkg), 1, "the scope root itself is refused");
+    link_set_scope_root(home);
+    assert_eq(link_probe_kind(link_probe(f)), HAPI_LP_FILE, "and stays where it is");
+
+    var mf = _fsl_path_join(pkg, "hapi.cyml");
+    _test_write_file(mf, _r171_cat(_r171_hdr("p"), _r171_row("a", ".a")));
+    assert_eq(_hap_row_read_back(mf, 0, "a", ".a"), 1, "one more row, and it is there");
+    assert_eq(_hap_row_read_back(mf, 1, "a", ".a"), 0, "the wrong row count is not a read-back");
+    assert_eq(_hap_row_read_back(mf, 0, "b", ".a"), 0, "nor is another row");
+    _test_write_file(mf, "[package]\nname = \"p");
+    assert_eq(_hap_row_read_back(mf, 0, "a", ".a"), 0, "nor a manifest that does not parse");
+    _r171_clear();
+    return 0;
+}
+
+# ============================================================
+# 1.7.1 — tier 3: robustness and messages (F-091 on)
+# ============================================================
+
+# The warm run's trail scan skips instead of stepping (_hlnk_last_at).
+# A skip that is one byte too long misses a match, so it is checked
+# against the byte-by-byte scan it replaced, on buffers drawn from four
+# bytes, one of them above 0x7F, where partial matches are everywhere.
+fn _r171_last_at_plain(buf, n, needle): i64 {
+    var k = strlen(needle);
+    var i = n - k;
+    while (i >= 0) {
+        if (memeq(buf + i, needle, k) == 1) { return i; }
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+fn test_trail_scan_matches_a_plain_scan() {
+    test_group("link: the trail scan finds the match a byte-by-byte scan finds");
+    assert_eq(_hlnk_last_at("xaab", 4, "aab"), 1, "a match inside a run of its first byte");
+    assert_eq(_hlnk_last_at("abcab", 5, "ab"), 3, "the last of two matches");
+    assert_eq(_hlnk_last_at("abc", 3, "abc"), 0, "a match that is the whole buffer");
+    assert_eq(_hlnk_last_at("ab", 2, "abc"), 0 - 1, "a needle longer than the buffer");
+    var alph = alloc(4);
+    store8(alph, 97); store8(alph + 1, 98); store8(alph + 2, 34); store8(alph + 3, 0xE9);
+    var buf = alloc(512);
+    var nd = alloc(16);
+    var seed = 12345;
+    var bad = 0;
+    var found = 0;
+    var t = 0;
+    while (t < 400) {
+        var n = 20 + (t * 37) % 480;
+        var x = 0;
+        while (x < n) {
+            seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+            store8(buf + x, load8(alph + ((seed >> 16) & 3)));
+            x = x + 1;
+        }
+        var k = 2 + t % 6;
+        x = 0;
+        while (x < k) {
+            seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+            store8(nd + x, load8(alph + ((seed >> 16) & 3)));
+            x = x + 1;
+        }
+        store8(nd + k, 0);
+        var want = _r171_last_at_plain(buf, n, nd);
+        if (_hlnk_last_at(buf, n, nd) != want) { bad = bad + 1; }
+        if (want >= 0) { found = found + 1; }
+        t = t + 1;
+    }
+    assert_eq(bad, 0, "400 random buffers: the same answer every time");
+    assert_eq(found > 40 && found < 360, 1, "...and both answers, found and not, were drawn");
+}
+
+# Finding 42: no-arg sync's note said a package linked through a symlink
+# to its root was held by no root, though the same run scanned it.
+fn test_unscanned_note_resolves() {
+    test_group("sync: a package linked through a symlink to its root is not called unscanned (finding 42)");
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var roots = _fsl_path_join(d, "roots");
+    var pkg = _fsl_path_join(roots, "pkg");
+    fsl_mkdir_parents(_fsl_path_join(pkg, "x"));
+    hapi_mkdir(pkg, 0x1C0);
+    _test_write_file(_fsl_path_join(pkg, "hapi.cyml"), _r171_cat(_r171_hdr("pkg"), _r171_row("a", ".a")));
+    _test_write_file(_fsl_path_join(pkg, "a"), "a");
+    var alias = _fsl_path_join(d, "alias");
+    hapi_symlink("roots", alias);
+    assert_eq(cmd_link(_fsl_path_join(alias, "pkg"), 0), 0, "linked through the alias");
+    sync_set_package_roots(roots);
+    _cli_run(_cli_av("hapi sync"));
+    sync_set_package_roots(0);
+    assert(_test_substr(_cli_err, _cli_err_n, "which no package root holds") < 0,
+      "the root it was linked through resolves to the one scanned");
+    var other = _fsl_path_join(d, "other");
+    var q = _fsl_path_join(other, "q");
+    fsl_mkdir_parents(_fsl_path_join(q, "x"));
+    hapi_mkdir(q, 0x1C0);
+    _test_write_file(_fsl_path_join(q, "hapi.cyml"), _r171_hdr("q"));
+    sync_set_package_roots(other);
+    _cli_run(_cli_av("hapi sync"));
+    sync_set_package_roots(0);
+    assert(_test_substr(_cli_err, _cli_err_n, "which no package root holds") >= 0,
+      "...and a root that does not hold it still gets the note");
+    _r171_clear();
+}
+
+# Finding 43: a dry run composed snapshot names by probing the disk, where
+# it copies nothing, so two same-named files got one path.
+fn test_dry_run_snapshot_names() {
+    test_group("--backup-to: a dry run names two same-named snapshots apart (finding 43)");
+    var bk = _fsl_path_join(_test_scratch_dir(), "bk");
+    hapi_set_dry_run(1);
+    var a = hapi_backup_compose_path(bk, "p", "/x/a/config");
+    var b = hapi_backup_compose_path(bk, "p", "/x/b/config");
+    hapi_set_dry_run(0);
+    assert_eq(hapi_cstr_eq(a, b), 0, "the second is not given the first one's name");
+    # In one second the second is the first with `-2`, as the real run
+    # names it; across a tick the timestamps differ anyway.
+    if (strlen(b) == strlen(a) + 2 && memeq(a, b, strlen(a)) == 1) {
+        assert_eq(hapi_cstr_eq(b + strlen(a), "-2"), 1, "...it is the first with -2");
+    }
+}
+
+# Finding 132: each recorded drop counted lines from byte 0, which made
+# fmt quadratic. It counts on from the previous drop now; a drop behind
+# it, or in another buffer, counts from the start.
+fn test_drop_lines_count_on() {
+    test_group("fmt: a skip's line is counted on from the previous one (finding 132)");
+    var drops = vec_new();
+    hapi_mf_track_drops(drops);
+    var buf = "a\nb\nc\nd\ne\n";
+    _hapi_mf_drop(buf, 4, "x", 0, "");
+    _hapi_mf_drop(buf, 8, "x", 0, "");
+    _hapi_mf_drop(buf, 2, "x", 0, "");
+    var other = "\n\n\nq";
+    _hapi_mf_drop(other, 3, "x", 0, "");
+    hapi_mf_track_drops(0);
+    assert_eq(vec_len(drops), 4, "four skips");
+    assert_eq(hapi_mf_drop_line(vec_get(drops, 0)), 3, "line 3");
+    assert_eq(hapi_mf_drop_line(vec_get(drops, 1)), 5, "line 5, counted on");
+    assert_eq(hapi_mf_drop_line(vec_get(drops, 2)), 2, "line 2, behind the last, counted from the start");
+    assert_eq(hapi_mf_drop_line(vec_get(drops, 3)), 4, "line 4 of another buffer");
+}
+
+# Finding 229: unlink removed the directories its links made only after
+# the whole loop, so a run stopped partway left them for good. Each goes
+# right after its own link, which is what the order of the lines shows.
+fn test_made_dirs_go_with_their_link() {
+    test_group("unlink: a link's made directories go right after it (finding 229)");
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var pkg = _t111_pkg(_r171_cat(_r171_row("b", ".cd/deep/b"), _r171_row("z", ".zz")));
+    _test_write_file(_fsl_path_join(pkg, "b"), "b");
+    _test_write_file(_fsl_path_join(pkg, "z"), "z");
+    assert_eq(cmd_link(pkg, 0), 0, "linked, making .cd/deep");
+    assert_eq(_cli_run(_cli_av("hapi unlink p")), 0, "unlinked");
+    var at_dir = _test_substr(_cli_out, _cli_out_n, "/.cd/  (a directory hapi made)");
+    var at_zz = _test_substr(_cli_out, _cli_out_n, "/.zz\n");
+    assert(at_dir >= 0 && at_zz >= 0, "both lines are printed");
+    assert(at_dir < at_zz, "the directory goes before the next link is removed");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".cd"))), HAPI_LP_ABSENT, "and it is gone");
+
+    # sync --prune removes dropped rows the same way.
+    var pp = _t111_pkg_at(_fsl_path_join(d, "pp"), _r171_cat(_r171_row("b", ".pd/deep/b"), _r171_row("z", ".pz")));
+    _test_write_file(_fsl_path_join(pp, "b"), "b");
+    _test_write_file(_fsl_path_join(pp, "z"), "z");
+    assert_eq(cmd_link(pp, 0), 0, "linked, making .pd/deep");
+    _t111_pkg_at(pp, "");
+    var sv = _cli_av("hapi sync --prune --force");   # both rows: over the half limit
+    _cli_add(sv, pp);
+    assert_eq(_cli_run(sv), 0, "pruned both rows");
+    var pd = _test_substr(_cli_out, _cli_out_n, "/.pd/  (a directory hapi made)");
+    var pz = _test_substr(_cli_out, _cli_out_n, "/.pz\n");
+    assert(pd >= 0 && pz >= 0, "both prune lines are printed");
+    assert(pd < pz, "the directory goes before the next dropped row is pruned");
+    _r171_clear();
+}
+
+fn _r171_mkfifo(path): i64 {
+    return sys_mknodat(AT_FDCWD, path, 0x1180, 0);   # S_IFIFO|0600
+}
+
+# F-091: a FIFO where hapi read a manifest, the trail, or a snapshot's
+# source blocked it forever; adopt moved one despite its own refusal.
+fn test_fifos_do_not_hang() {
+    test_group("manifest / trail / adopt / --backup-to: a FIFO is refused, not waited on (F-091)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var pk = _fsl_path_join(d, "fpkg");
+    hapi_mkdir(pk, 0x1C0);
+    var mf = _fsl_path_join(pk, "hapi.cyml");
+    assert_eq(_r171_mkfifo(mf), 0, "a FIFO named hapi.cyml");
+    var t, v = hapi_mf_parse_file_r(mf);
+    assert_eq(is_err_result(t), 1, "is not read as a manifest");
+
+    assert_eq(hapi_open_regular(mf, O_RDONLY, 0), 0 - 22, "the open itself refuses what is not a regular file");
+    var tf = _fsl_path_join(d, "trail.fifo");
+    _r171_mkfifo(tf);
+    var at, av = audit_read_r(tf);
+    assert_eq(is_err_result(at), 1, "a FIFO trail is an error, not a wait");
+
+    var ff = _fsl_path_join(home, ".pipe");
+    _r171_mkfifo(ff);
+    var ap = _t111_pkg("");
+    assert_eq(cmd_adopt(ff, ap), 1, "adopt refuses a FIFO");
+    assert_eq(link_probe_kind(link_probe(ff)), HAPI_LP_FILE, "and leaves it where it was");
+
+    var bk = _fsl_path_join(d, "bk");
+    hapi_mkdir(bk, 0x1C0);
+    hapi_set_backup_dir(bk);
+    var lp = _t111_pkg(_r171_row("f", ".pipe"));
+    _test_write_file(_fsl_path_join(lp, "f"), "f");
+    assert_eq(cmd_link(lp, 1), 1, "link --force --backup-to over a FIFO stops, without waiting");
+    hapi_set_backup_dir(0);
+    _r171_clear();
+    return 0;
+}
+
+# F-092: control bytes in a value. A NUL passed the `..` check, which
+# sees the whole value, while the path stopped at it.
+fn test_values_hold_no_control_bytes() {
+    test_group("manifest: a value holds no control byte, but a description may span lines (F-092)");
+
+    var hdr = "[package]\nname = \"p\"\nversion = \"1\"\n\n[[link]]\nsource = \"..";
+    var tail = "\"\ntarget = \".x\"\n";
+    var hl = strlen(hdr);
+    var tl = strlen(tail);
+    var buf = alloc(hl + tl + 2);
+    memcpy(buf, hdr, hl);
+    store8(buf + hl, 0);                          # `..\0`
+    memcpy(buf + hl + 1, tail, tl);
+    var t, v = hapi_mf_parse_header_r(buf, hl + 1 + tl);
+    assert_eq(is_err_result(t), 1, "a source of `..` and a NUL is refused");
+    assert_eq(v, HapiMfControlByte, "as a control byte, before anything uses the path");
+    _expect_err("a newline in a target",
+      "[package]\nname = \"p\"\nversion = \"1\"\n[[link]]\nsource = \"a\"\ntarget = \".a\nfake\"\n",
+      HapiMfControlByte);
+    _expect_err("an escape in a name", "[package]\nname = \"p\x1b[2J\"\nversion = \"1\"\n",
+      HapiMfControlByte);
+    var ok = "[package]\nname = \"p\"\nversion = \"1\"\ndescription = \"two\nlines\"\n";
+    var ot, ov = hapi_mf_parse_header_r(ok, strlen(ok));
+    assert_eq(is_ok(ot), 1, "a description that spans lines still parses");
+    return 0;
+}
+
+# F-094: a dry run skipped the trail's pre-flight, and adopt's returned
+# before its refusals, so each exited 0 where the real run exited 1.
+fn test_dry_run_answers_as_the_real_run() {
+    test_group("--dry-run: exits as the real run would (F-094)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var pkg = _t111_pkg(_r171_row("x", ".x"));
+    _test_write_file(_fsl_path_join(pkg, "x"), "x");
+    assert_eq(cmd_link(pkg, 0), 0, "linked");
+    var tr = audit_trail_path();
+    sys_chmod(tr, 0x124);                          # read-only: the real runs refuse
+    hapi_set_dry_run(1);
+    assert_eq(cmd_unlink("p"), 1, "unlink --dry-run refuses an unwritable trail");
+    assert_eq(cmd_rollback(), 1, "rollback --dry-run too");
+    assert_eq(cmd_checkpoint(), 1, "checkpoint --dry-run too");
+    hapi_set_dry_run(0);
+    sys_chmod(tr, 0x1A4);
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".x"))), HAPI_LP_SYMLINK,
+      "and none of them changed anything");
+
+    # adopt --dry-run with a symlinked manifest: the real run refuses it.
+    var ap = _t111_pkg("");
+    var mf = _fsl_path_join(ap, "hapi.cyml");
+    hapi_rename(mf, _fsl_path_join(ap, "real.txt"));
+    hapi_symlink(_fsl_path_join(ap, "real.txt"), mf);
+    var f = _fsl_path_join(home, ".f");
+    _test_write_file(f, "f");
+    hapi_set_dry_run(1);
+    assert_eq(cmd_adopt(f, ap), 1, "adopt --dry-run refuses a symlinked manifest");
+
+    # link --dry-run --force --backup-to a directory it cannot write.
+    var ro = _fsl_path_join(d, "ro");
+    hapi_mkdir(ro, 0x1C0);
+    var lp = _t111_pkg(_r171_row("f", ".f"));
+    _test_write_file(_fsl_path_join(lp, "f"), "pkg");
+    hapi_set_backup_dir(_fsl_path_join(ro, "bk"));
+    sys_chmod(ro, 0x140);
+    assert_eq(cmd_link(lp, 1), 1, "link --dry-run --force with an unwritable --backup-to");
+    sys_chmod(ro, 0x1C0);
+    hapi_set_backup_dir(0);
+    hapi_set_dry_run(0);
+    _r171_clear();
+    return 0;
+}
+
+# F-095: check took every `*.tmp` for a staging file, called a named
+# manifest its own orphan, and missed a `./`-spelled source.
+fn test_check_orphans_exactly() {
+    test_group("check: orphans, staging files and named manifests, exactly (F-095)");
+
+    var p1 = _t111_pkg(_r171_row("z", ".z"));
+    _test_write_file(_fsl_path_join(p1, "z"), "z");
+    assert_eq(cmd_check(p1, 0), 0, "a package that agrees");
+    _test_write_file(_fsl_path_join(p1, "hapi.cyml.4242.tmp"), "staged");
+    assert_eq(cmd_check(p1, 0), 0, "hapi's own staging file is a note, not an orphan");
+    _test_write_file(_fsl_path_join(p1, "zzzzzzzzz.4242.tmp"), "mine");
+    assert_eq(cmd_check(p1, 0), 1, "a *.tmp of another name is an orphan like any file");
+
+    var p2 = _t111_pkg_at(_fsl_path_join(_test_scratch_dir(), "named"), "");
+    hapi_unlink(_fsl_path_join(p2, "hapi.cyml"));
+    var zm = _fsl_path_join(p2, "zsh.cyml");
+    _test_write_file(zm, _r171_cat(_r171_hdr("zsh"), _r171_row("./z", ".z")));
+    _test_write_file(_fsl_path_join(p2, "z"), "z");
+    assert_eq(cmd_check(zm, 0), 0, "a named manifest is not its own orphan, and ./z claims z");
+
+    var p3 = _t111_pkg(_r171_row("ab", ".ab"));
+    _test_write_file(_fsl_path_join(p3, "ab"), "ab");
+    _test_write_file(_fsl_path_join(p3, "a"), "a");
+    assert_eq(cmd_check(p3, 0), 1, "a row `ab` does not claim a file `a`");
+    return 0;
+}
+
+# F-096: every link_probe took a fresh 4 KiB and a stat buffer from an
+# allocator that never frees.
+fn test_link_probe_memory_is_bounded() {
+    test_group("fs_link: probing does not grow memory per call (F-096)");
+
+    var d = _test_scratch_dir();
+    var f = _fsl_path_join(d, "file");
+    _test_write_file(f, "x");
+    var before = alloc(8);
+    var i = 0;
+    while (i < 2000) {
+        link_probe(f);
+        i = i + 1;
+    }
+    var after = alloc(8);
+    assert(after - before < 1048576, "2,000 probes take under 1 MB (they took 8.5 MB)");
+    return 0;
+}
+
+# F-097: a loop was reported as an escape, with advice that could not
+# help; sync's conflicts advised a --force sync does not take; and a
+# package root hapi could not search was skipped with a wrong reason.
+fn test_messages_say_what_happened() {
+    test_group("link / sync: refusals say what happened (F-097)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    hapi_symlink("loop2", _fsl_path_join(home, "loop1"));
+    hapi_symlink("loop1", _fsl_path_join(home, "loop2"));
+    var lp = _t111_pkg(_r171_row("f", "loop1/f"));
+    _test_write_file(_fsl_path_join(lp, "f"), "f");
+    var av = _cli_av("hapi link");
+    _cli_add(av, lp);
+    assert_eq(_cli_run(av), 1, "a target through a symlink loop is refused");
+    assert(_test_substr(_cli_err, _cli_err_n, "cannot be followed") >= 0, "...as a path that cannot be followed");
+    assert(_test_substr(_cli_err, _cli_err_n, "HAPI_ALLOWED_ROOTS") < 0, "...without advice that cannot help");
+
+    var cp = _t111_pkg(_r171_row("c", ".conf"));
+    _test_write_file(_fsl_path_join(cp, "c"), "c");
+    _test_write_file(_fsl_path_join(home, ".conf"), "user");
+    var sv = _cli_av("hapi sync");
+    _cli_add(sv, cp);
+    assert_eq(_cli_run(sv), 1, "a sync with a conflict is refused");
+    assert(_test_substr(_cli_err, _cli_err_n, "hapi link --force") >= 0, "...pointing at link --force");
+    assert(_test_substr(_cli_err, _cli_err_n, "rerun with --force") < 0, "...not at a --force sync refuses");
+
+    var root = _fsl_path_join(d, "roots");
+    hapi_mkdir(root, 0x1C0);
+    var shut = _fsl_path_join(root, "shut");
+    hapi_mkdir(shut, 0x1C0);
+    _test_write_file(_fsl_path_join(shut, "hapi.cyml"), _r171_hdr("shut"));
+    var good = _fsl_path_join(root, "good");
+    hapi_mkdir(good, 0x1C0);
+    _test_write_file(_fsl_path_join(good, "hapi.cyml"), _r171_hdr("good"));
+    sys_chmod(shut, 0);
+    sync_set_package_roots(root);
+    assert_eq(cmd_sync(0), 1, "a package root it cannot search fails the run");
+    sync_set_package_roots(0);
+    sys_chmod(shut, 0x1C0);
+    _r171_clear();
+    return 0;
+}
+
+# F-098: an empty argument meant the cwd to some verbs and /hapi.cyml to
+# others, and `--backup-to ""` put snapshots at the filesystem root.
+fn test_empty_arguments_refused() {
+    test_group("cli: an empty argument or --backup-to value is a usage error (F-098)");
+
+    var a1 = _cli_av("hapi link");
+    _cli_add(a1, "");
+    assert_eq(_cli_run(a1), 2, "link with an empty package is exit 2");
+    var a2 = _cli_av("hapi inspect");
+    _cli_add(a2, "");
+    assert_eq(_cli_run(a2), 2, "and inspect, which read /hapi.cyml");
+    var a3 = _cli_av("hapi link --backup-to");
+    _cli_add(a3, "");
+    _cli_add(a3, "docs/examples/dotfiles-zsh");
+    assert_eq(_cli_run(a3), 2, "an empty --backup-to is exit 2");
+    assert(_test_substr(_cli_err, _cli_err_n, "not an empty value") >= 0, "...and says why");
+    return 0;
+}
+
+fn _r171_trail_is(d, text): i64 {
+    var tr = _fsl_path_join(d, "t.jsonl");
+    _test_write_file(tr, text);
+    return tr;
+}
+
+# F-099 / F-100 / F-101 / F-104: what the trail reader accepts.
+fn test_trail_reader_strictness() {
+    test_group("audit_reader: whole lines, real escapes, and a dangling link is not absent (F-099 - F-104)");
+
+    var d = _test_scratch_dir();
+    var j = _r171_trail_is(d, "{\"op\":\"link\",\"pkg\":\"a\"}{\"op\":\"link\",\"pkg\":\"b\"}\n");
+    var t1, v1 = audit_read_r(j);
+    assert_eq(is_err_result(t1), 1, "two entries joined on one line are corrupt");
+    var e2 = _r171_trail_is(d, "{} junk\n");
+    var t2, v2 = audit_read_r(e2);
+    assert_eq(is_err_result(t2), 1, "and so is text after an empty object");
+
+    var ul = "{\"op\":\"link\",\"pkg\":\"caf\\u00e9\",\"target\":\"\\ud83d\\ude00\",\"source\":\"\\u0001\"}\n";
+    var u = _r171_trail_is(d, ul);
+    var t3, v3 = audit_read_r(u);
+    assert_eq(is_ok(t3), 1, "a line with \\u escapes reads");
+    if (is_ok(t3) == 1) {
+        var e = vec_get(v3, 0);
+        _assert_cstr(hae_pkg(e), "caf\xc3\xa9", "\\u00e9 is the two UTF-8 bytes of e-acute");
+        _assert_cstr(hae_target(e), "\xf0\x9f\x98\x80", "a surrogate pair is its one four-byte code point");
+        assert_eq(load8(hae_source(e)), 1, "the writer's own \\u0001 is still that one byte");
+        assert_eq(strlen(hae_source(e)), 1, "...and only that byte");
+    }
+    var lone = _r171_trail_is(d, "{\"op\":\"link\",\"pkg\":\"\\udc00\"}\n");
+    var t4, v4 = audit_read_r(lone);
+    assert_eq(is_err_result(t4), 1, "a lone surrogate is corrupt");
+    var bad = _r171_trail_is(d, "{\"op\":\"link\",\"pkg\":\"\\x41\"}\n");
+    var t5, v5 = audit_read_r(bad);
+    assert_eq(is_err_result(t5), 1, "so is an escape JSON does not have");
+
+    var dl = _fsl_path_join(d, "dangling.jsonl");
+    hapi_symlink(_fsl_path_join(d, "nowhere"), dl);
+    var t6, v6 = audit_read_r(dl);
+    assert_eq(is_err_result(t6), 1, "a dangling trail symlink is an error, not an empty trail");
+    var t7, v7 = audit_read_r(_fsl_path_join(d, "absent.jsonl"));
+    assert_eq(is_ok(t7), 1, "while a trail that is not there yet is empty");
+
+    _assert_cstr(hae_shown("/h/.a\x1b[2J"), "/h/.a?[2J", "a printed trail field shows a control byte as ?");
+    _assert_cstr(hae_shown("/h/.a"), "/h/.a", "and a plain one as it is");
+    return 0;
+}
+
+# F-105: a rewrite reset the manifest's mode and split its hard links;
+# a removal took the comments after its row, and missed an indented one.
+fn test_manifest_rewrite_keeps_what_is_not_its() {
+    test_group("manifest_write: rewrites keep the mode and the neighbours, and find any [[link]] (F-105)");
+
+    var d = _test_scratch_dir();
+    var mf = _fsl_path_join(d, "hapi.cyml");
+    var text = _r171_cat(_r171_cat(_r171_hdr("p"), _r171_row("a", ".a")),
+      _r171_cat("\n# about b\n", _r171_row("b", ".b")));
+    _test_write_file(mf, text);
+    assert_eq(manifest_remove_link_row(mf, "a", ".a"), 0, "row a removed");
+    var len = 0;
+    var got = manifest_read(mf, &len);
+    assert(_test_substr(got, len, "# about b") >= 0, "the comment that belongs to b stays");
+    assert(_test_substr(got, len, "source = \"b\"") >= 0, "and so does b");
+
+    var ib = "[package]\nname = \"p\"\nversion = \"1\"\n\n  [[link]]\n  source = \"a\"\n  target = \".a\"\n";
+    _test_write_file(mf, ib);
+    assert_eq(manifest_remove_link_row(mf, "a", ".a"), 0, "an indented row is found");
+    var t, v = hapi_mf_parse_file_r(mf);
+    if (is_ok(t) == 1) { assert_eq(vec_len(hapi_mf_links(v)), 0, "and removed"); }
+
+    sys_chmod(mf, 0x180);
+    assert_eq(manifest_commit(mf, "[package]\nname = \"p\"\nversion = \"2\"\n", 35), 0, "a rewrite");
+    assert_eq(_r171_mode(mf), 0x180, "keeps the manifest 0600");
+    var other = _fsl_path_join(d, "other.cyml.txt");
+    assert_eq(sys_link(mf, other), 0, "a second hard link to the manifest");
+    assert_eq(manifest_commit(mf, "[package]\nname = \"p\"\nversion = \"3\"\n", 35), 0 - HapiMfwHardLinked,
+      "a rewrite would leave it behind, and refuses");
+    return 0;
+}
+
+# F-106: `unlink <path>` and an adopt-only package both said `no live
+# links` at exit 0; `list --root` counted the whole trail.
+fn test_unlink_and_list_say_what_they_hold() {
+    test_group("unlink / list: a path, an adopt, and --root are answered as they are (F-106)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var pkg = _t111_pkg(_r171_row("x", ".x"));
+    _test_write_file(_fsl_path_join(pkg, "x"), "x");
+    assert_eq(cmd_link(pkg, 0), 0, "p linked");
+    assert_eq(cmd_unlink(pkg), 1, "unlink given p's path says it takes the name");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".x"))), HAPI_LP_SYMLINK,
+      "and removes nothing");
+
+    var a = _t111_pkg_at(_fsl_path_join(d, "ad"), "");
+    _test_write_file(_fsl_path_join(a, "hapi.cyml"), _r171_hdr("ad"));
+    _test_write_file(_fsl_path_join(home, ".rc"), "rc");
+    assert_eq(cmd_adopt(_fsl_path_join(home, ".rc"), a), 0, "ad adopts .rc");
+    var uv = _cli_av("hapi unlink ad");
+    assert_eq(_cli_run(uv), 0, "unlink ad has no live link of its own");
+    assert(_test_substr(_cli_out, _cli_out_n, "hapi rollback") >= 0, "...and says rollback reverses an adopt");
+
+    var sub = _fsl_path_join(home, "sub");
+    hapi_mkdir(sub, 0x1C0);
+    link_set_scope_root(sub);
+    var lv = _cli_av("hapi list");
+    assert_eq(_cli_run(lv), 0, "list with the scope at ~/sub");
+    assert(_test_substr(_cli_out, _cli_out_n, "p  0 live links") >= 0, "counts no link outside it");
+    _r171_clear();
+    return 0;
+}
+
+# F-107: a byte-order mark hid [package]; check --strict passed what the
+# lenient parser skips without a word.
+fn test_strict_means_nothing_skipped() {
+    test_group("manifest / check --strict: a BOM is read past, and strict fails on skips (F-107)");
+
+    var bom = "\xef\xbb\xbf[package]\nname = \"p\"\nversion = \"1\"\n";
+    var t, v = hapi_mf_parse_header_r(bom, strlen(bom));
+    assert_eq(is_ok(t), 1, "a manifest with a UTF-8 byte-order mark parses");
+
+    var p1 = _t111_pkg("");
+    var mf = _fsl_path_join(p1, "hapi.cyml");
+    _test_write_file(mf, "# notes\n[package]\nname = \"p\"\nversion = \"1\"\n");
+    assert_eq(cmd_check(p1, 1), 0, "comments are fine under --strict");
+    _test_write_file(mf, "[package]\nname = \"p\"\nname = \"q\"\nversion = \"1\"\n");
+    assert_eq(cmd_check(p1, 1), 1, "a key given twice fails --strict");
+    _test_write_file(mf, "stray = \"x\"\n[package]\nname = \"p\"\nversion = \"1\"\n");
+    assert_eq(cmd_check(p1, 1), 1, "a key before any section fails --strict");
+    assert_eq(cmd_check(p1, 0), 0, "and is still fine without it");
+    return 0;
+}
+
+# F-108: status read the target alone.
+fn test_status_reports_refused_rows() {
+    test_group("status: a row link refuses is REFUSED, and --quiet fails on it (F-108)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    hapi_symlink("../outside", _fsl_path_join(home, ".out"));
+    var pkg = _t111_pkg(_r171_row("f", ".out/f"));
+    _test_write_file(_fsl_path_join(pkg, "f"), "f");
+    var sv = _cli_av("hapi status --quiet");
+    _cli_add(sv, pkg);
+    assert_eq(_cli_run(sv), 1, "status --quiet exits 1 for a row out of the scope");
+    assert(_test_substr(_cli_err, _cli_err_n, "(REFUSED above)") >= 0, "...and says the row is REFUSED");
+    assert(_test_substr(_cli_err, _cli_err_n, "could not be checked") < 0, "...not that it could not be checked");
+    var av = _cli_av("hapi status");
+    _cli_add(av, pkg);
+    _cli_run(av);
+    assert(_test_substr(_cli_out, _cli_out_n, "REFUSED") >= 0, "and calls it REFUSED, not MISSING");
+    _r171_clear();
+    return 0;
+}
+
+# F-109: a relative scope root put every target under the cwd.
+fn test_scope_root_is_absolute() {
+    test_group("link / status: the scope root is an absolute path (F-109)");
+
+    var d = _test_scratch_dir();
+    var pkg = _t111_pkg(_r171_row("f", ".f"));
+    _test_write_file(_fsl_path_join(pkg, "f"), "f");
+    audit_set_trail_path(_fsl_path_join(d, "audit.jsonl"));
+    # A relative spelling of a directory that exists, from the cwd.
+    var rel = fsl_compute_relative(_fsl_getcwd(), d);
+    link_set_scope_root(rel);
+    assert_eq(cmd_link(pkg, 0), 1, "link refuses a relative scope root");
+    assert_eq(cmd_status_run(pkg, 0), 1, "and so does status");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, ".f"))), HAPI_LP_ABSENT,
+      "nothing was linked under it");
+    _test_clear_env();
+    return 0;
+}
+
+# F-110: the smaller edges.
+fn test_small_edges() {
+    test_group("adopt / sync / rollback / --backup-to: the smaller edges (F-110)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var dots = _fsl_path_join(home, "...");
+    _test_write_file(dots, "x");
+    var ap = _t111_pkg("");
+    var dv = _cli_av("hapi adopt");
+    _cli_add(dv, dots);
+    _cli_add(dv, ap);
+    assert_eq(_cli_run(dv), 1, "a file named ... is refused");
+    assert(_test_substr(_cli_err, _cli_err_n, "leaves no name") >= 0, "...because it leaves no name in the package");
+
+    var root = _fsl_path_join(d, "r");
+    var one = _fsl_path_join(root, "one");
+    fsl_mkdir_parents(_fsl_path_join(one, "x"));
+    _test_write_file(_fsl_path_join(one, "hapi.cyml"), _r171_hdr("one"));
+    sync_set_package_roots(_r171_cat(_r171_cat(root, ":"), root));
+    assert_eq(cmd_sync(0), 0, "a root given twice is one root");
+    sync_set_package_roots(0);
+
+    var pkg = _t111_pkg(_r171_row("g", ".g"));
+    var src = _fsl_path_join(pkg, "g");
+    _test_write_file(src, "g");
+    assert_eq(cmd_link(pkg, 0), 0, "linked");
+    assert_eq(cmd_checkpoint(), 0, "checkpoint");
+    assert_eq(cmd_unlink("p"), 0, "unlinked");
+    hapi_unlink(src);
+    assert_eq(cmd_rollback_run(1, 0), 0, "rollback of the unlink");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".g"))), HAPI_LP_ABSENT,
+      "does not re-create a link to a source that is gone");
+
+    var long = alloc(256);
+    memset(long, 108, 250);
+    store8(long + 250, 0);
+    var lt = _fsl_path_join(home, long);
+    _test_write_file(lt, "user");
+    var lp = _t111_pkg(_r171_row("l", long));
+    _test_write_file(_fsl_path_join(lp, "l"), "pkg");
+    var bk = _fsl_path_join(d, "bk");
+    hapi_mkdir(bk, 0x1C0);
+    hapi_set_backup_dir(bk);
+    assert_eq(cmd_link(lp, 1), 0, "a 250-byte name still gets a snapshot");
+    hapi_set_backup_dir(0);
+    _r171_clear();
+    return 0;
+}
+
+# F-111: directories hapi makes, under odd spellings and failures.
+fn test_made_directories_edges() {
+    test_group("link / unlink: the directories hapi makes, whatever the spelling (F-111)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var pkg = _t111_pkg(_r171_row("f", "a//b/f"));
+    _test_write_file(_fsl_path_join(pkg, "f"), "f");
+    assert_eq(cmd_link(pkg, 0), 0, "a target spelled with // links");
+    assert_eq(cmd_unlink("p"), 0, "unlink");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, "a"))), HAPI_LP_ABSENT,
+      "and the directories it made are gone");
+
+    var long = alloc(320);
+    memset(long, 113, 300);
+    store8(long + 300, 0);
+    var deep = _fsl_path_join(_fsl_path_join(_fsl_path_join(d, "new1"), long), "f");
+    var made = 0;
+    assert(fsl_mkdir_parents_mode_r(deep, 0x1C0, &made) < 0, "a chain cut short by an over-long name fails");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "new1"))), HAPI_LP_ABSENT,
+      "and takes back the directory it had made");
+
+    link_set_scope_root(_fsl_path_join(d, "no/such/root"));
+    var p2 = _t111_pkg(_r171_row("f", ".f"));
+    _test_write_file(_fsl_path_join(p2, "f"), "f");
+    assert_eq(cmd_link(p2, 0), 1, "an absent scope root with an absent parent is refused");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "no"))), HAPI_LP_ABSENT,
+      "and none of its ancestors were made");
+    _r171_clear();
+    return 0;
+}
+
+# Guards the 2026-10-29 audit found unpinned (its tests-ci unit, findings
+# 187-205): each assertion here goes red when its guard is removed.
+fn test_audit_gaps_pinned() {
+    test_group("guards the audit found unpinned are pinned (1.7.1 test gaps)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+
+    # adopt: an existing package-side name, and a duplicate source row.
+    var ap = _t111_pkg(_r171_row("conf", ".other"));
+    _test_write_file(_fsl_path_join(ap, "conf"), "package's own");
+    _test_write_file(_fsl_path_join(home, ".conf"), "user's");
+    assert_eq(cmd_adopt(_fsl_path_join(home, ".conf"), ap), 1, "adopt refuses a source the manifest has");
+    _test_write_file(_fsl_path_join(ap, "hapi.cyml"), _r171_hdr("p"));
+    assert_eq(cmd_adopt(_fsl_path_join(home, ".conf"), ap), 1, "and a package-side name already taken");
+    assert_eq(_test_file_size(_fsl_path_join(ap, "conf")), 13, "the package's file is untouched");
+
+    # A relative HAPI_ALLOWED_ROOTS entry grants nothing.
+    cap_set_allowlist("outside");
+    assert_eq(cap_target_allowed(_fsl_path_join(d, "outside"), home), 0, "a relative grant is ignored");
+    cap_set_allowlist(0);
+
+    # Manifest path edges: a whole `..`, a trailing `/..`, an empty value.
+    _expect_err("source = \"..\"",
+      "[package]\nname = \"x\"\nversion = \"1\"\n[[link]]\nsource = \"..\"\ntarget = \".x\"\n", HapiMfPathTraversal);
+    _expect_err("target = \"a/..\"",
+      "[package]\nname = \"x\"\nversion = \"1\"\n[[link]]\nsource = \"a\"\ntarget = \"a/..\"\n", HapiMfPathTraversal);
+    _expect_err("an empty source",
+      "[package]\nname = \"x\"\nversion = \"1\"\n[[link]]\nsource = \"\"\ntarget = \".x\"\n", HapiMfMissingSource);
+
+    # The trail reader's line checks, one by one; a blank line is fine.
+    var t1, v1 = audit_read_r(_r171_trail_is(d, "\"op\":\"link\"}\n"));
+    assert_eq(is_err_result(t1), 1, "a line with no { is corrupt");
+    var t2, v2 = audit_read_r(_r171_trail_is(d, "{\"op\" \"link\"}\n"));
+    assert_eq(is_err_result(t2), 1, "a field with no : is corrupt");
+    var t3, v3 = audit_read_r(_r171_trail_is(d, "{\"op\":\"link\" junk ,\"pkg\":\"p\"}\n"));
+    assert_eq(is_err_result(t3), 1, "junk between fields is corrupt");
+    var t4, v4 = audit_read_r(_r171_trail_is(d, "{\"op\":\"link\"}\n\n{\"op\":\"link\"}\n"));
+    assert_eq(is_ok(t4), 1, "a blank interior line is tolerated");
+
+    # The writer escapes every control byte, not only `"` and `\`.
+    var buf = alloc(4096);
+    var n = audit_format_link(buf, 4096, "p", "1", "sha1c:00", "a\x01b", ".a", "/x/a", "/x/.a", 0);
+    assert(_test_substr(buf, n, "a\\u0001b") >= 0, "a 0x01 in a field is written as \\u0001");
+
+    # list's ownership: adopt creates, a --force takeover moves it, and a
+    # non-owner's unlink does not release it.
+    var e = _t111_pkg_at(_fsl_path_join(d, "e"), "");
+    _test_write_file(_fsl_path_join(e, "hapi.cyml"), _r171_hdr("e"));
+    _test_write_file(_fsl_path_join(home, ".erc"), "e");
+    assert_eq(cmd_adopt(_fsl_path_join(home, ".erc"), e), 0, "e adopts .erc");
+    var tr_t, tr_v = audit_read_default_r();
+    assert_eq(_hls_live_count(tr_v, "e"), 1, "an adopt counts as e's link");
+    var f2 = _t111_pkg_at(_fsl_path_join(d, "f2"), "");
+    _test_write_file(_fsl_path_join(f2, "hapi.cyml"), _r171_cat(_r171_hdr("f2"), _r171_row("erc", ".erc")));
+    _test_write_file(_fsl_path_join(f2, "erc"), "f2");
+    assert_eq(cmd_link(f2, 1), 0, "f2 takes .erc over with --force");
+    var tr2_t, tr2_v = audit_read_default_r();
+    assert_eq(_hls_live_count(tr2_v, "e"), 0, "e no longer owns it");
+    assert_eq(_hls_live_count(tr2_v, "f2"), 1, "f2 does");
+
+    # unlink's live set: a second unlink has nothing left to remove.
+    assert_eq(cmd_unlink("f2"), 0, "f2 unlinks");
+    var before = _test_file_size(audit_trail_path());
+    assert_eq(cmd_unlink("f2"), 0, "a second unlink");
+    assert_eq(_test_file_size(audit_trail_path()), before, "finds nothing: the unlink superseded the link");
+
+    # A force-only run gets the trail pre-flight: with the trail read-only
+    # the file --force would delete is kept.
+    var fp = _t111_pkg_at(_fsl_path_join(d, "fp"), "");
+    _test_write_file(_fsl_path_join(fp, "hapi.cyml"), _r171_cat(_r171_hdr("fp"), _r171_row("k", ".keep")));
+    _test_write_file(_fsl_path_join(fp, "k"), "pkg");
+    _test_write_file(_fsl_path_join(home, ".keep"), "user's only copy");
+    sys_chmod(audit_trail_path(), 0x124);
+    assert_eq(cmd_link(fp, 1), 1, "link --force with a read-only trail is refused");
+    sys_chmod(audit_trail_path(), 0x1A4);
+    assert_eq(_test_file_size(_fsl_path_join(home, ".keep")), 16, "and the user's file is still there");
+
+    # adopt whose trail entry cannot be written after the pre-flight: exit 1.
+    var g = _t111_pkg_at(_fsl_path_join(d, "g"), "");
+    _test_write_file(_fsl_path_join(g, "hapi.cyml"), _r171_hdr("g"));
+    _test_write_file(_fsl_path_join(home, ".grc"), "g");
+    audit_test_fail_appends(1);
+    var arc = cmd_adopt(_fsl_path_join(home, ".grc"), g);
+    audit_test_fail_appends(0);
+    assert_eq(arc, 1, "an adopt whose entry could not be written exits 1");
+    _r171_clear();
+    return 0;
+}
+
+# ============================================================
 # 1.7.1 — the run removes its scratch directories
 # ============================================================
 
@@ -6521,7 +7766,42 @@ fn main() {
     test_trail_path_needs_an_absolute_base();
     test_unterminated_value_refused();
     test_manifest_read_is_whole();
+    test_unprobeable_target_refused();
+    test_rollback_unprobeable_is_an_error();
+    test_unlink_retires_an_absent_link();
+    test_prune_scope_and_identity();
+    test_link_records_what_it_finds();
+    test_rows_never_target_the_trail();
+    test_short_trail_write_is_taken_back();
+    test_sigpipe_ignored();
+    test_adopt_reversal_finds_its_manifest();
+    test_snapshots_keep_secrets_private();
+    test_header_ends_at_the_delimiter();
+    test_dangling_source_is_missing();
+    test_rollback_to_newest_label_only();
+    test_adopt_reads_its_row_back();
+    test_fifos_do_not_hang();
+    test_values_hold_no_control_bytes();
+    test_dry_run_answers_as_the_real_run();
+    test_check_orphans_exactly();
+    test_link_probe_memory_is_bounded();
+    test_messages_say_what_happened();
+    test_empty_arguments_refused();
+    test_trail_reader_strictness();
+    test_manifest_rewrite_keeps_what_is_not_its();
+    test_unlink_and_list_say_what_they_hold();
+    test_strict_means_nothing_skipped();
+    test_status_reports_refused_rows();
+    test_scope_root_is_absolute();
+    test_small_edges();
+    test_made_directories_edges();
+    test_audit_gaps_pinned();
     test_scratch_rmtree_never_follows();
+    test_trail_scan_matches_a_plain_scan();
+    test_unscanned_note_resolves();
+    test_dry_run_snapshot_names();
+    test_drop_lines_count_on();
+    test_made_dirs_go_with_their_link();
     test_scratch_cleanup();         # last: it removes every scratch directory
     return assert_summary();
 }

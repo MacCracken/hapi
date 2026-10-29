@@ -30,17 +30,31 @@ cwd.
    backslash or a control byte — because the row would parse back as a
    different path.
 2. Probes the target — refuses unless it's a regular file
-   (not a symlink, not a directory, not absent).
+   (not a symlink, not a directory, not absent). Since 1.7.1 a FIFO,
+   socket or device is refused too: through 1.7.0 adopt moved one into
+   the package despite its own `target is not a regular file` message
+   (F-091).
 3. Parses the package's `hapi.cyml` — refuses if there's
    already a `[[link]]` row claiming the same source or target.
 4. Refuses if the derived in-package source path is already
    occupied by a non-manifest file.
-5. Renames the file into the package directory (`mv`).
+5. Moves the file into the package directory. Since 1.7.1 the move
+   never replaces a name: `link(2)` then `unlink(2)`, not `rename(2)`
+   (F-071). Across filesystems it is refused and says so: `the file and
+   the package are on different filesystems, and a move cannot cross
+   them` (F-110).
 6. Creates a relative symlink at the original location
    pointing to the moved file.
 7. Appends a `[[link]]` row to the manifest (atomic via
-   `tmp+rename`).
+   `tmp+rename`). Since 1.7.1 it reads the manifest back: it must
+   parse and hold every row it held, plus the new one. If not, the
+   manifest is put back as it was, the link removed and the file moved
+   back (F-090).
 8. Writes a single `op:adopt` entry to the audit trail.
+
+A `--dry-run` answers after every refusal the real run makes (1.7.1,
+F-094). Through 1.7.0 it answered `would adopt` before them, for a file
+the real run then refused.
 
 Per [ADR 0004](../adr/0004-adopt-op-semantics.md), the source
 name inside the package is the target's basename with one
@@ -57,11 +71,11 @@ $ ls dotfiles-zsh/      # an empty package
 hapi.cyml
 
 $ hapi adopt .zshrc dotfiles-zsh
-  ~ /home/user/.zshrc -> ../dotfiles/dotfiles-zsh/zshrc
+  ~ /home/user/.zshrc -> dotfiles/dotfiles-zsh/zshrc
 adopted into /home/user/dotfiles/dotfiles-zsh/hapi.cyml
 
 $ ls -la ~/.zshrc       # now a symlink
-lrwxrwxrwx ... .zshrc -> ../dotfiles/dotfiles-zsh/zshrc
+lrwxrwxrwx ... .zshrc -> dotfiles/dotfiles-zsh/zshrc
 
 $ ls dotfiles-zsh/      # file landed in the package
 hapi.cyml  zshrc
@@ -98,6 +112,13 @@ loop.
 | audit trail not writable           | refused before anything moves (1.1.1) |
 | another package's source           | refused — reached through that package's link, the file is its content (1.7.1, F-070) |
 | audit trail not readable           | refused — hapi cannot tell whose file it is (1.7.1) |
+| the audit trail itself             | refused — `the audit trail is hapi's own record, not a file to adopt` (1.7.1, F-081) |
+| a FIFO, socket or device           | refused — `target is not a regular file` (1.7.1, F-091) |
+| the scope root itself (`--root ~/file`) | refused — no `[[link]]` row can name it; through 1.7.0 adopt wrote `target = ""` (1.7.1, F-090) |
+| a name that leaves no package-side name (`...` derives `..`) | refused (1.7.1, F-110) |
+| a relative scope root              | refused — `the scope root is not an absolute path` (1.7.1, F-109) |
+| `--backup-to` directory in the package | refused before anything moves (1.7.1, F-084) |
+| file and package on different filesystems | refused, with that reason; nothing moved (1.7.1, F-110) |
 
 Every refusal is non-destructive: the target file (or whatever
 is at the target path) is untouched on refusal.
@@ -138,7 +159,11 @@ conditional reversal:
 3. Remove the matching `[[link]]` row from the manifest
 
 All three preconditions are checked up front; either all three
-apply or the reversal is skipped. See
+apply or the reversal is skipped. Since 1.7.1 the row is removed from
+the manifest that holds it, a named `*.cyml` included. Two manifests
+holding it, or a symlinked one, are refused before anything moves, and
+the file moves back without replacing anything that appeared at its old
+place (F-083). See
 [`rollback.md`](rollback.md) for the full conditional-reversal
 semantics.
 
@@ -147,8 +172,8 @@ semantics.
 | code | meaning                                                          |
 |------|------------------------------------------------------------------|
 | 0    | adopted cleanly                                                  |
-| 1    | refused (probe / duplicate / source-clobber) or IO error         |
-| 2    | bad usage (missing argument)                                     |
+| 1    | refused (probe / duplicate / source-clobber, or a row above) or IO error |
+| 2    | bad usage (missing or empty argument, or an empty `--backup-to`) |
 
 ## See also
 

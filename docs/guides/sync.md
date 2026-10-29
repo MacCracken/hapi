@@ -30,7 +30,20 @@ For one package, `hapi sync <pkg>` is `hapi link <pkg>` *without*
 - `hapi sync` — "make state match manifest" (idempotent
   reconciliation)
 
-Both produce the same audit-trail and filesystem effects.
+Both produce the same audit-trail and filesystem effects. That includes
+recording a link already in place that the trail does not record for
+the package (1.7.1, F-079): `~ <target>  (already linked; now
+recorded)`, once. See [`link.md`](link.md#links-the-trail-does-not-record).
+On a conflict, sync's refusal points at `link` rather than at a flag it
+does not take:
+
+```
+hapi: refusing to link `zsh` — 1 conflict (sync never overwrites; `hapi link --force` on the package does):
+  /home/me/.zshrc  (existing regular file)
+```
+
+Through 1.7.0 it said `rerun with --force to override`, and
+`hapi sync --force` is exit 2 (F-097).
 
 ## Example: idempotent re-run
 
@@ -78,7 +91,7 @@ syncing /home/me/Repos/dotfiles/git...
   + /home/me/.gitconfig -> Repos/dotfiles/git/gitconfig
 linked 1 / 1 (0 already up-to-date)
 syncing /home/me/Repos/dotfiles/zsh...
-hapi: refusing to link `zsh` — 1 conflict (rerun with --force to override):
+hapi: refusing to link `zsh` — 1 conflict (sync never overwrites; `hapi link --force` on the package does):
   /home/me/.zshrc  (existing regular file)
 synced 1 / 2 packages
 ```
@@ -93,13 +106,19 @@ What counts as a package:
   symlinked `hapi.cyml`, is named in a note and skipped. Sync it by path
   if you meant it. This is what keeps a root an exact bound on what gets
   linked.
+- **A package directory hapi cannot search** is synced anyway, and fails
+  on its own terms, so the run exits 1. Through 1.7.0 it was skipped
+  with a wrong reason, and the run reported success (F-097).
 - **Names must be unique.** Two packages with the same `name` are both
   refused, because the audit trail keys links on the name and could not
   tell them apart.
+- **A root given twice is one root**, in either spelling (`/r` and
+  `/r/`, or a symlink to it). Through 1.7.0 every package in it was its
+  own twin, and both were refused (1.7.1, F-110).
 
 The run continues past a package that fails, and exits 1 at the end if
 any did, with `synced N / M packages` saying how many made it. Packages
-sync in name order.
+sync in root order, and by name within each root.
 
 Afterwards, `sync` checks the trail. A package it holds live links for,
 from a directory that no root holds, is named:
@@ -111,6 +130,9 @@ hapi: note: the trail has live links for `kitty` from /opt/kitty-cfg,
 
 It is not synced, because hapi cannot tell which scope it was linked into.
 Add its directory's parent to `HAPI_PACKAGE_ROOTS`, or sync it by path.
+Since 1.7.1 the directories are compared where they resolve (F-113): a
+package linked as `~/alias/kitty`, with `alias` a symlink to a root, is
+held by that root and gets no note.
 
 `HAPI_PACKAGE_ROOTS` says where packages are *read* from; it grants
 nothing. Every target is still decided by the scope: `$HOME`, or
@@ -157,19 +179,31 @@ What `--prune` will remove — all of these must hold:
   ([ADR 0004](../adr/0004-adopt-op-semantics.md)).
 - **From this package directory**, so a second package directory that
   happens to share the name is left alone.
-- **In this run's scope**, so a run under `$HOME` does not prune what a
-  `--root` run made.
+- **In this run's scope.** The entry's target must be this run's scope
+  plus its row's target, so a run under `$HOME` does not prune what a
+  `--root ~/sub` run made. Through 1.7.0 any target inside the scope
+  counted, and such a prune removed rows still in the manifest (1.7.1,
+  F-080).
 - **Whose row is gone**, i.e. no row still in the manifest targets it.
+  Rows are compared at their normalized and physical places, so
+  re-spelling a kept row (`.a` as `./.a`) does not prune its link
+  (1.7.1, F-080).
 - **Still the link hapi wrote.** If the target is now a file, a directory
   or a symlink pointing elsewhere, the package is refused and nothing is
   removed. `--force` does not change that; hapi removes only what it
   created.
 
+A dropped row whose link is already gone prints `= <target>  (already
+absent)` and is retired, as [`unlink`](unlink.md) retires one (1.7.1,
+F-078). It is not counted as pruned.
+
 ### The limit, and `--force`
 
 An emptied or truncated manifest should not take a package's links with
 it in one keystroke. So `--prune` refuses when it would remove **more than
-half** of the package's live links:
+half** of the package's live links. Since 1.7.1 only links still on disk
+count: one already gone is not at stake, and counting it let a truncated
+manifest past the limit (F-080).
 
 ```
 hapi: refusing to prune `zsh` — 6 of its 6 live links left the manifest, more than half
@@ -191,16 +225,19 @@ never overwrites a conflict (that is `hapi link --force`), and
 
 The whole package is planned before anything is written. A conflict, a
 missing source, a refused prune or an unwritable trail stops the package
-with nothing changed. Then the removals run, then the creates.
-`--dry-run` shows both and writes nothing.
+with nothing changed. Then the removals run, then the creates. Since
+1.7.1 each create is checked again first, because a removal can change
+where a row leads. A row whose place moved stops the run (F-080). If a
+removal fails partway, the directories of the links already removed
+still go (F-110). `--dry-run` shows both and writes nothing.
 
 ## Exit codes
 
 | code | meaning |
 |------|---------|
 | 0    | state matches the manifest(s) |
-| 1    | a conflict (use `hapi link --force` to override), a refused prune, a parse error, or an IO failure; with no package, any package that failed, a root that could not be listed, or no packages found |
-| 2    | bad usage: `--force` without `--prune`, or no package with `HAPI_PACKAGE_ROOTS` unset or relative |
+| 1    | a conflict (use `hapi link --force` to override), a refused prune, a parse error, or an IO failure; with no package, any package that failed (one hapi cannot search included), a root that could not be listed, or no packages found |
+| 2    | bad usage: `--force` without `--prune`, an empty argument, or no package with `HAPI_PACKAGE_ROOTS` unset or relative |
 
 ## Overwriting existing files
 

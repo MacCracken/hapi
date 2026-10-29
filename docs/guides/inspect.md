@@ -63,7 +63,7 @@ change what a directory row materializes, so it is a v2.0 item.
 |------|----------------------------------------------------|
 | 0    | manifest parsed and printed                        |
 | 1    | manifest could not be read or failed validation    |
-| 2    | bad usage (missing argument)                       |
+| 2    | bad usage (missing argument, or an empty one: through 1.7.0 `''` read `/hapi.cyml`) |
 
 Validation errors print a one-line diagnostic to stderr naming the
 offending field (e.g. `[[link]].target is missing or empty`).

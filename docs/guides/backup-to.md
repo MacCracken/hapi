@@ -11,26 +11,52 @@ the snapshot.
 | verb              | --backup-to | what it snapshots                              |
 |-------------------|-------------|------------------------------------------------|
 | `hapi link`       | ✓           | regular files removed by `--force` (not symlinks) |
-| `hapi sync` | — | nothing: `sync` has no `--force`, so there is no destructive step to snapshot |
+| `hapi sync` | — | nothing: `sync` never overwrites (`sync --force` only lifts `--prune`'s limit), so there is no destructive step to snapshot |
 | `hapi adopt`      | ✓           | the file about to be moved into the package   |
 | every other verb  | —           | exit 2 if passed                              |
 
-Verbs that don't accept `--backup-to` reject it with exit 2.
+Verbs that don't accept `--backup-to` reject it with exit 2. So does an
+empty value (1.7.1, F-098): `hapi: --backup-to needs a directory, not an
+empty value`. Through 1.7.0 `--backup-to ''` was taken as the
+directory `/`.
+
+A relative `<dir>` is made absolute when the flag is read (1.7.1,
+F-098), so the printed `(backup -> …)` and the recorded `backup_path`
+name the snapshot wherever you later run `rollback` from. Through 1.7.0
+`--backup-to bk` was printed and recorded as `bk/…`.
 
 ## What it does
 
 1. Compose the backup destination: `<dir>/<YYYYMMDD-HHMMSS>-<pkg>-<basename>`.
 2. `mkdir -p` the directory, then byte-copy the original file there.
+   Since 1.7.1 the copy keeps the original's permission bits, so a
+   `0600` secret stays `0600`; through 1.7.0 every snapshot was `0644`.
+   It is fsynced before the destructive step. A copy that fails is
+   removed, not left under a name that looks whole, and so is a
+   snapshot whose `adopt` then fails (F-084).
 3. Proceed with the existing `--force` / `adopt` steps (unlink, symlink,
    audit).
 4. Stamp the audit entry with `"backup_path":"<dest>"`.
 
 Symlink conflicts are skipped: a symlink points at content elsewhere,
 so there's nothing to preserve. Only regular-file conflicts trigger
-the snapshot.
+the snapshot. A FIFO, socket or device has no bytes to keep. The copy
+refuses it without waiting on it, and the run stops before replacing it
+(1.7.1, F-091).
+
+The directory itself is refused, before anything changes (1.7.1,
+F-084), when it:
+
+- is in the package, where a snapshot of a secret would land in the
+  package's working tree;
+- is, or is beneath, a target the run would link (`link`);
+- cannot be resolved (a file where a directory should be, or a loop).
 
 Under `--dry-run`, the would-be destination is printed but no
-snapshot is written and the audit trail does not grow.
+snapshot is written and the audit trail does not grow. Since 1.7.1 a
+`link --dry-run --force` that would need a snapshot fails, as the real
+run would, when hapi could not create one in the directory: `hapi: the
+--backup-to directory is not writable: <dir>  (dry-run)` (F-094).
 
 ## Filename shape
 
@@ -40,12 +66,22 @@ snapshot is written and the audit trail does not grow.
 20260523-153042-hyprland-hyprland.conf
 ```
 
-- `<YYYYMMDD-HHMMSS>` — local-clock timestamp at snapshot time.
+- `<YYYYMMDD-HHMMSS>` — UTC timestamp at snapshot time (the trail's `ts`
+  clock; hapi has no time-zone database).
 - `<pkg>` — `package.name` from the manifest. Disambiguates
   concurrent backups when multiple packages overwrite files
   in one session.
 - `<basename>` — final path component of the original file.
-  Keeps the snapshot recognizable when you `ls` the backup dir.
+  Keeps the snapshot recognizable when you `ls` the backup dir. Since
+  1.7.1 a long one loses its start, so the whole name fits the 255-byte
+  `NAME_MAX` with room for a `-N` suffix. Through 1.7.0 a long basename
+  made `--backup-to` refuse a file that plain `link --force` or `adopt`
+  handled (F-110).
+- `-N` — added when the name is taken, from `-2` up. Under `--dry-run`
+  nothing is written, so since 1.7.1 a name the dry run already printed
+  counts as taken too, and two same-named files show the two names the
+  real run gives them (F-114). Through 1.7.0 the dry run showed both at
+  one path.
 
 ## Example: `link --force` with a snapshot
 
@@ -96,8 +132,6 @@ Reach for `--backup-to` when:
   template (see [`upstream-drift.md`](upstream-drift.md)); the
   backup captures the on-disk fresh-install copy you're about to
   replace.
-- **Bulk `sync` runs** — many `--force` overwrites at once; one
-  flag covers all of them.
 
 It's redundant when:
 

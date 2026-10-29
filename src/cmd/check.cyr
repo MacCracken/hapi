@@ -26,6 +26,7 @@ include "src/manifest.cyr"
 include "src/cmd/inspect.cyr"   # reuse _hapi_inspect_print_manifest / _hi_eputs
 include "src/fs_link.cyr"
 include "lib/fs.cyr"            # dir_list_checked — portable across the dirent layouts
+include "src/audit_reader.cyr"   # _har_itoa
 
 # Same resolver as inspect; keeping it inline so check stays
 # decoupled from the inspect module's private helpers.
@@ -56,6 +57,12 @@ fn _hck_resolve_manifest(arg): i64 {
 # are equal, or when `src` lives beneath `name` (a row source of
 # `config/zsh` is covered by the top-level entry `config`).
 fn _hck_covers(src, name): i64 {
+    # A source spelled `./x` (or `.//x`) claims `x` (F-095): link and
+    # status accept that spelling, and check called `x` an orphan.
+    while (strlen(src) >= 2 && load8(src) == 46 && load8(src + 1) == 47) {
+        src = src + 2;
+        while (load8(src) == 47) { src = src + 1; }
+    }
     var sn = strlen(src);
     var nn = strlen(name);
     if (nn > sn) { return 0; }
@@ -66,13 +73,24 @@ fn _hck_covers(src, name): i64 {
 }
 
 # Is `name` a staging file from an interrupted write, rather than
-# package content? `hapi.cyml.<pid>.tmp` — see _hmw_write_atomic.
-fn _hck_is_staging(name): i64 {
+# package content? `<manifest>.<pid>.tmp` — see _hmw_write_atomic —
+# exactly (F-095): through 1.7.0 every `*.tmp` name counted, so a
+# package's own `notes.tmp` was hidden from the orphan check, and check
+# advised deleting a file a row links.
+fn _hck_is_staging(name, mbase): i64 {
     var n = strlen(name);
-    if (n < 4) { return 0; }
-    if (load8(name + n - 4) == 46 && load8(name + n - 3) == 116
-        && load8(name + n - 2) == 109 && load8(name + n - 1) == 112) { return 1; }
-    return 0;
+    var b = strlen(mbase);
+    if (n < b + 6) { return 0; }
+    if (memeq(name, mbase, b) == 0 || load8(name + b) != 46) { return 0; }
+    if (memeq(name + n - 4, ".tmp", 4) == 0) { return 0; }
+    var i = b + 1;
+    if (i >= n - 4) { return 0; }
+    while (i < n - 4) {
+        var c = load8(name + i);
+        if (c < 48 || c > 57) { return 0; }
+        i = i + 1;
+    }
+    return 1;
 }
 
 # Compare the manifest against the package directory, both ways.
@@ -80,6 +98,7 @@ fn _hck_is_staging(name): i64 {
 # when the package directory could not be listed.
 fn _hck_report_divergence(mpath, m): i64 {
     var pkg_dir = _fsl_path_dirname(mpath);
+    var mbase = _fsl_path_basename(mpath);
     var links = hapi_mf_links(m);
     var nl = vec_len(links);
     var bad = 0;
@@ -126,8 +145,13 @@ fn _hck_report_divergence(mpath, m): i64 {
     while (j < nn) {
         var nm = _fsl_str_to_cstr(vec_get(names, j));
         var skip = 0;
-        if (_hck_cstr_eq(nm, "hapi.cyml") == 1) { skip = 1; }
-        if (_hck_is_staging(nm) == 1) {
+        # The manifest checked, and any other `*.cyml` beside it, is not
+        # package content (F-095): checked as `pkg/zsh.cyml`, check
+        # reported zsh.cyml itself as an orphan and always exited 1.
+        var nml = strlen(nm);
+        if (_hck_cstr_eq(nm, mbase) == 1) { skip = 1; }
+        if (nml > 5 && memeq(nm + nml - 5, ".cyml", 5) == 1) { skip = 1; }
+        if (_hck_is_staging(nm, mbase) == 1) {
             # Not package content, so not a divergence — but it is not
             # harmless either: it refuses every later manifest write by a
             # process that draws the same pid (F-038). Name it.
@@ -163,12 +187,7 @@ fn _hck_report_divergence(mpath, m): i64 {
     return bad;
 }
 
-fn _hck_cstr_eq(a, b): i64 {
-    if (a == 0 || b == 0) { return 0; }
-    var an = strlen(a);
-    if (an != strlen(b)) { return 0; }
-    return memeq(a, b, an);
-}
+fn _hck_cstr_eq(a, b): i64 { return hapi_cstr_eq(a, b); }
 
 fn cmd_check(path, strict): i64 {
     if (path == 0) {
@@ -177,9 +196,40 @@ fn cmd_check(path, strict): i64 {
     }
     var mpath = _hck_resolve_manifest(path);
 
-    if (strict == 1) { hapi_mf_set_strict(1); }
+    # --strict also fails on what the lenient parser skips without a
+    # word, other than comments (F-107): a key before any section, a key
+    # given twice, text after a value, a value that is not a string, a
+    # byte-order mark. Through 1.7.0 strict rejected only unknown sections
+    # and keys, and passed the rest, which `fmt` would then drop.
+    var drops = 0;
+    if (strict == 1) {
+        hapi_mf_set_strict(1);
+        drops = vec_new();
+        hapi_mf_track_drops(drops);
+    }
     var res_t, res_v = hapi_mf_parse_file_r(mpath);
-    if (strict == 1) { hapi_mf_set_strict(0); }
+    if (strict == 1) {
+        hapi_mf_set_strict(0);
+        hapi_mf_track_drops(0);
+    }
+    if (strict == 1 && is_err_result(res_t) == 0) {
+        var bad = 0;
+        var di = 0;
+        while (di < vec_len(drops)) {
+            var dd = vec_get(drops, di);
+            if (_hck_cstr_eq(hapi_mf_drop_what(dd), "a comment") == 0) {
+                if (bad == 0) { _hi_eputs("hapi: the manifest has what the parser skips (strict mode):\n"); }
+                _hi_eputs("  line ");
+                _hi_eputs(_har_itoa(hapi_mf_drop_line(dd)));
+                _hi_eputs(": ");
+                _hi_eputs(hapi_mf_drop_what(dd));
+                _hi_eputs("\n");
+                bad = bad + 1;
+            }
+            di = di + 1;
+        }
+        if (bad > 0) { return 1; }
+    }
 
     if (is_err_result(res_t) == 1) {
         var code = res_v;

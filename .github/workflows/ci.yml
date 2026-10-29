@@ -73,6 +73,12 @@ jobs:
       - name: Resolve dependencies
         run: cyrius deps
 
+      - name: Verify the lockfile
+        # `cyrius deps` and `cyrius build` re-lock a modified vendored file
+        # without a word, so a tampered lib/ would build green (F-112).
+        # --verify checks every vendored file against cyrius.lock.
+        run: cyrius deps --verify
+
       - name: Build
         run: |
           mkdir -p build
@@ -130,6 +136,30 @@ jobs:
           sh scripts/agnos-smoke.sh "$RUNNER_TEMP/mirshi/build/mirshi" \
             build/${{ github.event.repository.name }}-agnos \
             build/${{ github.event.repository.name }}-agnos-tests
+
+      - name: Lint
+        # The P(-1) checklist's cleanliness step, run by CI rather than only
+        # by hand (F-112). Any warning fails.
+        run: |
+          set -e
+          for f in src/*.cyr src/cmd/*.cyr tests/scratch.cyr tests/hapi.tcyr tests/agnos.tcyr; do
+            out=$(cyrius lint "$f" 2>&1)
+            echo "$out" | grep -q '^0 warnings' || { echo "$out"; echo "::error::lint warnings in $f"; exit 1; }
+          done
+
+      - name: Fuzz and bench tiers
+        run: |
+          cyrius fuzz
+          cyrius bench
+
+      - name: Release build (DCE) smoke
+        # release.yml ships the DCE binary; this builds it on every CI run and
+        # checks it did not drop a live function (F-112).
+        run: |
+          set -e
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/${{ github.event.repository.name }}-dce
+          ./build/${{ github.event.repository.name }}-dce --version
+          ./build/${{ github.event.repository.name }}-dce inspect docs/examples/dotfiles-zsh > /dev/null
 
       - name: Test
         # v5.6.28: bare `cyrius test` picks up the [build].test entry

@@ -14,7 +14,8 @@
 #                    gains an additive `backup_path` field per ADR
 #                    0002's growth contract. PARSED on link, sync
 #                    and adopt; EFFECTIVE on `link --force` and
-#                    `adopt` only — `sync` has no `--force`, so it
+#                    `adopt` only — `sync` never overwrites (its
+#                    `--force` only lifts `--prune`'s limit), so it
 #                    has no destructive step and the flag is inert
 #                    there (F-026). Kept accepted on sync rather
 #                    than rejected: the command surface is frozen.
@@ -25,6 +26,12 @@ include "src/cli.cyr"
 
 fn main(): i64 {
     alloc_init();
+    # SIGPIPE is ignored (F-085): at its default action a closed output
+    # pipe — `hapi unlink pkg | head -1`, or a pager quit early — killed
+    # unlink, prune and rollback between a removal and its trail entry.
+    # Ignored, the write to stdout fails with EPIPE and the run finishes
+    # what it began; hapi checks no stdout write, so nothing else changes.
+    hapi_ignore_signal(13);
     return hapi_cli_main();
 }
 

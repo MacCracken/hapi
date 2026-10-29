@@ -36,6 +36,15 @@ fn hapi_rename(old, new): i64 {
     #endif
 }
 
+# 1 when the cstrings `a` and `b` are equal; 0 when either is 0. The one
+# copy of what seven modules each had their own of (1.7.1 refactor).
+fn hapi_cstr_eq(a, b): i64 {
+    if (a == 0 || b == 0) { return 0; }
+    var n = strlen(a);
+    if (strlen(b) != n) { return 0; }
+    return memeq(a, b, n);
+}
+
 # rename(old -> new) that never replaces an existing `new` (F-071). A
 # plain rename(2) does, and adopt moved the user's file over whatever was
 # at the package-side name: a second adopt deriving the same name, or a
@@ -66,6 +75,27 @@ fn hapi_rename_noreplace(old, new): i64 {
     var lb[8];
     if (sys_readlink(new, &lb, 8) != 0 - 2) { return 0 - 17; }   # not ENOENT
     return hapi_rename(old, new);
+    #endif
+}
+
+# Ignore signal `sig` (1.7.1): rt_sigaction with SIG_IGN. Linux only;
+# agnos has no signals, and a write to a pipe nobody reads answers -1
+# there. The kernel's struct sigaction is handler, flags, restorer, mask
+# on both x86_64 and arm64.
+fn hapi_ignore_signal(sig): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #else
+    var act[32];
+    store64(&act, 1);                 # SIG_IGN
+    store64(&act + 8, 0);
+    store64(&act + 16, 0);
+    store64(&act + 24, 0);
+    var nr = 13;                      # x86_64 rt_sigaction
+    #ifdef CYRIUS_ARCH_AARCH64
+    nr = 134;
+    #endif
+    return syscall(nr, sig, &act, 0, 8);
     #endif
 }
 
@@ -148,6 +178,73 @@ fn hapi_open_nofollow(path, flags): i64 {
     if (n > 0) { return 0 - 40; }          # ELOOP — it is a symlink
     #endif
     return file_open(path, flags | O_NOFOLLOW, 0);
+}
+
+# Open `path` only if it is a regular file (F-091), with `flags` and, for
+# a create, `mode`. Through 1.7.0 the manifest, the trail and a snapshot
+# source were opened plainly, and a FIFO there blocked hapi forever:
+# `status`, `check`, a no-arg `sync`, `list`, `unlink`, `rollback`, and
+# `--backup-to` over one. Linux opens with O_NONBLOCK, so a FIFO cannot
+# block, and asks fstat; agnos, which has no fstat here, asks stat first.
+# Returns the fd, or <0: -22 for something that is not a regular file.
+fn hapi_open_regular(path, flags, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var st = alloc(STAT_BUFSZ);
+    if (sys_stat(path, strlen(path), st) >= 0) {
+        if ((load64(st + STAT_MODE) & 0xF000) != 0x8000) { return 0 - 22; }
+    }
+    return file_open(path, flags, mode);
+    #else
+    var fd = file_open(path, flags | O_NONBLOCK, mode);
+    if (fd < 0) { return fd; }
+    var fst = alloc(STAT_BUFSZ);
+    if (sys_fstat(fd, fst) < 0 || (load64(fst + STAT_MODE) & 0xF000) != 0x8000) {
+        file_close(fd);
+        return 0 - 22;
+    }
+    return fd;
+    #endif
+}
+
+# 1 when `path` exists (stat follows the last component).
+fn hapi_exists(path): i64 {
+    var st = alloc(STAT_BUFSZ);
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (sys_stat(path, strlen(path), st) >= 0) { return 1; }
+    #else
+    if (sys_stat(path, st) >= 0) { return 1; }
+    #endif
+    return 0;
+}
+
+# 1 when a file could be created under `path`: its nearest existing
+# ancestor is a directory this process may write and search (F-094).
+# agnos has no access(2); a directory there counts.
+fn hapi_could_create_under(path): i64 {
+    var p = alloc(strlen(path) + 1);
+    memcpy(p, path, strlen(path) + 1);
+    var st = alloc(STAT_BUFSZ);
+    var go = 1;
+    while (go == 1) {
+        if (hapi_exists(p) == 1) { go = 0; }
+        else {
+            var n = strlen(p);
+            var cut = n - 1;
+            while (cut > 0 && load8(p + cut) != 47) { cut = cut - 1; }
+            if (cut <= 0) { store8(p, 47); store8(p + 1, 0); go = 0; }
+            else { store8(p + cut, 0); }
+        }
+    }
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (sys_stat(p, strlen(p), st) < 0) { return 0; }
+    if ((load64(st + STAT_MODE) & 0xF000) != 0x4000) { return 0; }
+    return 1;
+    #else
+    if (sys_stat(p, st) < 0) { return 0; }
+    if ((load64(st + STAT_MODE) & 0xF000) != 0x4000) { return 0; }
+    if (sys_access(p, 3) == 0) { return 1; }      # W_OK|X_OK
+    return 0;
+    #endif
 }
 
 # mkdir(path, mode). Linux: mkdir(path, mode). agnos: mkdir(path, pathlen)
@@ -235,10 +332,34 @@ fn hapi_excl_exists(path, err): i64 {
 fn hapi_open_absent(path, err): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     var st = alloc(STAT_BUFSZ);
-    if (sys_stat(path, strlen(path), st) < 0) { return 1; }
+    if (sys_stat(path, strlen(path), st) >= 0) { return 0; }
+    # agnos reports -1 for every failure, so absent has to be earned
+    # (F-089, as F-050 earned it for link_probe): the path is absent only
+    # if its nearest existing ancestor is a directory. Through 1.7.0 any
+    # stat failure was absent, so a trail under a regular file, or behind
+    # a directory hapi could not search, read as an empty trail.
+    var p = alloc(strlen(path) + 1);
+    memcpy(p, path, strlen(path) + 1);
+    var go = 1;
+    while (go == 1) {
+        var n = strlen(p);
+        var cut = n - 1;
+        while (cut > 0 && load8(p + cut) != 47) { cut = cut - 1; }
+        if (cut <= 0) { return 1; }               # up to "/": a directory
+        store8(p + cut, 0);
+        if (sys_stat(p, strlen(p), st) >= 0) { go = 0; }
+    }
+    if ((load64(st + STAT_MODE) & 0xF000) == 0x4000) { return 1; }
     return 0;
     #else
-    if (err == 0 - 2) { return 1; }
+    if (err == 0 - 2) {
+        # A dangling symlink is ENOENT too, but it is not "no trail yet"
+        # (F-101): through 1.7.0 unlink and rollback said the trail was
+        # empty, and the next write began a second trail behind it.
+        var lb[8];
+        if (sys_readlink(path, &lb, 8) > 0) { return 0; }
+        return 1;
+    }
     return 0;
     #endif
 }

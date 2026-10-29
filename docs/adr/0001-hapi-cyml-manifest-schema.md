@@ -287,3 +287,20 @@ still pass the parser, whose duplicate check compares the values as
 written. Changing that would change what parses. `link` refuses them
 instead, comparing the rows at their physical locations (F-067), with
 `two rows name the same target`, before anything is written.
+
+**More 1.7.1 read rules, each closing a 2026-10-29 audit finding.** Each
+one changes what parses only for a manifest that no valid one resembles:
+
+- **The header ends at the first `---` line** for every reader (F-086),
+  as the 1.1.1 addendum says. The reader had taken bayan's header, which
+  also ends at a line that is exactly `[[entries]]`.
+- **A control byte (0x00–0x1F, 0x7F) in `name`, `version`, a row's `source`
+  or `target`, or an `ignore` pattern is an error** (F-092). A
+  `description` may still hold tab, newline and carriage return, so one
+  can span lines.
+- **A leading UTF-8 byte-order mark is skipped** (F-107). `fmt` lists it
+  among what it would drop.
+- **The `ignore` list is canonicalized in written order** (finding 180).
+  The *Canonical form* section above says sorted. Sorting now would
+  change every existing hash that has an `ignore` list, so the written
+  order is the rule, and this addendum states it.

@@ -25,13 +25,7 @@ include "src/cmd/link.cyr"   # _hlnk_scope_root_override
 fn _hls_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hls_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
 
-fn _hls_cstr_eq(a, b): i64 {
-    if (a == 0 || b == 0) { return 0; }
-    var an = strlen(a);
-    var bn = strlen(b);
-    if (an != bn) { return 0; }
-    return memeq(a, b, an);
-}
+fn _hls_cstr_eq(a, b): i64 { return hapi_cstr_eq(a, b); }
 
 # Build the per-target CURRENT-OWNER map for the whole trail, in
 # one pass. A target is owned by at most one package at a time:
@@ -97,12 +91,20 @@ fn _hls_owner_map(trail): i64 {
 }
 
 # Count the targets `pkg_cstr` currently owns in a prebuilt map.
-fn _hls_count_owned(om, pkg_cstr): i64 {
+fn _hls_count_owned(om, pkg_cstr): i64 { return _hls_count_owned_in(om, pkg_cstr, 0); }
+
+# As _hls_count_owned, counting only targets within `scope` when it is
+# not 0 (F-106): through 1.7.0 `list --root X` printed `scope: X` and
+# counted every link in the trail, wherever it was.
+fn _hls_count_owned_in(om, pkg_cstr, scope): i64 {
+    var targets = load64(om);
     var owner = load64(om + 8);
     var count = 0;
     var i = 0;
     while (i < vec_len(owner)) {
-        if (_hls_cstr_eq(vec_get(owner, i), pkg_cstr) == 1) { count = count + 1; }
+        if (_hls_cstr_eq(vec_get(owner, i), pkg_cstr) == 1) {
+            if (scope == 0 || _fsl_within(vec_get(targets, i), scope) == 1) { count = count + 1; }
+        }
         i = i + 1;
     }
     return count;
@@ -144,6 +146,15 @@ fn cmd_list(): i64 {
         _hls_eputs("hapi: $HOME is unset; cannot resolve scope\n");
         return 1;
     }
+    # A relative scope root put every target under the cwd (F-109): from
+    # another directory, link made `./home` and wrote there. Only an
+    # absolute HOME, or a --root already made absolute, is a scope root.
+    if (load8(scope_root) != 47) {
+        _hls_eputs("hapi: the scope root is not an absolute path: ");
+        _hls_eputs(scope_root);
+        _hls_eputs("\n");
+        return 1;
+    }
 
     # A trail that exists but will not read, or that has a malformed
     # interior line, is a conflict with the user's own history — surface
@@ -176,10 +187,12 @@ fn cmd_list(): i64 {
     }
 
     var om = _hls_owner_map(trail);
+    var only = 0;
+    if (_hlnk_scope_root_override != 0) { only = fsl_to_absolute(_hlnk_scope_root_override); }
     var i = 0;
     while (i < npkg) {
         var p = vec_get(pkgs, i);
-        var live = _hls_count_owned(om, p);
+        var live = _hls_count_owned_in(om, p, only);
         _hls_puts("  ");
         _hls_puts(p);
         _hls_puts("  ");

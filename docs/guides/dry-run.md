@@ -40,6 +40,20 @@ A `--dry-run` invocation produces zero audit-trail growth.
 That's the testable invariant — `_test_file_size(audit_path)`
 before and after a dry-run is unchanged.
 
+Since 1.7.1 the exit code also counts the trail (F-094). A dry run that
+would write checks that the trail could take that write, and refuses as
+the real run would: `hapi: audit trail is not writable; refusing to
+link`. An existing trail must open for writing and end on a whole line.
+An absent one must have a directory it could be made in. Nothing is
+created or written. Through 1.7.0 a dry run skipped the check and exited
+0 where the real run refused. The same rule covers the rest:
+
+- `link --dry-run --force --backup-to <dir>` fails when the snapshot
+  the real run needs could not be written in `<dir>`.
+- `adopt --dry-run` answers after every refusal the real run makes, not
+  before them.
+- `checkpoint --dry-run` checks the trail the same way.
+
 ## Example
 
 ```sh
@@ -59,6 +73,12 @@ rolled back 3 / 3 entries
 
 In both runs no audit entry was written and no filesystem
 state changed. The output is the *forecast*.
+
+A `rollback` forecast probes each entry against the disk as it is now,
+so it does not see what its own earlier reversals would change. Where
+one reversal makes another possible, its counts can differ from the
+real run's. This is accepted; the roadmap tracks it (finding 51 of the
+2026-10-29 audit).
 
 ## Use cases
 

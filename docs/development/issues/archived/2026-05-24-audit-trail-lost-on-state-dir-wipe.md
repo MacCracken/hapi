@@ -1,5 +1,18 @@
 # Audit trail lost on state-dir wipe — `list`/`rollback` undercount after a drive move
 
+> ## ✅ RESOLVED in 1.7.1 (2026-10-29)
+>
+> **F-079** ([2026-10-29 audit](../../../audit/2026-10-29-audit.md)):
+> `link`, and so `sync`, records a link it finds already in place that
+> the trail does not record for the package. The proof is the one
+> removal accepts: the link's text is exactly what hapi writes for the
+> row. After a wiped `$XDG_STATE_HOME`, one `hapi sync` rebuilds the
+> trail. Each such link gets an `op:link` entry and prints
+> `~ <target>  (already linked; now recorded)`, and the next run writes
+> nothing. The F-006 recovery group in `tests/hapi.tcyr` asserts the
+> rebuild. The same proof heals a renamed `[package].name` and a moved
+> `$HOME`. CHANGELOG `[1.7.1]`.
+
 **Discovered:** 2026-05-24 during a drive-move / system-restart dotfile recovery
 **Severity:** Medium — silent trail-state divergence (live count + rollback scope undercount reality)
 **Affects:** hapi 1.0.0 — and structurally all versions: the trail lives in `$XDG_STATE_HOME/hapi/`, which is local-only state outside the version-controlled dotfiles repo.

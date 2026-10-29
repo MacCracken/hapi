@@ -60,7 +60,7 @@ The roadmap names two mechanisms: (a) recover `pkg_dir` from a
 live audit entry, or (b) a tree-walk heuristic. **Today's event
 is direct evidence that (a) is the wrong primary mechanism.** The
 drive move wiped the audit trail (see
-[`2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](../2026-05-24-audit-trail-lost-on-state-dir-wipe.md)),
+[`2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](2026-05-24-audit-trail-lost-on-state-dir-wipe.md)),
 so a trail-driven `hapi sync` would have discovered **zero**
 packages in precisely the scenario where no-arg sync is most
 valuable — the empty-trail bootstrap. The mechanism that actually
@@ -105,7 +105,7 @@ from a trail that a drive move can erase.
 
 ## Cross-references
 
-- [`2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](../2026-05-24-audit-trail-lost-on-state-dir-wipe.md)
+- [`2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](2026-05-24-audit-trail-lost-on-state-dir-wipe.md)
   — same recovery event; why trail-recovery is the wrong discovery
   mechanism for this command.
 - [`../../roadmap.md`](../../roadmap.md) — *Manifest discovery for no-arg
