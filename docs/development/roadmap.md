@@ -9,14 +9,14 @@
 
 ## Status
 
-- **Shipped: 1.3.0** — `hapi sync` with no package (every package under
-  `HAPI_PACKAGE_ROOTS`) and `sync --prune`, closing the two dogfood
-  issues on `sync` ([ADR 0006](../adr/0006-sync-package-roots-and-prune.md)).
-  Its P(-1), the *1.3.0 addendum* of
-  [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md), fixed
-  F-061. Before it, 1.2.0 / 1.2.1 moved argument parsing to cmdit.
-- **Next: 1.4.0 — `created_dirs` on `op:link`** (below).
-- **1.5.0 → 1.7.0** — the rest of v1.x's additive work, one theme per
+- **Shipped: 1.4.0** — `created_dir` on `op:link`: `unlink`, `sync
+  --prune` and `rollback` now remove the directories `link` made, with
+  proof (ADR 0002, 1.4.0 addendum). Its P(-1), the *1.4.0 addendum* of
+  [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md), caught
+  F-062 before it shipped. Before it, 1.3.0 added no-package `sync` and
+  `--prune`, and 1.2.x moved argument parsing to cmdit.
+- **Next: 1.5.0 — Script-facing flags** (below).
+- **1.6.0 → 1.7.0** — the rest of v1.x's additive work, one theme per
   minor. The command surface, ADR 0001's schema and ADR 0002's line
   shape stay frozen throughout; everything here is additive.
 - **Gated** — work that waits on something outside hapi, scheduled when
@@ -31,8 +31,8 @@
   only: a `1.N.x` adds nothing.
 - **Order: dependency first, then dogfood pressure.** cmdit went first
   (1.2.0) because every later flag registers through it; sync's two
-  dogfood issues went next (1.3.0). The order of 1.4 – 1.7 is a proposal
-  and can be swapped when pressure changes.
+  dogfood issues went next (1.3.0), then `created_dir` (1.4.0). The order
+  of 1.5 – 1.7 is a proposal and can be swapped when pressure changes.
 - **Standing obligations, per release** (CLAUDE.md, not repeated in each
   section): a P(-1) re-run when the release touches a path argument, a
   syscall, the capability surface or the trail format (each section
@@ -41,20 +41,6 @@
   suites run on x86_64, aarch64 and agnos.
 
 ---
-
-## 1.4.0 — `created_dirs` on `op:link`
-
-**P(-1): yes** (trail format, plus a new removal path).
-
-- Record the parent directories `link_create` had to make, so `unlink` / `rollback` can remove
-  exactly those and nothing else. Today they are deliberately left behind (1.0.9, F-029): the
-  trail records the symlink, not the directories, so any unlink-time prune is an *inference* — and
-  `rmdir` can still take out a directory the user made on purpose, or drop a mode the user set. On
-  `~/.ssh` that is a security regression hapi would have caused while claiming to reverse itself.
-  hapi removes only what it created, *with proof*; this field is the proof. Additive per ADR 0002's
-  growth contract.
-- Needs an `rmdir` shim in `src/agnos_compat.cyr` (agnos `rmdir` takes a path length), and the
-  reversal must remove deepest-first and stop at the first directory that is not empty.
 
 ## 1.5.0 — Script-facing flags
 

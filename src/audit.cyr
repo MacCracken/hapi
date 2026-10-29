@@ -251,7 +251,7 @@ fn audit_entry_size(pkg, pkg_version, manifest_hash,
 # otherwise the entry shape is identical to the v0.7.0 format.
 fn _audit_format_link_op(out, cap, op, pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target,
-  backup_path): i64 {
+  backup_path, created_dir): i64 {
     var pos = 0;
     _audit_ovf = 0;
     var ts = iso8601_now();
@@ -277,6 +277,13 @@ fn _audit_format_link_op(out, cap, op, pkg, pkg_version, manifest_hash,
         _audit_emit_comma(out, &pos, cap);
         _audit_emit_field(out, &pos, cap, "backup_path", backup_path);
     }
+    # 1.4.0 (ADR 0002 addendum): the outermost directory this link's
+    # creation made. Last, and only when it made one, so every other
+    # entry is byte-identical to 1.3.0's.
+    if (created_dir != 0 && strlen(created_dir) > 0) {
+        _audit_emit_comma(out, &pos, cap);
+        _audit_emit_field(out, &pos, cap, "created_dir", created_dir);
+    }
     _audit_put8(out, &pos, cap, 125);         # }
     _audit_put8(out, &pos, cap, 10);          # \n
     if (_audit_ovf == 1) { return 0 - 1; }
@@ -291,7 +298,18 @@ fn audit_format_link(out, cap, pkg, pkg_version, manifest_hash,
   backup_path): i64 {
     return _audit_format_link_op(out, cap, "link",
       pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, backup_path);
+      source, target, abs_source, abs_target, backup_path, 0);
+}
+
+# A link entry carrying `created_dir` (1.4.0): the outermost directory the
+# link's creation made, or 0 when it made none (then identical to
+# audit_format_link).
+fn audit_format_link_created(out, cap, pkg, pkg_version, manifest_hash,
+  source, target, abs_source, abs_target,
+  backup_path, created_dir): i64 {
+    return _audit_format_link_op(out, cap, "link",
+      pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, backup_path, created_dir);
 }
 
 # Compose an unlink entry. Same shape as link with op="unlink".
@@ -301,7 +319,7 @@ fn audit_format_unlink(out, cap, pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target): i64 {
     return _audit_format_link_op(out, cap, "unlink",
       pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, 0);
+      source, target, abs_source, abs_target, 0, 0);
 }
 
 # Compose an adopt entry. Same shape as link with op="adopt".
@@ -312,7 +330,7 @@ fn audit_format_adopt(out, cap, pkg, pkg_version, manifest_hash,
   backup_path): i64 {
     return _audit_format_link_op(out, cap, "adopt",
       pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, backup_path);
+      source, target, abs_source, abs_target, backup_path, 0);
 }
 
 # Compose an unadopt entry — the rollback-reverse of adopt.
@@ -322,7 +340,7 @@ fn audit_format_unadopt(out, cap, pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target): i64 {
     return _audit_format_link_op(out, cap, "unadopt",
       pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, 0);
+      source, target, abs_source, abs_target, 0, 0);
 }
 
 # Compose a rollback-marker entry. Minimal fields — just `ts`
@@ -468,13 +486,21 @@ fn _audit_append_bytes(buf, n): Result {
 fn audit_append_link_r(pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target,
   backup_path): Result {
+    return audit_append_link_created_r(pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, backup_path, 0);
+}
+
+# audit_append_link_r with `created_dir` (1.4.0; 0 when none was made).
+fn audit_append_link_created_r(pkg, pkg_version, manifest_hash,
+  source, target, abs_source, abs_target,
+  backup_path, created_dir): Result {
     var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target,
-      backup_path);
+      backup_path) + 32 + 6 * _audit_vlen(created_dir);
     var buf = alloc(cap);
-    var n = audit_format_link(buf, cap, pkg, pkg_version, manifest_hash,
+    var n = audit_format_link_created(buf, cap, pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target,
-      backup_path);
+      backup_path, created_dir);
     return _audit_append_bytes(buf, n);
 }
 

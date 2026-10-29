@@ -67,6 +67,15 @@ Final state: clean. Rollback walks every entry, reversing each
 conditionally — and the cumulative effect is "undo to the
 beginning of the trail."
 
+## Directories
+
+Reversing a link also removes the directories its creation made, when
+they are empty, exactly as [`unlink`](unlink.md#directories-hapi-made)
+does. Rollback goes newest first, so a directory one link made is
+removed after any later link that reused it. Reversing an `unlink`
+re-creates the link, making its directories again, and the replayed entry
+records them.
+
 ## Rollback markers
 
 A `rollback-marker` entry is a no-op for the trail's link/unlink

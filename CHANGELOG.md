@@ -6,6 +6,131 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.4.0] - 2026-10-28
+
+> **`created_dir` on `op:link`.** Through 1.3.0 the directories `link` made for a
+> target were deliberately left behind (1.0.9, F-029). The trail recorded the symlink,
+> not the directories, so any removal would have been an inference, and `rmdir` can
+> take out a directory the user made on purpose. A link entry now records the
+> directories its creation made, and `unlink`, `sync --prune` and `rollback` remove
+> them with the link: exactly those, and only once empty. The field is additive under
+> ADR 0002 (addendum); hapi 1.3.0 reads a 1.4.0 trail unchanged, and the other way
+> round.
+
+### Added
+
+- **`"created_dir"` on `op:link`**: the outermost directory the link's creation made.
+  Every directory from it down to the target's parent was made too, since `mkdir -p`
+  makes a contiguous chain.
+  - It is written last, and only when a directory was made. Every other entry is
+    byte-identical to 1.3.0's.
+  - It is one string, not a list: every value in the format is a string, and the
+    1.0 – 1.3 reader treats anything else as a malformed line, after which it refuses
+    to act on the trail at all.
+  - A directory that was already there is never claimed. That includes one another
+    row made a moment earlier, and, on Linux, one a racing process made (its EEXIST
+    restarts the run).
+  - On agnos, whose `mkdir` is idempotent, a new shim (`hapi_mkdir_made`) asks
+    `stat` first.
+- **`unlink`, `sync --prune` and `rollback` remove the directories hapi made**,
+  deepest first:
+  - They stop at the first directory that still holds something.
+  - They never go above `created_dir`.
+  - They act only after removing the link themselves: the link sitting in the
+    directory is the proof the directory is still the one hapi made.
+  - `unlink` and `--prune` remove the chains of everything the run removed together,
+    so a directory one row made and another reused goes when the run removes both.
+    `--prune` does this before its creates, so a row moved within a directory only it
+    used re-makes the directory and owns it.
+  - `rollback` works newest first, one entry at a time.
+  - Each directory removed is reported as `  - <dir>/  (a directory hapi made)`.
+  - A link already gone, a `--dry-run`, or an entry from before 1.4.0 removes no
+    directory.
+  - Rolling back an `unlink` re-makes the directories, and the replayed entry records
+    them.
+- **The F-018 take-back takes the directories with it.** When `link` (or rollback's
+  re-link) cannot write the entry, it removes the directories it just made along with
+  the link. If the symlink itself fails after its directories were made, they are
+  removed too.
+- A new `hapi_rmdir` shim (agnos `rmdir` takes a path length).
+
+### Security
+
+P(-1) ran: 1.4.0 changes the trail format and adds a removal path. The record is the
+*1.4.0 addendum* of [`docs/audit/2026-10-28-audit.md`](docs/audit/2026-10-28-audit.md).
+
+- **F-062 [MEDIUM] — never shipped.** The removal walk would have resolved through a
+  made directory swapped for a symlink.
+  - **The case:** the walk goes deepest first. With `.sw/new/deep` made by hapi, and
+    `.sw/new` later replaced by a symlink to `/elsewhere`, `rmdir .sw/new/deep` was
+    resolved through it and removed an empty `/elsewhere/deep`, a directory hapi never
+    made. That is the F-015 / F-051 shape: a path judged on its spelling where the
+    kernel acts on where it goes.
+  - **Fix:** every directory from the link's parent up to `created_dir` must still be
+    a real directory before any is removed.
+  - **Found** by this pass before the release, and held by tests through both
+    `unlink` and `rollback`.
+- The four threat classes were walked across the new path:
+  - `created_dir` must be a `/`-boundary prefix of its link's path, so an edited
+    trail cannot point elsewhere;
+  - `"/"` cannot qualify;
+  - nothing is removed through a symlink;
+  - a directory is removed only after its link is.
+
+  Every guard is held by a test that a seeded revert turns red: 19 of 19, plus 1.3.0's
+  26 still caught. One revert is equivalent and left out: collecting directories
+  during `--dry-run`, where the link still in the directory means no `rmdir` can
+  succeed.
+
+### Tests
+
+- `tests/hapi.tcyr` 970 → **1,035** assertions (130 → 134 groups). A new
+  `created_dir` tier covers:
+  - recording: the outermost directory, a reused directory, a pre-existing one, and
+    the byte-identical line when nothing was made;
+  - removal by `unlink`: shared directories, a user's file, a link already gone,
+    `--dry-run`;
+  - removal by rollback, including an empty pre-existing directory just above
+    `created_dir` that must stay;
+  - rolling back an `unlink`;
+  - `--prune`, including the before-the-creates order;
+  - a record that is not its link's own, including a same-length directory off its
+    path;
+  - F-062 through `unlink` and `rollback`;
+  - the F-018 take-back's directories, and those a failed `symlink(2)` leaves (staged
+    with a name over `NAME_MAX`).
+- `tests/agnos.tcyr` 61 → **67** (9 → 10 groups): a link into new directories and its
+  `unlink`, with the scope at `/`. This exercises both new shims' agnos arms, under
+  mirshi too.
+- Verified:
+  - x86_64, `--aarch64`, `--agnos` and `CYRIUS_DCE=1` builds;
+  - `cyrius lint` 0 warnings;
+  - `cyrius test` and `cyrius test --aarch64`;
+  - `cyrius fuzz` and `cyrius bench`;
+  - `scripts/concurrency-test.sh`;
+  - `scripts/agnos-smoke.sh` under mirshi, all five checks;
+  - `cyrius deps --verify` 114 / 114.
+
+  The 819-line golden is identical to 1.3.0's but for the version line: its fixture's
+  targets sit in existing directories, so no entry gains the field. Cross-version:
+  1.3.0 lists, checks and unlinks a 1.4.0 trail correctly, and 1.4.0 leaves an
+  unrecorded 1.3.0 link's directory alone.
+
+### Notes
+
+- **One gap, accepted.** A directory is removed only together with the link whose
+  entry claimed it. If that row is removed in one run while another row still uses
+  the directory, the directory stays, and it stays when the second row goes later,
+  because that row never claimed it. It is left empty, as every directory was before
+  1.4.0. Claiming it for the second row would mean `link` reading the trail on every
+  run; that was weighed and not taken.
+- **The directory removals are not written to the trail.** The `op:unlink` they
+  follow is. Reversing it re-makes them, and the replayed `op:link` records them
+  again.
+- **Benchmarks:** flat to slightly faster against 1.3.0 (cold 133–134 vs 136–137 ms;
+  the old directory walk called `mkdir` on the target's parent twice). Trail
+  byte-identical. DCE binary 603,424 → 607,560 bytes.
+
 ## [1.3.0] - 2026-10-28
 
 > **sync: no package, and `--prune`.** The two open dogfood issues, both on `sync`, and

@@ -69,6 +69,8 @@ real HDD or under cgroup-throttled IO.
 
 | 1.3.0   | —         | —         | 0 bytes           | 2026-10-28 | `sync` with no package, and `--prune`; `cmd_link` split into plan and execute. **Relative row**, same scratch path as 1.2.0's. Interleaved A/B against 1.2.1, eight pairs across two runs — old 133–136 / 109–111, new 131–134 / 107–110: **flat**, and the per-process floor too (100 × `sync pkg050`, old 117–119 ms, new 115–116). Trail byte-identical (157,850 bytes / 350 entries at that path). ⭐ **The new form:** one `hapi sync` with `HAPI_PACKAGE_ROOTS` pointed at the harness's 100 packages takes **80–84 ms cold / 63–67 ms warm**, where the 100-process loop it replaces takes ~133 / ~109, about 38 % less, and it writes the same trail byte for byte. DCE binary 580,928 → 603,424 bytes. |
 
+| 1.4.0   | —         | —         | 0 bytes           | 2026-10-28 | `created_dir`: `fs_link.cyr`'s directory walk now says what it made, and removals take those directories with them. **Relative row**, same scratch path. Interleaved A/B against 1.3.0, five pairs — old 136–137 / 109–112, new 133–134 / 107–110: **flat to slightly faster**. The old walk called `mkdir` on every target's parent twice, the new one once. Per-process floor flat (old 118–119, new 116–117). Trail byte-identical: the harness's targets sit directly in `$HOME`, so no entry gains the field. DCE binary 603,424 → 607,560 bytes. |
+
 ⚠ **On the 0.9.0 → 1.0.4 delta.** Three things changed at once between
 the two rows: the compiler (6.0.1 → 6.5.35), the kernel (7.0.9 → 7.1.9),
 and hapi's own `link_probe`. The 0.9.0 row is a single run; the 1.0.4 row

@@ -142,6 +142,42 @@ fn hapi_mkdir(path, mode): i64 {
     #endif
 }
 
+# mkdir that says whether it made the directory: 1 created, 0 a directory
+# (or, on Linux, anything — EEXIST, as fsl_mkdir_parents always took it) was
+# already there, <0 failure. 1.4.0 records the directories `link` makes
+# (`created_dir`), so "made it" must be exact. Linux says so in the EEXIST.
+# agnos cannot: its ext2 mkdir is idempotent (an existing directory is
+# success), so the agnos arm asks stat first. A directory another process
+# makes between that stat and the mkdir would read as ours there; Linux
+# sees it as EEXIST.
+fn hapi_mkdir_made(path, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var st = alloc(STAT_BUFSZ);
+    if (sys_stat(path, strlen(path), st) >= 0) {
+        if ((load64(st + STAT_MODE) & 0xF000) == 0x4000) { return 0; }
+        return 0 - 1;
+    }
+    var rc = sys_mkdir(path, strlen(path));
+    if (rc >= 0) { return 1; }
+    return rc;
+    #else
+    var rc = sys_mkdir(path, mode);
+    if (rc == 0) { return 1; }
+    if (rc == 0 - 17) { return 0; }
+    return rc;
+    #endif
+}
+
+# rmdir(path). Linux: rmdir(path) — refuses a non-empty directory and does
+# not follow a symlink. agnos: rmdir(path, pathlen), -1 for every failure.
+fn hapi_rmdir(path): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return sys_rmdir(path, strlen(path));
+    #else
+    return sys_rmdir(path);
+    #endif
+}
+
 # 1 when an O_CREAT|O_EXCL open that failed with `err` failed because the
 # name already exists. Linux reports -EEXIST (17 on x86_64 and arm64 alike —
 # both use the asm-generic errno table). agnos reports a bare -1 for every

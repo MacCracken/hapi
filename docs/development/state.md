@@ -5,26 +5,24 @@
 
 ## Version
 
-**1.3.0** (2026-10-28) — `sync` with no package, and `--prune`
-([ADR 0006](../adr/0006-sync-package-roots-and-prune.md)), on the cyrius
-6.7 line (pin `6.7.18`).
+**1.4.0** (2026-10-28) — `created_dir` on `op:link`, on the cyrius 6.7
+line (pin `6.7.18`). A link entry records the outermost directory its
+creation made (ADR 0002, 1.4.0 addendum). `unlink`, `sync --prune` and
+`rollback` remove those directories with the link: deepest first, only
+once empty, never above that directory, never through a symlink, and only
+after removing the link themselves. The field is additive, and 1.3.0
+reads a 1.4.0 trail unchanged. Its P(-1) (the *1.4.0 addendum* of
+[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)) caught
+**F-062** before it shipped: the removal walk resolved through a made
+directory swapped for a symlink. The manifest schema and the line shape
+are unchanged. Both suites pass on x86_64 and on aarch64 under qemu, and
+`tests/agnos.tcyr` also passes on agnos under mirshi.
 
-- **No package.** `hapi sync` syncs every package under
-  `HAPI_PACKAGE_ROOTS`, each root scanned one level deep. The scan follows
-  no symlink, and the trail only names packages outside the roots.
-- **`--prune`.** `hapi sync [<pkg>] --prune` removes the links whose rows
-  left the manifest, one `op:unlink` each. It is refused past half of a
-  package's live links unless `--force`, which on `sync` means only that.
-- **P(-1).** Its pass (the *1.3.0 addendum* of
-  [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)) found
-  and fixed **F-061**: a removal whose trail entry failed after the
-  pre-flight stayed removed and unrecorded, in `unlink` and `rollback`
-  since F-055. Such a change is now taken back.
-- **Unchanged:** the manifest schema and the audit-trail line shape.
-  Both suites pass on x86_64 and on aarch64 under qemu, and
-  `tests/agnos.tcyr` also passes on agnos under mirshi.
-
-Before it, 1.2.0 / 1.2.1 moved argument parsing to cmdit 1.5.0
+Before it, 1.3.0 added `hapi sync` with no package (every package under
+`HAPI_PACKAGE_ROOTS`) and `sync --prune` ([ADR
+0006](../adr/0006-sync-package-roots-and-prune.md)), and fixed F-061 (a
+removal whose trail entry failed after the pre-flight is now taken back).
+1.2.0 / 1.2.1 moved argument parsing to cmdit 1.5.0
 (`[deps.cmdit]`), keeping every 1.1.1 message (checked against an
 819-line golden). They added the forms getopt brings (`<verb> --help` /
 `--version`, `--root=PATH` / `--backup-to=DIR`, `--`, a lone `-`) and
@@ -138,7 +136,10 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   `hapi_cli_main()`.
 - `src/agnos_compat.cyr` — target-portability shims for the agnos
   userland (`hapi_unlink` / `hapi_rename` / `hapi_fsync` /
-  `hapi_symlink` / `hapi_readlink` / `hapi_mkdir`). Each forwards
+  `hapi_symlink` / `hapi_readlink` / `hapi_mkdir`, and since 1.4.0
+  `hapi_mkdir_made` — which says whether it made the directory, asking
+  `stat` first on agnos, whose `mkdir` is idempotent — and `hapi_rmdir`).
+  Each forwards
   verbatim on Linux/macOS; the agnos branch absorbs the
   syscall-ABI divergence (explicit path lengths, `sync` for
   `fsync`, `mkdir`'s length-not-mode second argument). Every
@@ -190,7 +191,13 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   resolved prefix), `fsl_link_text` (ADR 0003's text, from the parent
   the link physically sits in), and `fsl_lands_in` (does a target
   resolve into a given directory — the package guard). `link_probe`
-  classifies with `stat`.
+  reads the link first, so a symlink is always SYMLINK, then splits
+  file from directory. Since 1.4.0 `fsl_mkdir_parents_mode_r` /
+  `link_create_r` report the outermost directory they made (an
+  `op:link`'s `created_dir`), and `fsl_rmdir_created` (one link) /
+  `fsl_rmdir_created_all` (a run's links together) remove such a chain,
+  after `_fsl_made_ok` (the record is its link's own) and
+  `_fsl_chain_is_real` (no directory in it is now a symlink, F-062).
 - `src/cmd/inspect.cyr` — manifest dump
 - `src/cmd/link.cyr` — `_hlnk_plan_run` parses the manifest, classifies
   every row and makes every refusal before any write; `_hlnk_execute`
@@ -268,7 +275,9 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   `rollback-marker`
 - **Additive fields**: `backup_path` on `link` / `adopt` entries
   when `--backup-to <dir>` is set. Pre-v0.8.0 readers tolerate
-  the field per ADR 0002's growth contract.
+  the field per ADR 0002's growth contract. `created_dir` (1.4.0) on
+  `link` entries whose creation made a directory: the outermost one,
+  the rest implied. One string, written last; pre-1.4.0 readers drop it.
 - **Readers**: `unlink`, `rollback`, `list`, `status`, `sync`
   — every verb that consults the trail walks via
   `src/audit_reader.cyr`.
@@ -282,7 +291,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. **970 assertions across 130 test
+- `tests/hapi.tcyr` — primary suite. **1,035 assertions across 134 test
   groups.** Re-derive rather than recount by hand — these figures have
   rotted twice, and the per-tier breakdown below drifted 16 groups
   short before the 2026-08-26 sweep:
@@ -294,18 +303,19 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
     | sort | uniq -c | sort -rn                 # per-tier breakdown
   ```
 
-  Groups by tier, as measured at 1.3.0: link 10, cli 10, sync 10,
+  Groups by tier, as measured at 1.4.0: link 10, cli 10, sync 10,
   cap 9, rollback 8, manifest 8, manifest_write 8, check 8, backup 7,
   adopt 7, fs_link 6, dry-run 6, status 5, canonical 5, audit_reader 5,
-  audit 5, audit-repair 4, unlink 4, list 3, checkpoint 1,
-  agnos_compat 1. The `cli` tier (1.2.0) runs `hapi_cli_run` with a
+  audit 5, created_dir 4, audit-repair 4, unlink 4, list 3,
+  checkpoint 1, agnos_compat 1. The `cli` tier (1.2.0) runs `hapi_cli_run` with a
   synthetic argv and its stdout / stderr captured through `dup2`, so the
   v1.0 messages are asserted byte for byte.
-- `tests/agnos.tcyr` — **61 assertions across 9 groups**, all
+- `tests/agnos.tcyr` — **67 assertions across 10 groups**, all
   target-neutral: the agnos-conditional paths (no-follow open,
   exclusive create, absent trail, trail and manifest round trips,
   backup copy, the fs shims, `link` / `status` / `unlink` with the
-  scope at `/`, and since 1.3.0 a package-root scan and a prune). `cyrius test` runs it on x86_64 and aarch64; the agnos
+  scope at `/`, since 1.3.0 a package-root scan and a prune, and since
+  1.4.0 a made-directory round trip). `cyrius test` runs it on x86_64 and aarch64; the agnos
   smoke builds it with `--agnos` and runs it under mirshi. Absolute
   paths only, no chmod, no environment — what an agnos run allows.
 
@@ -315,7 +325,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 beside it as shell harnesses. **CI runs both.**
 
 The suite itself also runs on aarch64 — `cyrius test --aarch64` under
-`qemu-aarch64` (970 / 970 and 61 / 61 at 1.3.0). **CI runs it** as of 1.0.12
+`qemu-aarch64` (1,035 / 1,035 and 67 / 67 at 1.4.0). **CI runs it** as of 1.0.12
 (`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
 qemu fails the step, it never skips). Before that the aarch64 step was
 compile-only, which is how the `O_NOFOLLOW` literal went unseen from
@@ -399,8 +409,9 @@ means downstream packagers (zugot recipes) and user manifests.
 ## Next
 
 The 2026-10-28 P(-1) pass is **closed** in 1.1.1. Its 1.2.0 addendum
-(the argument surface under cmdit) closed with F-060 fixed, and its
-1.3.0 addendum (`sync`'s scan and prune) with F-061 fixed.
+(the argument surface under cmdit) closed with F-060 fixed, its 1.3.0
+addendum (`sync`'s scan and prune) with F-061 fixed, and its 1.4.0
+addendum (`created_dir`) with F-062 caught before release.
 Every finding is fixed except F-059, accepted as an agnos kernel gap
 ([`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)).
 Two upstream follow-ups came out of it, both filed upstream on
@@ -411,7 +422,8 @@ rename-over-existing (an agnos issue file). [`roadmap.md`](roadmap.md)
 
 Forward-looking work is **not** listed here — it lives in
 [`roadmap.md`](roadmap.md), which carries only work that has not
-shipped. **Next is 1.4.0, `created_dirs` on `op:link`**; 1.5.0 –
-1.7.0 are planned there one theme per minor, with upstream-gated work
+shipped. **Next is 1.5.0, script-facing flags** (`status --quiet`,
+`rollback --steps` / `--to`); 1.6.0 – 1.7.0 are planned there one theme
+per minor, with upstream-gated work
 listed apart. Open dogfood papercuts are in [`issues/`](issues/) (2
 open, 9 archived).

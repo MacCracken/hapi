@@ -4260,6 +4260,264 @@ fn test_unwritten_entries_are_taken_back() {
     return 0;
 }
 
+# ------------------------------------------------------------
+# 1.4.0 — `created_dir` on `op:link`: the directories a link's
+# creation made are removed with it, and nothing else is.
+# ------------------------------------------------------------
+
+# Write `<dir>/hapi.cyml` for package `name` whose rows are the words of
+# `rows`, each `source=target`. Sources are created. Returns `dir`.
+fn _cd_pkg(dir, name, rows): i64 {
+    hapi_mkdir(dir, 0x1C0);
+    var mf = alloc(4096);
+    var head = _cli_cat(_cli_cat("[package]\nname = \"", name), "\"\nversion = \"1.0.0\"\n");
+    memcpy(mf, head, strlen(head));
+    var mp = strlen(head);
+    var words = _cli_av(rows);
+    var i = 0;
+    while (i < load64(words)) {
+        var w = load64(words + 8 + i * 8);
+        var eq = 0;
+        while (load8(w + eq) != 61) { eq = eq + 1; }
+        var src = alloc(eq + 1);
+        memcpy(src, w, eq);
+        store8(src + eq, 0);
+        var tgt = w + eq + 1;
+        var row = _cli_cat(_cli_cat("\n[[link]]\nsource = \"", src), "\"\ntarget = \"");
+        row = _cli_cat(_cli_cat(row, tgt), "\"\n");
+        memcpy(mf + mp, row, strlen(row));
+        mp = mp + strlen(row);
+        _test_write_file(_fsl_path_join(dir, src), "x");
+        i = i + 1;
+    }
+    store8(mf + mp, 0);
+    _test_write_file(_fsl_path_join(dir, "hapi.cyml"), mf);
+    return dir;
+}
+
+# The trail entry whose abs_target is `abs_tgt` (the last such), or 0.
+fn _cd_entry(audit_path, abs_tgt): i64 {
+    var trail = audit_read(audit_path);
+    var found = 0;
+    var i = 0;
+    while (i < vec_len(trail)) {
+        var e = vec_get(trail, i);
+        if (_har_cstr_eq(hae_abs_target(e), abs_tgt) == 1) { found = e; }
+        i = i + 1;
+    }
+    return found;
+}
+
+fn test_link_records_created_dir() {
+    test_group("created_dir: link records the outermost directory it made (1.4.0)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    hapi_mkdir(_fsl_path_join(scope, ".have"), 0x1C0);
+    var pkg = _cd_pkg(_test_scratch_dir(), "cd",
+      "a=.cd/new/deep/a b=.cd/new/b c=.c x=.have/sub/x");
+    assert_eq(cmd_link(pkg, 0), 0, "link four rows");
+    var ea = _cd_entry(audit_path, _fsl_path_join(scope, ".cd/new/deep/a"));
+    assert(ea != 0 && _har_cstr_eq(hae_created_dir(ea), _fsl_path_join(scope, ".cd")) == 1,
+      "the row that made .cd/new/deep records .cd, the outermost");
+    var eb = _cd_entry(audit_path, _fsl_path_join(scope, ".cd/new/b"));
+    assert(eb != 0 && hae_created_dir(eb) == 0, "a row reusing a made directory claims none");
+    var ec = _cd_entry(audit_path, _fsl_path_join(scope, ".c"));
+    assert(ec != 0 && hae_created_dir(ec) == 0, "a row in an existing directory claims none");
+    var ex = _cd_entry(audit_path, _fsl_path_join(scope, ".have/sub/x"));
+    assert(ex != 0 && _har_cstr_eq(hae_created_dir(ex), _fsl_path_join(scope, ".have/sub")) == 1,
+      "a directory that was already there is not claimed, only what was made below it");
+
+    # The field is last and only on entries that made one; the rest are
+    # byte-identical to 1.3.0's.
+    var buf = alloc(4096);
+    var n = audit_format_link_created(buf, 4096, "p", "1", "h", "s", "t", "/as", "/r/t", 0, "/r");
+    var tail = ",\"created_dir\":\"/r\"}\n";
+    assert(n > strlen(tail) && memeq(buf + n - strlen(tail), tail, strlen(tail)) == 1,
+      "created_dir is written last");
+    var buf2 = alloc(4096);
+    var n2 = audit_format_link_created(buf2, 4096, "p", "1", "h", "s", "t", "/as", "/r/t", 0, 0);
+    var buf3 = alloc(4096);
+    var n3 = audit_format_link(buf3, 4096, "p", "1", "h", "s", "t", "/as", "/r/t", 0);
+    assert(_test_substr(buf2, n2, "created_dir") < 0, "...and absent when nothing was made");
+    assert(n2 > 0 && n2 == n3, "...so such an entry is the 1.3.0 line");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_unlink_removes_made_dirs() {
+    test_group("created_dir: unlink removes what the links made, and nothing else");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    hapi_mkdir(_fsl_path_join(scope, ".have"), 0x1C0);
+    var pkg = _cd_pkg(_test_scratch_dir(), "cu",
+      "a=.cd/new/deep/a b=.cd/new/b x=.have/sub/x");
+    assert_eq(cmd_link(pkg, 0), 0, "link");
+    assert_eq(cmd_unlink("cu"), 0, "unlink");
+    assert_eq(_sy_kind(scope, ".cd"), HAPI_LP_ABSENT,
+      "a directory one row made and another reused goes, the run removed both");
+    assert_eq(_sy_kind(scope, ".have/sub"), HAPI_LP_ABSENT, "a made directory goes");
+    assert_eq(_sy_kind(scope, ".have"), HAPI_LP_DIRECTORY, "one that was already there stays");
+
+    # Something the user put there keeps it: deepest first, stopping at
+    # the first directory that is not empty.
+    var pk2 = _cd_pkg(_test_scratch_dir(), "cu2", "a=.k/mid/deep/a");
+    assert_eq(cmd_link(pk2, 0), 0, "link into three new directories");
+    _test_write_file(_fsl_path_join(scope, ".k/mid/notes"), "the user's");
+    assert_eq(cmd_unlink("cu2"), 0, "unlink");
+    assert_eq(_sy_kind(scope, ".k/mid/deep"), HAPI_LP_ABSENT, "the emptied directory goes");
+    assert_eq(_sy_kind(scope, ".k/mid"), HAPI_LP_DIRECTORY, "the one holding the user's file stays");
+    assert_eq(_sy_kind(scope, ".k/mid/notes"), HAPI_LP_FILE, "...with the file");
+
+    # No link removed, no directory removed: a link the user already
+    # deleted leaves no proof, and a dry-run removes nothing.
+    var pk3 = _cd_pkg(_test_scratch_dir(), "cu3", "a=.gone/a");
+    assert_eq(cmd_link(pk3, 0), 0, "link");
+    hapi_set_dry_run(1);
+    assert_eq(cmd_unlink("cu3"), 0, "unlink --dry-run");
+    hapi_set_dry_run(0);
+    assert_eq(_sy_kind(scope, ".gone"), HAPI_LP_DIRECTORY, "dry-run removes no directory");
+    hapi_unlink(_fsl_path_join(scope, ".gone/a"));
+    assert_eq(cmd_unlink("cu3"), 0, "unlink a link that is already gone");
+    assert_eq(_sy_kind(scope, ".gone"), HAPI_LP_DIRECTORY, "...leaves the directory: no proof");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_rollback_and_prune_remove_made_dirs() {
+    test_group("created_dir: rollback and sync --prune remove what they may");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    hapi_mkdir(_fsl_path_join(scope, ".empty"), 0x1C0);     # there before, and empty
+    var pkg = _cd_pkg(_test_scratch_dir(), "cr", "a=.r/new/deep/a b=.r/new/b e=.empty/made/e");
+    assert_eq(cmd_link(pkg, 0), 0, "link");
+    assert_eq(cmd_rollback(), 0, "rollback");
+    assert_eq(_sy_kind(scope, ".r"), HAPI_LP_ABSENT, "rollback removes the made directories, newest first");
+    assert_eq(_sy_kind(scope, ".empty/made"), HAPI_LP_ABSENT, "...up to the outermost one it made");
+    assert_eq(_sy_kind(scope, ".empty"), HAPI_LP_DIRECTORY, "...and not one further, empty or not");
+    _cd_pkg(pkg, "cr", "a=.r/new/deep/a b=.r/new/b");
+
+    # Rolling back an unlink re-makes the directory, and records it.
+    assert_eq(cmd_link(pkg, 0), 0, "link again");
+    assert_eq(cmd_checkpoint(), 0, "checkpoint");
+    assert_eq(cmd_unlink("cr"), 0, "unlink");
+    assert_eq(_sy_kind(scope, ".r"), HAPI_LP_ABSENT, "...which removed them");
+    assert_eq(cmd_rollback(), 0, "roll the unlink back");
+    assert_eq(_sy_kind(scope, ".r/new/deep/a"), HAPI_LP_SYMLINK, "the link is back");
+    var re = _cd_entry(audit_path, _fsl_path_join(scope, ".r/new/deep/a"));
+    assert(re != 0 && hae_created_dir(re) != 0, "...and its replayed entry records what it made again");
+
+    # prune: a directory a dropped row made stays while a kept row needs it.
+    var pp = _cd_pkg(_test_scratch_dir(), "cp", "a=.pr/a b=.pr/b c=.solo/c");
+    assert_eq(cmd_link(pp, 0), 0, "link three rows");
+    _cd_pkg(pp, "cp", "b=.pr/b");
+    assert_eq(cmd_sync_run(pp, 1, 1), 0, "--prune two of three");
+    assert_eq(_sy_kind(scope, ".solo"), HAPI_LP_ABSENT, "a directory only the dropped row used goes");
+    assert_eq(_sy_kind(scope, ".pr"), HAPI_LP_DIRECTORY, "one a kept row still needs stays");
+    assert_eq(_sy_kind(scope, ".pr/b"), HAPI_LP_SYMLINK, "...with its link");
+
+    # A row moved within a directory only it used: prune empties and
+    # removes the directory before the create re-makes it, so the new row
+    # owns it and a later unlink removes it.
+    var pm = _cd_pkg(_test_scratch_dir(), "cm", "a=.mv/a");
+    assert_eq(cmd_link(pm, 0), 0, "link .mv/a");
+    _cd_pkg(pm, "cm", "a2=.mv/a2");
+    assert_eq(cmd_sync_run(pm, 1, 1), 0, "--prune it for .mv/a2");
+    var em = _cd_entry(audit_path, _fsl_path_join(scope, ".mv/a2"));
+    assert(em != 0 && _har_cstr_eq(hae_created_dir(em), _fsl_path_join(scope, ".mv")) == 1,
+      "the new row made .mv again, and owns it");
+    assert_eq(cmd_unlink("cm"), 0, "unlink");
+    assert_eq(_sy_kind(scope, ".mv"), HAPI_LP_ABSENT, "...so it goes with it");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_created_dir_is_bounded() {
+    test_group("created_dir: a record that is not its link's own removes nothing");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _cd_pkg(_test_scratch_dir(), "cb", "a=.b/a");
+    # An empty directory exactly as long as the scope, but not on the link's
+    # path, so only the prefix test can tell it is not the link's.
+    var other = alloc(strlen(scope) + 1);
+    memcpy(other, scope, strlen(scope) + 1);
+    if (load8(other + strlen(other) - 1) == 57) { store8(other + strlen(other) - 1, 48); }
+    else { store8(other + strlen(other) - 1, load8(other + strlen(other) - 1) + 1); }
+    hapi_mkdir(other, 0x1C0);
+    hapi_mkdir(_fsl_path_join(scope, ".b"), 0x1C0);
+    var tgt = _fsl_path_join(scope, ".b/a");
+    hapi_symlink(fsl_link_text(tgt, _fsl_path_join(pkg, "a")), tgt);
+    # A hand-written (or edited) entry claiming a directory elsewhere.
+    audit_append_link_created_r("cb", "1.0.0", "h", "a", ".b/a",
+      _fsl_path_join(pkg, "a"), tgt, 0, other);
+    assert_eq(cmd_unlink("cb"), 0, "unlink");
+    assert_eq(_sy_kind(scope, ".b/a"), HAPI_LP_ABSENT, "the link is removed");
+    assert_eq(link_probe_kind(link_probe(other)), HAPI_LP_DIRECTORY,
+      "a claimed directory not on the link's path is left");
+    assert_eq(_sy_kind(scope, ".b"), HAPI_LP_DIRECTORY, "...and so is the link's own, which it did not claim");
+    assert_eq(fsl_rmdir_created(tgt, "/", 0), 0, "\"/\" is never a made directory");
+    assert_eq(fsl_rmdir_created(tgt, tgt, 0), 0, "nor is the link's own path");
+    assert_eq(fsl_rmdir_created(tgt, other, 0), 0, "nor a same-length directory off its path");
+    assert_eq(_sy_kind(scope, ".b"), HAPI_LP_DIRECTORY, "...so the link's empty parent is left");
+
+    # F-062: a made directory swapped for a symlink. The made tree is moved
+    # aside, `.sw/new` now points at `out`, and the link hapi would expect
+    # from there sits in `out/deep`. The walk must not resolve through it.
+    var ps = _cd_pkg(_test_scratch_dir(), "cs", "a=.sw/new/deep/a");
+    assert_eq(cmd_link(ps, 0), 0, "link into three new directories");
+    var out = _test_scratch_dir();
+    hapi_mkdir(_fsl_path_join(out, "deep"), 0x1C0);
+    hapi_rename(_fsl_path_join(scope, ".sw/new"), _fsl_path_join(_test_scratch_dir(), "moved"));
+    hapi_symlink(out, _fsl_path_join(scope, ".sw/new"));
+    var swt = _fsl_path_join(scope, ".sw/new/deep/a");
+    hapi_symlink(fsl_link_text(swt, _fsl_path_join(ps, "a")), _fsl_path_join(out, "deep/a"));
+    assert_eq(cmd_unlink("cs"), 0, "unlink the link at its new place");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(out, "deep"))), HAPI_LP_DIRECTORY,
+      "a directory reached through the swapped symlink is not removed");
+    # ...and the same through rollback, which walks one link's chain.
+    assert_eq(cmd_checkpoint(), 0, "checkpoint");
+    var pr2 = _cd_pkg(_test_scratch_dir(), "cs2", "a=.sw2/new/deep/a");
+    assert_eq(cmd_link(pr2, 0), 0, "link another");
+    var out2 = _test_scratch_dir();
+    hapi_mkdir(_fsl_path_join(out2, "deep"), 0x1C0);
+    hapi_rename(_fsl_path_join(scope, ".sw2/new"), _fsl_path_join(_test_scratch_dir(), "moved"));
+    hapi_symlink(out2, _fsl_path_join(scope, ".sw2/new"));
+    var swt2 = _fsl_path_join(scope, ".sw2/new/deep/a");
+    hapi_symlink(fsl_link_text(swt2, _fsl_path_join(pr2, "a")), _fsl_path_join(out2, "deep/a"));
+    assert_eq(cmd_rollback(), 0, "roll it back");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(out2, "deep/a"))), HAPI_LP_ABSENT, "the link is reversed");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(out2, "deep"))), HAPI_LP_DIRECTORY,
+      "...and rollback does not resolve through the swapped symlink either");
+
+    # A symlink that fails after its directories were made takes them back:
+    # a final component over NAME_MAX passes mkdir -p and fails symlink(2).
+    var longname = alloc(301);
+    var li = 0;
+    while (li < 300) { store8(longname + li, 120); li = li + 1; }
+    store8(longname + 300, 0);
+    var lt = _fsl_path_join(_fsl_path_join(scope, ".mk/new"), longname);
+    assert(link_create_r("../x", lt, 0) < 0, "a symlink with an over-long name fails");
+    assert_eq(_sy_kind(scope, ".mk"), HAPI_LP_ABSENT, "...and the directories made for it are removed");
+
+    # The F-018 take-back now takes back the directories it made too.
+    var pt = _cd_pkg(_test_scratch_dir(), "ct", "a=.take/new/a");
+    audit_test_fail_appends(1);
+    assert_eq(cmd_link(pt, 0), 1, "a link whose entry is refused");
+    audit_test_fail_appends(0);
+    assert_eq(_sy_kind(scope, ".take"), HAPI_LP_ABSENT, "...leaves neither the link nor its directories");
+
+    _test_clear_env();
+    return 0;
+}
+
 fn test_sync_prune_cli() {
     test_group("cli: sync's --prune and --force (1.3.0)");
 
@@ -4432,6 +4690,10 @@ fn main() {
     test_sync_prune_guards_the_trail();
     test_unwritten_entries_are_taken_back();
     test_sync_prune_cli();
+    test_link_records_created_dir();
+    test_unlink_removes_made_dirs();
+    test_rollback_and_prune_remove_made_dirs();
+    test_created_dir_is_bounded();
     return assert_summary();
 }
 

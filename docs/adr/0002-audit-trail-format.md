@@ -109,6 +109,7 @@ window without `Breaking` every minor.
 | field         | type   | shipped in | meaning                                                |
 |---------------|--------|------------|--------------------------------------------------------|
 | `backup_path` | string | Unreleased | absolute path to a pre-`--force` snapshot of the prior file content. Present on `link` / `adopt` entries when the writer was invoked with `--backup-to <dir>`; omitted otherwise. Readers that don't know this field ignore it per the growth contract. |
+| `created_dir` | string | 1.4.0 | absolute path of the **outermost directory this link's creation made**; every directory from it down to `abs_target`'s parent was made too. Present on `link` entries only, and only when the creation made a directory; written last. See the 1.4.0 addendum. |
 
 ### Hash
 
@@ -281,3 +282,52 @@ run that reversed something without error (F-056), so a second run finds
 nothing past it. Before 1.1.1 a trail with no marker was re-reversed by
 every run. `hapi checkpoint` writes the same entry on demand; markers are
 not de-duplicated.
+
+## Addendum — 2026-10-28 (1.4.0): `created_dir`
+
+**Additive: the line shape and the required-field set are unchanged.** A
+`link` entry may now end with `"created_dir":"<path>"`. Entries whose
+creation made no directory are byte-identical to 1.3.0's. hapi 1.3.0 reads a
+1.4.0 trail unchanged (it drops the field), and 1.4.0 reads an older trail as
+one that recorded no directories. Both directions were checked against the
+released binaries.
+
+**Why one string.** Every value in this format is a JSON string, and the
+1.0 – 1.3 reader treats any other value as a malformed line. It would then
+refuse to act on the trail at all ("a partial view"), so an array of paths
+would have broken every earlier hapi on the first entry. One path is
+enough because `mkdir -p` makes a contiguous chain: once a component is
+missing, everything below it is too. So the outermost directory made
+implies the rest. The writer records it only for a run it made without a
+break. A directory found already there (on Linux, a racing creator's
+EEXIST) restarts the run below it, so hapi never claims a directory it did
+not make.
+
+**What reads it.** `unlink`, `sync --prune` and `rollback` remove the
+recorded directories with their link, as follows:
+
+- They act only after removing the symlink themselves. The link sitting in
+  the directory is the proof that the directory was not deleted and made
+  again by the user in between.
+- Deepest first, stopping at the first directory that is not empty.
+- Never above `created_dir`.
+- Never through a symlink: every directory in the chain must still be a
+  real directory before any is removed (F-062).
+- `unlink` and `--prune` remove the chains of everything the run removed
+  together, so a directory one row made and another reused goes when both
+  do.
+- `rollback` goes newest first, so per entry is enough.
+
+A link already gone, a `--dry-run`, or a pre-1.4.0 entry removes no
+directory.
+
+**What is not recorded.** The directories a removal took out are not
+written to its `op:unlink`. The removal was recorded already; the
+directories are its clean-up. Reversing it (`rollback` of the unlink)
+re-makes them as any link does, and that replayed `op:link` records them
+again.
+
+Design note and the trade-off accepted (a directory emptied across two
+separate runs is left), with the P(-1) record:
+[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md), *1.4.0
+addendum*.

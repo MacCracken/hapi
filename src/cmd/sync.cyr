@@ -167,15 +167,21 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
     }
 
     var refused = 0;
+    var gone_tgts = vec_new();
+    var gone_dirs = vec_new();
     var j = 0;
     while (j < np) {
         var pe = vec_get(prune, j);
         var rc = _hul_remove_one(pe);
-        if (rc == 0) {
+        if (rc == 0 || rc == 2) {
             _hsy_puts("  - ");
             _hsy_puts(hae_abs_target(pe));
             if (hapi_dry_run() == 1) { _hsy_puts("  (dry-run)"); }
             _hsy_puts("\n");
+            if (rc == 0 && hapi_dry_run() == 0) {
+                vec_push(gone_tgts, hae_abs_target(pe));
+                vec_push(gone_dirs, hae_created_dir(pe));
+            }
         } elif (rc == 1) {
             _hsy_eputs("  ! ");
             _hsy_eputs(hae_abs_target(pe));
@@ -192,6 +198,10 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
         }
         j = j + 1;
     }
+    # Before the creates: a directory a dropped row made and a kept row
+    # still needs is not empty, so it stays; one emptied now would only be
+    # re-made by a create, unclaimed.
+    hul_remove_created_dirs(gone_tgts, gone_dirs);
     var lrc = _hlnk_execute(run, 0);
     _hsy_puts("pruned ");
     fmt_int(np - refused);

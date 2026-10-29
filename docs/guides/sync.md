@@ -138,7 +138,11 @@ pruned 1 (no longer in the manifest)
 ```
 
 That is one `op:unlink` in the trail, the entry `hapi unlink` writes, and
-the five kept links are never touched. Before 1.3.0 the same change took
+the five kept links are never touched. Since 1.4.0, a directory hapi made
+for a pruned link goes with it when nothing else is left in it, as with
+[`unlink`](unlink.md#directories-hapi-made). That happens before the creates,
+so a row moved within a directory only it used re-makes the directory and
+owns it. Before 1.3.0 the same change took
 an `unlink` / edit / `link` rotation: 11 trail entries, and five wanted
 links briefly gone. `rollback` reverses a prune exactly as it reverses an
 `unlink`.

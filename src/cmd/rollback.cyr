@@ -106,14 +106,16 @@ fn _hrb_reverse_unlink(entry): i64 {
     if (rel == 0) { return 0; }
 
     if (hapi_dry_run() == 1) { return 1; }
-    var crc = link_create(rel, abs_tgt);
+    var made = 0;
+    var crc = link_create_r(rel, abs_tgt, &made);
     if (crc < 0) { return 0 - 1; }
-    var ar_t, ar_v = audit_append_link_r(
+    var ar_t, ar_v = audit_append_link_created_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         hae_source(entry), hae_target(entry),
-        hae_abs_source(entry), hae_abs_target(entry), 0);
+        hae_abs_source(entry), hae_abs_target(entry), 0, made);
     if (is_err_result(ar_t) == 1) {
         if (hapi_unlink(abs_tgt) < 0) { return 0 - 3; }
+        if (made != 0) { fsl_rmdir_created(abs_tgt, made, 0); }
         return 0 - 2;
     }
     return 1;
@@ -286,6 +288,16 @@ fn cmd_rollback(): i64 {
                 _hrb_puts(dr_suffix);
                 _hrb_puts(")\n");
                 applied = applied + 1;
+                # The directories this link's creation made (1.4.0). Per
+                # entry is enough here: rollback runs newest first, so a
+                # link that reused a directory is reversed before the
+                # link that made it.
+                if (hapi_dry_run() == 0) {
+                    var gone = vec_new();
+                    fsl_rmdir_created(hae_abs_target(entry), hae_created_dir(entry), gone);
+                    var g = 0;
+                    while (g < vec_len(gone)) { fsl_print_removed_dir(vec_get(gone, g)); g = g + 1; }
+                }
             } elif (rc == 0) {
                 skipped = skipped + 1;
             } else {

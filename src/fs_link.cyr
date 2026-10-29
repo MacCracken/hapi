@@ -673,7 +673,16 @@ fn fsl_compute_relative(from_dir, to_file): i64 {
 # 1.0.8 both got a hardcoded 0700, which made the second correct and the
 # first wrong — a `--root` deployment produced config directories the
 # consuming service could not traverse.
-fn fsl_mkdir_parents_mode(file_path, mode): i64 {
+# Create every missing directory on the way to `file_path` (its parent
+# included). With `created_out` non-zero, also store there the outermost
+# directory THIS call made, provided it made every directory from there
+# down to the parent; 0 when it made none. A directory found already there
+# restarts that run below it, so a racing creator's directory is never
+# claimed. That one path is what a 1.4.0 `op:link` records as
+# `created_dir`: `mkdir -p` makes a contiguous chain, so the outermost
+# directory implies the rest.
+fn fsl_mkdir_parents_mode_r(file_path, mode, created_out): i64 {
+    if (created_out != 0) { store64(created_out, 0); }
     var n = strlen(file_path);
     var last_slash = 0 - 1;
     var i = 0;
@@ -687,26 +696,30 @@ fn fsl_mkdir_parents_mode(file_path, mode): i64 {
     memcpy(tmp, file_path, n);
     store8(tmp + n, 0);
 
+    var top = 0 - 1;            # offset in `tmp` where the made run begins
     var j = 1;
     while (j <= last_slash) {
-        if (load8(tmp + j) == 47) {
+        if (j == last_slash || load8(tmp + j) == 47) {
             store8(tmp + j, 0);
-            var rc = hapi_mkdir(tmp, mode);
-            if (rc < 0) {
-                var err = 0 - rc;
-                if (err != 17) { return rc; }
-            }
+            var rc = hapi_mkdir_made(tmp, mode);
             store8(tmp + j, 47);
+            if (rc < 0) { return rc; }
+            if (rc == 0) { top = 0 - 1; }
+            elif (top < 0) { top = j; }
         }
         j = j + 1;
     }
-    store8(tmp + last_slash, 0);
-    var rc = hapi_mkdir(tmp, mode);
-    if (rc < 0) {
-        var err = 0 - rc;
-        if (err != 17) { return rc; }
+    if (created_out != 0 && top > 0) {
+        var out = alloc(top + 1);
+        memcpy(out, file_path, top);
+        store8(out + top, 0);
+        store64(created_out, out);
     }
     return 0;
+}
+
+fn fsl_mkdir_parents_mode(file_path, mode): i64 {
+    return fsl_mkdir_parents_mode_r(file_path, mode, 0);
 }
 
 # Create a symlink at `linkpath` pointing at `target`. Creates
@@ -718,7 +731,11 @@ fn fsl_mkdir_parents(file_path): i64 {
     return fsl_mkdir_parents_mode(file_path, 0x1C0);
 }
 
-fn link_create(target, linkpath): i64 {
+# link_create, also storing in `created_out` (when non-zero) the outermost
+# directory it made for the link, or 0 (see fsl_mkdir_parents_mode_r). If
+# the symlink then fails, the directories it made are removed again.
+fn link_create_r(target, linkpath, created_out): i64 {
+    if (created_out != 0) { store64(created_out, 0); }
     # symlink(2) can never create a path spelled with a trailing '/'
     # (EEXIST/ENOENT either way), so refuse BEFORE mkdir_parents
     # materializes the directory we would then fail to link over (F-032).
@@ -727,7 +744,134 @@ fn link_create(target, linkpath): i64 {
     # 0777-through-umask: these land in the user's scope and should look
     # like directories they created themselves (F-029). hapi's own state
     # directories keep the private 0700 default of `fsl_mkdir_parents`.
-    var mkrc = fsl_mkdir_parents_mode(linkpath, 0x1FF);
+    var made = 0;
+    var mkrc = fsl_mkdir_parents_mode_r(linkpath, 0x1FF, &made);
     if (mkrc < 0) { return mkrc; }
-    return hapi_symlink(target, linkpath);
+    var src = hapi_symlink(target, linkpath);
+    if (src < 0) {
+        if (made != 0) { fsl_rmdir_created(linkpath, made, 0); }
+        return src;
+    }
+    if (created_out != 0) { store64(created_out, made); }
+    return 0;
+}
+
+fn link_create(target, linkpath): i64 {
+    return link_create_r(target, linkpath, 0);
+}
+
+# Remove the directories a link's creation made, once the link is gone:
+# from the link's parent up to and including `top` (its `created_dir`),
+# deepest first, stopping at the first that is not an empty directory.
+# Call it only after removing the link itself. The link sitting in the
+# directory is the proof that the directory is still the one hapi made,
+# not one the user deleted and made again. Each directory removed is
+# appended to `removed` (a vec, or 0). Returns the count removed.
+#
+# `top` must be a proper prefix of `abs_target` ending at a '/'. That is
+# the relation link_create_r recorded it in, and anything else (an edited
+# trail) removes nothing. "/" never qualifies: no absolute path has a
+# second '/' right after the first.
+fn _fsl_made_ok(abs_target, top): i64 {
+    if (abs_target == 0 || top == 0) { return 0; }
+    var tn = strlen(top);
+    if (tn == 0 || tn >= strlen(abs_target)) { return 0; }
+    if (load8(top) != 47 || load8(abs_target + tn) != 47) { return 0; }
+    return memeq(abs_target, top, tn);
+}
+
+# 1 when every directory from `abs_target`'s parent up to `top` is still a
+# real directory, not a symlink. All of them are checked before any is
+# removed (F-062): the walk goes deepest first, so a made directory swapped
+# for a symlink higher up would otherwise be resolved through by the
+# rmdir below it. That removed an empty directory of the same name
+# wherever the symlink led — a path judged on its spelling where the
+# kernel acts on where it goes, the F-015 / F-051 shape. Directories above
+# `top` were the user's before hapi came, and may be symlinks.
+fn _fsl_chain_is_real(abs_target, top): i64 {
+    var tn = strlen(top);
+    var dir = _fsl_path_dirname(abs_target);
+    var go = 1;
+    while (go == 1) {
+        if (link_probe_kind(link_probe(dir)) != HAPI_LP_DIRECTORY) { return 0; }
+        if (strlen(dir) <= tn) { go = 0; }
+        else { dir = _fsl_path_dirname(dir); }
+    }
+    return 1;
+}
+
+fn fsl_rmdir_created(abs_target, top, removed): i64 {
+    if (_fsl_made_ok(abs_target, top) == 0) { return 0; }
+    if (_fsl_chain_is_real(abs_target, top) == 0) { return 0; }
+    var tn = strlen(top);
+    var count = 0;
+    var dir = _fsl_path_dirname(abs_target);
+    var go = 1;
+    while (go == 1) {
+        if (link_probe_kind(link_probe(dir)) != HAPI_LP_DIRECTORY || hapi_rmdir(dir) < 0) { go = 0; }
+        else {
+            if (removed != 0) { vec_push(removed, dir); }
+            count = count + 1;
+            if (strlen(dir) <= tn) { go = 0; }       # `top` was the last
+            else { dir = _fsl_path_dirname(dir); }
+        }
+    }
+    return count;
+}
+
+# fsl_rmdir_created over several removed links at once: `targets[i]` /
+# `tops[i]` are each link's abs_target and created_dir. Every directory in
+# any chain is tried once, longest path first, so a child always goes before
+# its parent. A directory one link made and another reused is removed when
+# the run removed both, in whatever order it removed them. A directory still
+# holding something is simply not removed. Returns the vec of removed
+# directories.
+fn fsl_rmdir_created_all(targets, tops): i64 {
+    var cands = vec_new();
+    var i = 0;
+    while (i < vec_len(targets)) {
+        var t = vec_get(targets, i);
+        var top = vec_get(tops, i);
+        if (_fsl_made_ok(t, top) == 1 && _fsl_chain_is_real(t, top) == 1) {
+            var tn = strlen(top);
+            var dir = _fsl_path_dirname(t);
+            var go = 1;
+            while (go == 1) {
+                var seen = 0;
+                var k = 0;
+                while (k < vec_len(cands)) {
+                    var c = vec_get(cands, k);
+                    if (strlen(c) == strlen(dir) && memeq(c, dir, strlen(dir)) == 1) { seen = 1; }
+                    k = k + 1;
+                }
+                if (seen == 0) { vec_push(cands, dir); }
+                if (strlen(dir) <= tn) { go = 0; }   # `top` was the last
+                else { dir = _fsl_path_dirname(dir); }
+            }
+        }
+        i = i + 1;
+    }
+    vec_sort_by(cands, &_fsl_longer_first);
+    var removed = vec_new();
+    var j = 0;
+    while (j < vec_len(cands)) {
+        var d = vec_get(cands, j);
+        if (link_probe_kind(link_probe(d)) == HAPI_LP_DIRECTORY && hapi_rmdir(d) == 0) {
+            vec_push(removed, d);
+        }
+        j = j + 1;
+    }
+    return removed;
+}
+
+fn _fsl_longer_first(a, b): i64 { return strlen(b) - strlen(a); }
+
+# The line a removed directory is reported with, under its link's line.
+fn fsl_print_removed_dir(dir): i64 {
+    var head = "  - ";
+    print(head, strlen(head));
+    print(dir, strlen(dir));
+    var tail = "/  (a directory hapi made)\n";
+    print(tail, strlen(tail));
+    return 0;
 }

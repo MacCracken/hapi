@@ -72,7 +72,7 @@ fn hapi_ar_err_msg(code): i64 {
     return "unknown audit-trail read error";
 }
 
-# HapiAuditEntry — 80 bytes.
+# HapiAuditEntry — 88 bytes.
 #   +0   op (cstring)
 #   +8   ts (cstring)
 #   +16  pkg (cstring or 0)
@@ -84,10 +84,12 @@ fn hapi_ar_err_msg(code): i64 {
 #   +64  abs_target (cstring or 0)
 #   +72  backup_path (cstring or 0; only set on link/adopt
 #        entries written under --backup-to)
+#   +80  created_dir (cstring or 0; 1.4.0, only on link entries whose
+#        creation made a directory)
 fn _hae_new(): i64 {
-    var e = alloc(80);
+    var e = alloc(88);
     var i = 0;
-    while (i < 80) { store8(e + i, 0); i = i + 1; }
+    while (i < 88) { store8(e + i, 0); i = i + 1; }
     return e;
 }
 fn hae_op(e): i64 { return load64(e); }
@@ -100,6 +102,7 @@ fn hae_target(e): i64 { return load64(e + 48); }
 fn hae_abs_source(e): i64 { return load64(e + 56); }
 fn hae_abs_target(e): i64 { return load64(e + 64); }
 fn hae_backup_path(e): i64 { return load64(e + 72); }
+fn hae_created_dir(e): i64 { return load64(e + 80); }
 
 fn _har_cstr_eq(a, b): i64 {
     if (a == 0 || b == 0) { return 0; }
@@ -220,6 +223,7 @@ fn _har_assign_field(entry, key, value): i64 {
     elif (_har_cstr_eq(key, "abs_source") == 1)   { store64(entry + 56, value); }
     elif (_har_cstr_eq(key, "abs_target") == 1)   { store64(entry + 64, value); }
     elif (_har_cstr_eq(key, "backup_path") == 1)  { store64(entry + 72, value); }
+    elif (_har_cstr_eq(key, "created_dir") == 1)  { store64(entry + 80, value); }
     # Unknown fields silently dropped — additive growth per ADR 0002.
     return 0;
 }

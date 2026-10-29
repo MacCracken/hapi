@@ -45,7 +45,7 @@ Third leg of the terminal-aesthetics set:
 
 ## Status
 
-**v1.3.0** — the v1.0 contract, frozen 2026-05-23, still holds:
+**v1.4.0** — the v1.0 contract, frozen 2026-05-23, still holds:
 command surface (ten verbs plus five global flags), `hapi.cyml`
 manifest schema (ADR 0001), and audit-trail format (ADR 0002) are all
 contractual. 1.2.0 is the first release to add surface, all of it
@@ -53,7 +53,9 @@ additive: argument parsing moved to
 [cmdit](https://github.com/MacCracken/cmdit), which brings
 `--root=PATH`, `--` and `hapi <verb> --help`, with every 1.1.1 message
 kept. 1.3.0 adds `hapi sync` with no package and `sync --prune`, the
-two dogfood issues on `sync`. The releases before 1.2.0 added teeth: 1.0.5 → 1.0.10 closed all
+two dogfood issues on `sync`, and 1.4.0 has `unlink` / `rollback` remove
+the directories `link` made, recorded as proof in the trail. The releases
+before 1.2.0 added teeth: 1.0.5 → 1.0.10 closed all
 twenty findings of the
 [2026-08-25 P(-1) audit](docs/audit/2026-08-25-audit.md), and 1.1.1
 repairs the [2026-10-28 pass](docs/audit/2026-10-28-audit.md), which
@@ -69,7 +71,7 @@ for the v1.0 surface.
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/hapi   # compile
 ./build/hapi --help                    # see the verb set
-cyrius test                            # 970 + 61 assertions, two suites
+cyrius test                            # 1035 + 67 assertions, two suites
 ```
 
 A worked example lives at
@@ -89,13 +91,14 @@ file with `hapi adopt ~/.somerc somepackage`.
   [2026-10-28 pass](docs/audit/2026-10-28-audit.md) is the current one;
   its findings F-035 – F-059 are repaired in 1.1.1, its 1.2.0
   addendum re-walks the argument surface under cmdit (F-060), and its
-  1.3.0 addendum covers `sync`'s scan and prune (F-061).
+  1.3.0 and 1.4.0 addenda cover `sync`'s scan and prune (F-061) and the
+  removal of directories `link` made (F-062).
 - [`docs/benchmarks.md`](docs/benchmarks.md) — sync over a 100-pkg
   synthetic home.
 - [`docs/development/state.md`](docs/development/state.md) — live
   state snapshot.
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) —
-  the plan: 1.4.0 through 1.7.0, upstream-gated work, and
+  the plan: 1.5.0 through 1.7.0, upstream-gated work, and
   v2.0 candidates.
 
 ## License

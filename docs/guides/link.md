@@ -124,6 +124,21 @@ The trail is append-only — `hapi link` never edits or truncates
 existing entries. A re-run that does nothing writes no new
 lines.
 
+### Directories it makes
+
+A target whose parent does not exist gets its missing directories made
+(`mkdir -p`, `0777` through your umask). Since 1.4.0 the entry records the
+outermost one it made, as `created_dir`. With `~/.config` present and the
+row `.config/nvim/lua/init.lua`, that is `~/.config/nvim`; `lua` below it
+is implied. A row whose directory already existed records nothing, even
+when another row made that directory a moment earlier. A directory that
+was there before hapi is never claimed.
+
+That record is what lets `unlink`, `sync --prune` and `rollback` remove
+those directories again, and only those: see
+[`unlink.md`](unlink.md#directories-hapi-made). If writing the entry fails,
+the link is taken back, and since 1.4.0 so are the directories it made.
+
 ## Exit codes
 
 | code | meaning                                                          |

@@ -372,6 +372,43 @@ fn test_sync_scan_and_prune() {
     return 0;
 }
 
+# 1.4.0: `created_dir` rests on two shims with agnos arms — a mkdir that
+# says whether it made the directory (agnos mkdir is idempotent, so it asks
+# stat first) and rmdir, which takes a path length there.
+fn test_made_dirs_round_trip() {
+    test_group("created_dir: link makes and records directories, unlink removes them");
+
+    var d = _ta_scratch();
+    var pkg = _fsl_path_join(d, "pkg");
+    hapi_mkdir(pkg, 0x1C0);
+    _ta_write(_fsl_path_join(pkg, "a"), "a");
+    var tgt = _fsl_path_join(d, "made/deep/a");
+    var hdr = "[package]\nname = \"agnos-d\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"a\"\ntarget = \"";
+    var hl = strlen(hdr);
+    var tl = strlen(tgt) - 1;
+    var m = alloc(hl + tl + 4);
+    memcpy(m, hdr, hl);
+    memcpy(m + hl, tgt + 1, tl);
+    memcpy(m + hl + tl, "\"\n\x00", 3);
+    _ta_write(_fsl_path_join(pkg, "hapi.cyml"), m);
+
+    var trail = _fsl_path_join(d, "audit.jsonl");
+    link_set_scope_root("/");
+    audit_set_trail_path(trail);
+    assert_eq(cmd_link(pkg, 0), 0, "link into two new directories");
+    assert_eq(_ta_holds(tgt, "a"), 1, "the link resolves");
+    var entries = audit_read(trail);
+    assert(vec_len(entries) == 1 && _har_cstr_eq(hae_created_dir(vec_get(entries, 0)),
+      _fsl_path_join(d, "made")) == 1, "the entry records the outermost made directory");
+    assert_eq(cmd_unlink("agnos-d"), 0, "unlink");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "made"))), HAPI_LP_ABSENT,
+      "the made directories are removed");
+    assert_eq(link_probe_kind(link_probe(d)), HAPI_LP_DIRECTORY, "the directory that was there stays");
+    link_set_scope_root(0);
+    audit_set_trail_path(0);
+    return 0;
+}
+
 fn main(): i64 {
     test_nofollow_open();
     test_exclusive_create();
@@ -382,6 +419,7 @@ fn main(): i64 {
     test_fs_shims();
     test_verbs_with_root_scope();
     test_sync_scan_and_prune();
+    test_made_dirs_round_trip();
     return assert_summary();
 }
 

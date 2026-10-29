@@ -596,7 +596,8 @@ fn _hlnk_execute(run, force): i64 {
                 _hlnk_puts("  (dry-run)\n");
                 written = written + 1;
             } else {
-                var crc = link_create(rel, abs_tgt);
+                var made = 0;
+                var crc = link_create_r(rel, abs_tgt, &made);
                 if (crc < 0) {
                     _hlnk_eputs("hapi: symlink failed at ");
                     eprint(abs_tgt, strlen(abs_tgt));
@@ -606,20 +607,21 @@ fn _hlnk_execute(run, force): i64 {
                 var lnk = load64(pl);
                 var src_cstr = _fsl_str_to_cstr(hapi_link_source(lnk));
                 var tgt_cstr = _fsl_str_to_cstr(hapi_link_target(lnk));
-                var ar_t, ar_v = audit_append_link_r(pkg_name_cstr, pkg_ver_cstr,
+                var ar_t, ar_v = audit_append_link_created_r(pkg_name_cstr, pkg_ver_cstr,
                   manifest_hash,
                   src_cstr, tgt_cstr,
                   abs_src, abs_tgt,
-                  backup_path);
+                  backup_path, made);
                 if (is_err_result(ar_t) == 1) {
                     # Undo exactly THIS link — never the earlier ones in
                     # the run. Those are in the trail and `unlink` /
                     # `rollback` can reverse them; unwinding them here
                     # would need further appends, which are failing by
                     # construction, and would recreate this very defect
-                    # in mirror image. No rmdir of the parent either
-                    # (see F-029: hapi cannot prove it created it).
+                    # in mirror image. With it go the directories this
+                    # very call made (1.4.0): those, hapi can prove.
                     var back = hapi_unlink(abs_tgt);
+                    if (back >= 0 && made != 0) { fsl_rmdir_created(abs_tgt, made, 0); }
                     _hlnk_eputs("hapi: audit-trail write failed for ");
                     eprint(abs_tgt, strlen(abs_tgt));
                     if (back < 0) {

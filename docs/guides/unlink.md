@@ -27,7 +27,9 @@ beyond the audit trail itself; the name is the lookup key.
    - If the symlink points elsewhere, or there's a regular
      file / directory / nothing — **refuse for that entry,
      keep going with the rest**.
-4. Returns exit code 0 if every live entry was either cleanly
+4. Removes the directories hapi made for the links it just removed,
+   when they are now empty (below).
+5. Returns exit code 0 if every live entry was either cleanly
    removed or already absent; 1 if any refusal happened.
 
 The safety rule is non-negotiable per CLAUDE.md and the v1.0
@@ -36,6 +38,40 @@ user-created symlink. The trail tells us exactly what we
 created and what it pointed to; if the current state doesn't
 match, the user (or some other tool) intervened, and that's
 out of hapi's lane.
+
+## Directories hapi made
+
+Since 1.4.0 a link's trail entry records the outermost directory its
+creation made (`created_dir`, see [`link.md`](link.md#directories-it-makes)).
+When `unlink` removes that link, it also removes those directories:
+
+```
+$ hapi unlink nvim
+  - /home/me/.config/nvim/lua/init.lua
+  - /home/me/.config/nvim/lua/  (a directory hapi made)
+  - /home/me/.config/nvim/  (a directory hapi made)
+unlinked 1 / 1
+```
+
+- **Only what hapi made.** `~/.config` was there before, so it stays, empty
+  or not. Nothing above `created_dir` is touched.
+- **Only when empty.** It works deepest first and stops at the first
+  directory that still holds something, such as a file you put there,
+  which keeps that directory and everything above it.
+- **Only with proof.** It acts only for a link this run removed itself. A
+  link you already deleted, a `--dry-run`, or a link made before 1.4.0
+  (no record) leaves its directories alone.
+- **Never through a symlink.** If one of those directories has since been
+  replaced by a symlink, none of them is removed (F-062).
+- **Shared directories go when the run empties them.** A directory one row
+  made and another row reused goes when the run removes both, in whatever
+  order.
+
+One gap is accepted: if the row that made a directory is removed in one
+run (by `sync --prune`, say) while another row still uses it, the
+directory stays, and it stays when the second row is removed later,
+because that row's entry never claimed it. Remove it by hand, or remove
+the package as a whole.
 
 ## Example
 
