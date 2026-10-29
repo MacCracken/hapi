@@ -5,23 +5,21 @@
 
 ## Version
 
-**1.6.0** (2026-10-28) — `--absolute`, on the cyrius 6.7 line (pin
-`6.7.18`). `link`, `adopt` and `sync` take `--absolute`, which gives the
-links a run creates the source's path, as spelled and normalized, as
-their text, instead of ADR 0003's relative default. A link of either shape
-naming its source is hapi's in every verb: up to date for `link` / `sync`,
-OK for `status` (which still reads no trail, F-006), removable by
-`unlink`, `sync --prune` and `rollback`. The trail records
-`"shape":"absolute"` on the entries that write or remove one, so
-`rollback` re-creates the shape it removed (ADR 0003 and ADR 0002, 1.6.0
-addenda). Earlier versions read a 1.6.0 trail, but leave an absolute link
-alone. Its P(-1) is the *1.6.0 addendum* of
-[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md): no defect.
-The manifest schema and the line shape are unchanged. Both suites pass on
+**1.7.0** (2026-10-29) — `hapi fmt`, on the cyrius 6.7 line (pin
+`6.7.18`). A new verb rewrites a manifest's header as
+`hapi_mf_canonicalize`'s bytes, so the `sha1c:` manifest hash cannot
+change, and keeps the body below `---` byte for byte. It refuses to drop
+what the canonical form cannot hold (comments, unknown keys, a repeated
+key, text after a value) unless `--force`, and always refuses a value
+holding a backslash. `--check` answers in the exit code, for CI. It holds
+the package-directory lock from read to rename and writes no trail entry
+([ADR 0008](../adr/0008-hapi-fmt.md)). The manifest schema, the trail
+format and every other verb's behaviour are unchanged. Both suites pass on
 x86_64 and on aarch64 under qemu, and `tests/agnos.tcyr` also passes on
 agnos under mirshi.
 
-Before it, 1.5.0 added `status --quiet`, `checkpoint --label` and
+Before it, 1.6.0 added `--absolute` (a link of either shape is hapi's; the
+trail records `"shape":"absolute"`). 1.5.0 added `status --quiet`, `checkpoint --label` and
 `rollback --to` / `--steps`, a multi-level undo
 ([ADR 0007](../adr/0007-rollback-steps-and-to.md); F-063 accepted).
 1.4.0 recorded `created_dir` on `op:link`, so `unlink`,
@@ -85,7 +83,7 @@ v0.2.0 = M1, M0 scaffold 2026-05-19.
 Binary (`hapi`). The command line is parsed by cmdit in `src/cli.cyr`:
 the command is `argv[1]` alone (a verb, or `--version` / `--help` /
 `-v` / `-h`), and each verb parses the rest on its own cmdit handle.
-Ten real verbs frozen at v1.0.0. Three "global" flags are per-verb
+Ten real verbs frozen at v1.0.0, and since 1.7.0 an eleventh, `fmt`. Three "global" flags are per-verb
 subsets, registered only on the verbs that take them:
 `--root <path>` (link / adopt / sync / status / list),
 `--dry-run` (link / unlink / adopt / sync / rollback /
@@ -96,7 +94,8 @@ opt-in pre-`--force` snapshot. Since 1.3.0 `sync` also takes `--prune`,
 and `--force` with it, which lifts prune's limit and nothing else. Since
 1.5.0 `status` takes `--quiet`, `checkpoint` `--label <label>`, and
 `rollback` `--steps N` or `--to <label>`. Since 1.6.0 `link`, `adopt` and
-`sync` take `--absolute`.
+`sync` take `--absolute`. `fmt` (1.7.0) takes `--check`, `--dry-run` and
+`--force`.
 
 ### Current command surface (frozen at v1.0)
 
@@ -112,6 +111,7 @@ and `--force` with it, which lifts prune's limit and nothing else. Since
 | `hapi status`         | 0 ok / 1 drift / 2 args  |
 | `hapi checkpoint`     | 0 ok / 1 IO error / 2 args |
 | `hapi check --strict` | 0 ok / 1 parse / 2 args  |
+| `hapi fmt` (1.7.0)    | 0 ok / 1 refused or `--check`: not formatted / 2 args |
 | `hapi --version`      | 0                        |
 | `hapi --help`         | 0                        |
 
@@ -123,7 +123,8 @@ is unset), and `sync --prune [--force]`. Since 1.5.0: `status --quiet`
 (drift exits 0; 1 only on an error), `checkpoint --label <label>`, and
 `rollback --steps N` / `--to <label>` (exit 1, nothing changed, for an
 unknown label or more steps than the trail holds). Since 1.6.0:
-`--absolute` on `link` / `adopt` / `sync`. Nothing is accepted
+`--absolute` on `link` / `adopt` / `sync`. Since 1.7.0: the `fmt` verb,
+registered after `sync` so no verb id moved. Nothing is accepted
 before the verb, and a leading `--help` / `--version` answers whatever
 follows it.
 
@@ -171,7 +172,11 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   the fixed byte form used by the v0.8.0 `sha1c:`
   manifest_hash variant: `[package]` fields in fixed order,
   `[[link]]` rows sorted by `target`, no comments, single
-  blank line between sections.
+  blank line between sections. Since 1.7.0 the parser records what it
+  skips (`_hapi_mf_drop`, at each skip site, only while `fmt` tracks:
+  `hapi_mf_track_drops`), and `hapi_mf_format_r` builds `fmt`'s header —
+  the canonical bytes in the file's line ending, the drops, a backslash
+  check, and the proof that the result parses back to the same bytes.
 - `src/manifest_write.cyr` — append + remove `[[link]]` rows
   atomically via `tmp+rename`. **Header-only, by the reader's rule**:
   `_hmw_delim_at` / `_hmw_find_separator` find the first `---` line
@@ -179,7 +184,11 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   LF, or end of file), append inserts above it, and remove searches
   only above it. The bodies below it are markdown and never edited.
   The two sides are pinned against each other by the `1.1.0` section of
-  `tests/hapi.tcyr`; a bayan bump that moves the rule fails there.
+  `tests/hapi.tcyr`; a bayan bump that moves the rule fails there. Since
+  1.7.0 it also exports the pieces `fmt` rewrites with — `manifest_lock`
+  / `manifest_unlock`, `manifest_read`, `manifest_body_start`,
+  `manifest_uses_crlf`, `manifest_commit` (which refuses a symlinked
+  manifest, F-058).
   An appended row matches the file's line ending; a symlinked
   `hapi.cyml` is refused (an atomic rename would replace the link); a
   leftover `hapi.cyml.<pid>.tmp` is reported as such. Uses the stdlib `sys_rename` /
@@ -238,6 +247,11 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 - `src/cmd/check.cyr` — inspect with `--strict` (rejects
   unknown sections / keys via the `_hapi_mf_strict` flag
   added to `manifest.cyr`)
+- `src/cmd/fmt.cyr` (1.7.0, ADR 0008) — `hapi fmt`: under the
+  package-directory lock, read, format the header (`hapi_mf_format_r`),
+  refuse what would be lost without `--force` and any backslash, then
+  commit the canonical header, a blank line and the body unchanged.
+  `--check` and `--dry-run` only read.
 - `src/cmd/sync.cyr` — `link` without `--force` for one package, plus
   (1.3.0, ADR 0006) the no-package scan of `HAPI_PACKAGE_ROOTS`
   (`_hsy_all`: one level, no symlinks followed, twins refused, failures
@@ -318,7 +332,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. **1,444 assertions across 149 test
+- `tests/hapi.tcyr` — primary suite. **1,643 assertions across 154 test
   groups.** Re-derive rather than recount by hand — these figures have
   rotted twice, and the per-tier breakdown below drifted 16 groups
   short before the 2026-08-26 sweep:
@@ -330,21 +344,22 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
     | sort | uniq -c | sort -rn                 # per-tier breakdown
   ```
 
-  Groups by tier (first word of the group name), as measured at 1.6.0:
-  rollback 13, cli 12, link 10, sync 10, cap 9, manifest 8,
+  Groups by tier (first word of the group name), as measured at 1.7.0:
+  rollback 13, cli 13, link 10, sync 10, cap 9, manifest 8,
   manifest_write 8, check 8, backup 7, adopt 7, `--absolute` 6, status 6,
-  fs_link 6, dry-run 6, canonical 5, audit_reader 5, audit 5,
+  fs_link 6, dry-run 6, canonical 5, audit_reader 5, audit 5, fmt 4,
   created_dir 4, audit-repair 4, unlink 4, list 3, checkpoint 2,
   agnos_compat 1. The `cli` tier (1.2.0) runs `hapi_cli_run` with a
   synthetic argv and its stdout / stderr captured through `dup2`, so the
   v1.0 messages are asserted byte for byte.
-- `tests/agnos.tcyr` — **84 assertions across 12 groups**, all
+- `tests/agnos.tcyr` — **88 assertions across 13 groups**, all
   target-neutral: the agnos-conditional paths (no-follow open,
   exclusive create, absent trail, trail and manifest round trips,
   backup copy, the fs shims, `link` / `status` / `unlink` with the
   scope at `/`, since 1.3.0 a package-root scan and a prune, and since
   1.4.0 a made-directory round trip, since 1.5.0 `rollback --to` and
-  `--steps`, since 1.6.0 an absolute link's round trip). `cyrius test` runs it on x86_64 and aarch64; the agnos
+  `--steps`, since 1.6.0 an absolute link's round trip, since 1.7.0 an
+  `fmt` round trip). `cyrius test` runs it on x86_64 and aarch64; the agnos
   smoke builds it with `--agnos` and runs it under mirshi. Absolute
   paths only, no chmod, no environment — what an agnos run allows.
 
@@ -354,7 +369,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 beside it as shell harnesses. **CI runs both.**
 
 The suite itself also runs on aarch64 — `cyrius test --aarch64` under
-`qemu-aarch64` (1,444 / 1,444 and 84 / 84 at 1.6.0). **CI runs it** as of 1.0.12
+`qemu-aarch64` (1,643 / 1,643 and 88 / 88 at 1.7.0). **CI runs it** as of 1.0.12
 (`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
 qemu fails the step, it never skips). Before that the aarch64 step was
 compile-only, which is how the `O_NOFOLLOW` literal went unseen from
@@ -365,7 +380,9 @@ too.
   two hapi *processes* racing on one manifest, and `.tcyr` cannot fork
   while hapi is syscall-only by rule. Measured before the fix: 16
   concurrent adopts → 16 files moved, 16 symlinks, 16 trail entries and
-  **1** manifest row; 16/16 after.
+  **1** manifest row; 16/16 after. Since 1.7.0 it also races 16 adopts
+  against four `fmt` loops on one package; without `fmt`'s lock it loses
+  1 – 3 rows a run.
 - `scripts/agnos-smoke.sh` — runs the `--agnos` build under mirshi.
   Five checks: the binary loads and the agnos arg reader delivers argv,
   the envp gap is asserted rather than assumed, a relative package
@@ -442,7 +459,8 @@ The 2026-10-28 P(-1) pass is **closed** in 1.1.1. Its 1.2.0 addendum
 addendum (`sync`'s scan and prune) with F-061 fixed, its 1.4.0
 addendum (`created_dir`) with F-062 caught before release, its 1.5.0
 addendum (the script-facing flags) with no defect and F-063 accepted, and
-its 1.6.0 addendum (`--absolute`) with no defect.
+its 1.6.0 addendum (`--absolute`) and 1.7.0 addendum (`hapi fmt`), each
+with no defect.
 Every finding is fixed except two that are accepted: F-059, an agnos
 kernel gap
 ([`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)),
@@ -455,7 +473,7 @@ rename-over-existing (an agnos issue file). [`roadmap.md`](roadmap.md)
 
 Forward-looking work is **not** listed here — it lives in
 [`roadmap.md`](roadmap.md), which carries only work that has not
-shipped. **Next is 1.7.0, `hapi fmt`**, the last planned 1.x minor,
-with upstream-gated work
-listed apart. Open dogfood papercuts are in [`issues/`](issues/) (2
+shipped. **Every planned 1.x minor has shipped**; what remains is
+upstream-gated work, which lands in the next minor when its gate opens,
+and the v2.0 bucket. Open dogfood papercuts are in [`issues/`](issues/) (2
 open, 9 archived).

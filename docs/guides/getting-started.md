@@ -15,10 +15,13 @@ cyrius test                            # run tests/*.tcyr
 - `src/cli.cyr` — the command line: verb dispatch and each verb's
   flags (cmdit), and the usage text. No command includes it.
 - `src/dry_run.cyr` — the process-wide `--dry-run` flag the commands read
-- `src/cmd/{link,unlink,adopt,list,sync,status,rollback,checkpoint,check,inspect}.cyr` —
+- `src/absolute.cyr` — the process-wide `--absolute` flag (1.6.0)
+- `src/cmd/{link,unlink,adopt,list,sync,status,rollback,checkpoint,check,inspect,fmt}.cyr` —
   one module per verb
-- `src/manifest.cyr` — `hapi.cyml` parser + canonical re-serializer
-- `src/manifest_write.cyr` — atomic `[[link]]` row append / remove
+- `src/manifest.cyr` — `hapi.cyml` parser + canonical re-serializer, and
+  `fmt`'s formatter (1.7.0)
+- `src/manifest_write.cyr` — atomic `[[link]]` row append / remove, and
+  the pieces `fmt` rewrites a header with
 - `src/audit.cyr` / `src/audit_reader.cyr` — JSONL trail writer + reader
 - `src/fs_link.cyr` — symlink primitives + path resolution
 - `src/cap.cyr` — `--root` capability check

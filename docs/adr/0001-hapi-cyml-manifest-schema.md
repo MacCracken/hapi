@@ -253,3 +253,21 @@ as bayan 1.11.1 implements it and both hapi's reader and writer now apply:
 
 `tests/hapi.tcyr`'s `1.1.0` section pins this rule; with it written here,
 those tests pin a documented contract rather than an observed one.
+
+## Addendum — 2026-10-29 (1.7.0): `hapi fmt`
+
+*Consequences* said a formatter, if it existed, must produce
+byte-identical output for the same logical manifest. `hapi fmt` (1.7.0)
+does: the header it writes is `hapi_mf_canonicalize`'s bytes, and it proves
+that by re-parsing them before it writes. The body below `---` is kept
+byte for byte, by the rule in the 1.1.1 addendum above.
+
+The schema is unchanged. Two of its properties set what `fmt` can do:
+
+- The parser is lenient. It skips comments, unknown keys and the rest
+  without error, so `fmt` refuses to drop them unless `--force`.
+- It has no un-escape. A value holding a backslash would change under the
+  canonical form, so `fmt` refuses it outright, until v2.0 gives the
+  parser an un-escape.
+
+Design and alternatives: [ADR 0008](0008-hapi-fmt.md).

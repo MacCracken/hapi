@@ -40,6 +40,7 @@ include "src/cmd/status.cyr"
 include "src/cmd/list.cyr"
 include "src/cmd/check.cyr"
 include "src/cmd/sync.cyr"
+include "src/cmd/fmt.cyr"
 include "src/cap.cyr"
 include "src/backup.cyr"
 
@@ -49,7 +50,7 @@ include "src/backup.cyr"
 enum HapiVerb {
     HAPI_V_INSPECT = 0; HAPI_V_LINK = 1; HAPI_V_UNLINK = 2; HAPI_V_ADOPT = 3;
     HAPI_V_ROLLBACK = 4; HAPI_V_CHECKPOINT = 5; HAPI_V_STATUS = 6;
-    HAPI_V_LIST = 7; HAPI_V_CHECK = 8; HAPI_V_SYNC = 9;
+    HAPI_V_LIST = 7; HAPI_V_CHECK = 8; HAPI_V_SYNC = 9; HAPI_V_FMT = 10;
 }
 
 # The flags a verb accepts, as a bit set.
@@ -57,7 +58,7 @@ enum HapiFlag {
     HAPI_F_FORCE = 1; HAPI_F_STRICT = 2; HAPI_F_DRY_RUN = 4;
     HAPI_F_ROOT = 8; HAPI_F_BACKUP_TO = 16; HAPI_F_PRUNE = 32;
     HAPI_F_QUIET = 64; HAPI_F_STEPS = 128; HAPI_F_TO = 256; HAPI_F_LABEL = 512;
-    HAPI_F_ABSOLUTE = 1024;
+    HAPI_F_ABSOLUTE = 1024; HAPI_F_CHECK = 2048;
 }
 
 # `hapi --version` prints `hapi <version>`. The number is
@@ -99,13 +100,16 @@ fn hapi_print_usage(): i64 {
     println("                            (colon-separated). --prune also removes links");
     println("                            whose row left the manifest; past half of a");
     println("                            package's links it needs --force");
+    println("  fmt <path> [--check]      rewrite a manifest's header in canonical form;");
+    println("                            --check only reports (exit 1 if not formatted).");
+    println("                            --force drops what the form cannot hold");
     println("");
     println("global flags:");
     println("  --root <path>             open a non-$HOME scope (link/adopt/status/list/sync)");
     println("                            requires the path to be inside $HOME or listed");
     println("                            in HAPI_ALLOWED_ROOTS (colon-separated)");
     println("  --dry-run                 print actions; no syscalls or audit writes");
-    println("                            (link/unlink/adopt/sync/rollback/checkpoint)");
+    println("                            (link/unlink/adopt/sync/rollback/checkpoint/fmt)");
     println("  --backup-to <dir>         snapshot existing file content to <dir> before");
     println("                            a destructive overwrite (link --force / adopt).");
     println("                            Audit entry gains `backup_path`.");
@@ -249,6 +253,7 @@ fn _hapi_cli_new(): i64 {
     cmdit_verb(h, "list", "list packages tracked in the audit trail");
     cmdit_verb(h, "check", "parse + display a manifest, optionally strict");
     cmdit_verb(h, "sync", "re-apply a manifest (idempotent)");
+    cmdit_verb(h, "fmt", "rewrite a manifest's header in canonical form");
     return h;
 }
 
@@ -267,6 +272,7 @@ fn _hapi_verb_flags(v): i64 {
         return HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO | HAPI_F_PRUNE | HAPI_F_FORCE
           | HAPI_F_ABSOLUTE;
     }
+    if (v == HAPI_V_FMT)        { return HAPI_F_CHECK | HAPI_F_DRY_RUN | HAPI_F_FORCE; }
     # inspect takes none, and still owes exit 2 for one, not the
     # exit 1 that means "bad manifest" (F-033).
     return 0;
@@ -359,6 +365,7 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     var f_prune  = _hapi_bool_flag(vh, set, HAPI_F_PRUNE, "prune", "also remove links whose row left the manifest");
     var f_quiet  = _hapi_bool_flag(vh, set, HAPI_F_QUIET, "quiet", "exit 0 on drift; 1 only on an error");
     var f_abs    = _hapi_bool_flag(vh, set, HAPI_F_ABSOLUTE, "absolute", "give new links absolute targets");
+    var f_check  = _hapi_bool_flag(vh, set, HAPI_F_CHECK, "check", "only report whether it is formatted");
     var f_root   = _hapi_value_flag(vh, set, HAPI_F_ROOT, "root", "path", "open a non-$HOME scope");
     var f_backup = _hapi_value_flag(vh, set, HAPI_F_BACKUP_TO, "backup-to", "dir",
       "snapshot a file before overwriting it");
@@ -424,6 +431,9 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     if (v == HAPI_V_CHECK)      { return cmd_check(p0, cmdit_get_bool(vh, f_strict)); }
     if (v == HAPI_V_SYNC) {
         return cmd_sync_run(p0, cmdit_get_bool(vh, f_prune), cmdit_get_bool(vh, f_force));
+    }
+    if (v == HAPI_V_FMT) {
+        return cmd_fmt_run(p0, cmdit_get_bool(vh, f_check), cmdit_get_bool(vh, f_force));
     }
     return 2;
 }

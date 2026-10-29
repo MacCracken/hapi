@@ -9,18 +9,19 @@
 
 ## Status
 
-- **Shipped: 1.6.0** — `--absolute` on `link`, `adopt` and `sync`:
-  absolute link targets on opt-in, with either shape counted as hapi's
-  link by every verb, and `"shape":"absolute"` in the trail (ADR 0003 and
-  ADR 0002, 1.6.0 addenda). Its P(-1) is the *1.6.0 addendum* of
-  [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md). Before it,
-  1.5.0 added the script-facing flags (`status --quiet`,
-  `checkpoint --label`, `rollback --to` / `--steps`), 1.4.0 recorded and
-  removed the directories `link` made, 1.3.0 added no-package `sync` and
-  `--prune`, and 1.2.x moved argument parsing to cmdit.
-- **Next: 1.7.0 — `hapi fmt`** (below), the last planned 1.x minor.
-- **1.7.0** — the rest of v1.x's additive work. The command surface, ADR 0001's schema and ADR 0002's line
-  shape stay frozen throughout; everything here is additive.
+- **Shipped: 1.7.0** — `hapi fmt`: a manifest's header rewritten as the
+  canonical bytes, so its hash cannot change, refusing to drop what the
+  canonical form cannot hold unless `--force`
+  ([ADR 0008](../adr/0008-hapi-fmt.md)). That was the last planned 1.x
+  minor. Before it, 1.6.0 added `--absolute`, 1.5.0 the script-facing
+  flags, 1.4.0 `created_dir`, 1.3.0 no-package `sync` and `--prune`, and
+  1.2.x moved argument parsing to cmdit.
+- **Next: nothing planned.** Every additive theme the v1.0 release notes
+  reserved has shipped. What remains is **gated** (below), landing in the
+  next 1.x minor when its gate opens, and the v2.0 bucket. New 1.x
+  minors are cut from dogfood pressure as it arrives. The command
+  surface, ADR 0001's schema and ADR 0002's line shape stay frozen; any
+  1.x addition is additive.
 - **Gated** — work that waits on something outside hapi, scheduled when
   the gate opens.
 - **v2.0** — candidates that *must* earn a major bump because they break
@@ -34,7 +35,8 @@
 - **Order: dependency first, then dogfood pressure.** cmdit went first
   (1.2.0) because every later flag registers through it; sync's two
   dogfood issues went next (1.3.0), then `created_dir` (1.4.0), the
-  script-facing flags (1.5.0) and `--absolute` (1.6.0).
+  script-facing flags (1.5.0), `--absolute` (1.6.0) and `hapi fmt`
+  (1.7.0).
 - **Standing obligations, per release** (CLAUDE.md, not repeated in each
   section): a P(-1) re-run when the release touches a path argument, a
   syscall, the capability surface or the trail format (each section
@@ -44,26 +46,19 @@
 
 ---
 
-## 1.7.0 — `hapi fmt`
-
-**P(-1): no** (it writes only the manifest, through the existing writer). A manifest
-canonicalizer / formatter. Ships in v1.x **only if** its output equals `hapi_mf_canonicalize`'s
-bytes, so the audit-trail manifest hash does not change. If a richer canonical form is needed, it
-crosses into v2.0. It must keep the body below `---` byte for byte (ADR 0001, 1.1.1 addendum).
-
----
-
 ## Gated — scheduled when the gate opens
 
-Each lands in whichever 1.x minor is next when its gate opens. None blocks the plan above.
+Each lands in whichever 1.x minor is next when its gate opens.
 
-- **`hapi adopt` on agnos** — *gate: agnos ext2 rename-over* (F-059, accepted —
+- **`hapi adopt` and `hapi fmt` on agnos** — *gate: agnos ext2 rename-over* (F-059, accepted —
   [`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md);
   filed 2026-10-28 in agnos as
   `docs/development/issues/2026-10-28-ext2-rename-cannot-replace-an-existing-file.md`). hapi's half:
   open the lock with `O_DIRECTORY`, and lock somewhere agnos flock#59 accepts. That is a directory
   if the kernel adds it, otherwise a regular lock file — which means deciding how `check` treats
-  that file. Confirm on a QEMU-booted kernel; mirshi cannot see this class.
+  that file. `fmt` (1.7.0) rewrites through the same lock and rename, so it fails safe there
+  the same way and opens with the same fix. Confirm on a QEMU-booted kernel; mirshi cannot see
+  this class.
 - **mirshi kernel fidelity** — *gate: mirshi matching agnos on four calls* (filed 2026-10-28 in
   mirshi's `docs/development/roadmap.md`, § *Open defects — kernel fidelity*, items 1–4). hapi's
   half: move `MIRSHI_REF` in `scripts/build-mirshi.sh`, then check that `tests/agnos.tcyr` still
@@ -119,6 +114,18 @@ rationale that justifies the major bump.
   rare case where a copy beats a symlink). ADR 0001 left
   headroom; a v2 amendment specifies the per-attribute
   semantics and the audit-trail interaction.
+- **An un-escape in the manifest parser.** The parser keeps a `\` as
+  written: `\"` reads as the two bytes `\"`, so no value can hold a bare
+  quote, and the manifest writer refuses to write a quote or a backslash
+  at all (F-021). The canonical form
+  escapes every `\` again, so `hapi fmt` refuses a value with a backslash
+  outright. An un-escape changes how existing manifests parse, which is a
+  major bump. Once it lands, `fmt` can format those values too.
+- **`hapi fmt` that keeps comments.** 1.7.0 writes exactly the canonical
+  bytes, so comments in the header cannot survive and `fmt` refuses to
+  drop them without `--force` (ADR 0008). Keeping them needs a richer
+  canonical form than the hash's, attaching comments to the rows they
+  precede, which the 1.7.0 roadmap reserved for v2.0.
 - **Per-row `--source <path>` for `adopt`** — opt into
   nested layouts (`~/.config/zsh/x` → `pkg/config/zsh/x`).
   If purely a new CLI flag, it's v1.x; if it changes the

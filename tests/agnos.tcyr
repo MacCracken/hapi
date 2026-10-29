@@ -24,6 +24,7 @@ include "src/cmd/unlink.cyr"
 include "src/cmd/sync.cyr"
 include "src/cmd/rollback.cyr"
 include "src/cmd/checkpoint.cyr"
+include "src/cmd/fmt.cyr"
 
 var _ta_counter = 0;
 
@@ -478,6 +479,24 @@ fn test_absolute_round_trip() {
     return 0;
 }
 
+# 1.7.0: fmt rewrites through the writer's lock, read and atomic rename,
+# whose agnos arms the manifest round trip above also runs. A real kernel
+# cannot yet rename over an existing file (F-059), which fmt shares with
+# adopt; mirshi can.
+fn test_fmt_round_trip() {
+    test_group("fmt: format a manifest and keep its body, with absolute paths");
+
+    var d = _ta_scratch();
+    var mp = _fsl_path_join(d, "hapi.cyml");
+    _ta_write(mp, "[package]\nversion = \"1\"\nname = \"agnos-fmt\"\n---\nbody\n");
+    assert_eq(cmd_fmt_run(d, 1, 0), 1, "fmt --check: not formatted");
+    assert_eq(cmd_fmt(d), 0, "fmt");
+    assert_eq(_ta_holds(mp, "[package]\nname = \"agnos-fmt\"\nversion = \"1\"\n\n---\nbody\n"), 1,
+      "the canonical header, then the body as it was");
+    assert_eq(cmd_fmt_run(d, 1, 0), 0, "fmt --check: formatted");
+    return 0;
+}
+
 fn main(): i64 {
     test_nofollow_open();
     test_exclusive_create();
@@ -491,6 +510,7 @@ fn main(): i64 {
     test_made_dirs_round_trip();
     test_rollback_steps_and_to();
     test_absolute_round_trip();
+    test_fmt_round_trip();
     return assert_summary();
 }
 

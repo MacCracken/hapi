@@ -54,6 +54,56 @@ var _hapi_mf_strict = 0;
 fn hapi_mf_set_strict(v): i64 { _hapi_mf_strict = v; return 0; }
 fn hapi_mf_strict(): i64 { return _hapi_mf_strict; }
 
+# What a parse skipped that the canonical form has no place for (1.7.0,
+# `hapi fmt`). 0 — every verb but fmt — records nothing; otherwise a vec
+# that each skip appends a HapiMfDrop to (16 bytes: +0 the 1-based line,
+# +8 a cstring saying what). Recording never changes what the parse
+# returns: every call site below is beside the skip it describes, so
+# the parser itself is the one list of what it drops.
+var _hapi_mf_drops = 0;
+
+fn hapi_mf_track_drops(v): i64 { _hapi_mf_drops = v; return 0; }
+fn hapi_mf_drop_line(d): i64 { return load64(d); }
+fn hapi_mf_drop_what(d): i64 { return load64(d + 8); }
+
+# Record a skip at buf[pos]: `prefix`, then the key `key` (a Str, or 0),
+# then `suffix`. The message is built only while tracking.
+fn _hapi_mf_drop(buf, pos, prefix, key, suffix): i64 {
+    if (_hapi_mf_drops == 0) { return 0; }
+    var line = 1;
+    var i = 0;
+    while (i < pos) {
+        if (load8(buf + i) == 10) { line = line + 1; }
+        i = i + 1;
+    }
+    var pl = strlen(prefix);
+    var kl = 0;
+    if (key != 0) { kl = str_len(key); }
+    var sl = strlen(suffix);
+    var what = alloc(pl + kl + sl + 1);
+    memcpy(what, prefix, pl);
+    if (kl > 0) { memcpy(what + pl, str_data(key), kl); }
+    memcpy(what + pl + kl, suffix, sl);
+    store8(what + pl + kl + sl, 0);
+    var d = alloc(16);
+    store64(d, line);
+    store64(d + 8, what);
+    vec_push(_hapi_mf_drops, d);
+    return 0;
+}
+
+# Before a skip to the end of the line: record what is there, if it is
+# more than spaces, tabs and a CR — a comment, or other text, described
+# as `prefix` `key` `suffix`.
+fn _hapi_mf_drop_rest(buf, pos, end, prefix, key, suffix): i64 {
+    if (_hapi_mf_drops == 0) { return 0; }
+    var p = _hapi_mf_skip_hws(buf, pos, end);
+    while (p < end && load8(buf + p) == 13) { p = p + 1; }
+    if (p >= end || load8(buf + p) == 10) { return 0; }
+    if (load8(buf + p) == 35) { return _hapi_mf_drop(buf, p, "a comment", 0, ""); }
+    return _hapi_mf_drop(buf, p, prefix, key, suffix);
+}
+
 # Section dispatch tags used during parse.
 enum HapiMfSection {
     HAPI_MF_SECT_NONE = 0;
@@ -115,6 +165,7 @@ fn _hapi_mf_skip_ws_nl(buf, pos, end): i64 {
         if (c == 32 || c == 9 || c == 10 || c == 13) {
             pos = pos + 1;
         } elif (c == 35) {
+            _hapi_mf_drop(buf, pos, "a comment", 0, "");
             var lgo = 1;
             while (pos < end && lgo == 1) {
                 if (load8(buf + pos) == 10) { lgo = 0; }
@@ -167,6 +218,7 @@ fn _hapi_mf_parse_str(buf, pos, end, out_pos): Str {
 fn _hapi_mf_parse_str_array(buf, pos, end, out_pos): i64 {
     var v = vec_new();
     pos = pos + 1;
+    var noted = 0;
     var go = 1;
     while (pos < end && go == 1) {
         pos = _hapi_mf_skip_ws_nl(buf, pos, end);
@@ -182,6 +234,12 @@ fn _hapi_mf_parse_str_array(buf, pos, end, out_pos): i64 {
                 pos = _hapi_mf_skip_ws_nl(buf, pos, end);
                 if (pos < end && load8(buf + pos) == 44) { pos = pos + 1; }
             } else {
+                # A stray comma is punctuation; anything else is a value
+                # the schema's string arrays drop (noted once per array).
+                if (c != 44 && noted == 0) {
+                    _hapi_mf_drop(buf, pos, "a non-string element in an array", 0, "");
+                    noted = 1;
+                }
                 pos = pos + 1;
             }
         }
@@ -261,6 +319,7 @@ fn hapi_mf_parse_header_r(data, len): Result {
                 var section = str_new(data + nstart, pos - nstart);
                 if (pos < len && load8(data + pos) == 93) { pos = pos + 1; }
                 if (pos < len && load8(data + pos) == 93) { pos = pos + 1; }
+                _hapi_mf_drop_rest(data, pos, len, "text after a section header", 0, "");
                 pos = _hapi_mf_skip_to_eol(data, pos, len);
 
                 if (str_eq_cstr(section, "link") == 1) {
@@ -268,6 +327,7 @@ fn hapi_mf_parse_header_r(data, len): Result {
                     cur_link = hapi_link_new(0, 0);
                 } else {
                     if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownSection); }
+                    _hapi_mf_drop(data, nstart, "unknown section [[", section, "]] and its keys");
                     cur = HAPI_MF_SECT_UNKNOWN;
                 }
             }
@@ -285,16 +345,19 @@ fn hapi_mf_parse_header_r(data, len): Result {
                 }
                 var section = str_new(data + nstart, pos - nstart);
                 if (pos < len && load8(data + pos) == 93) { pos = pos + 1; }
+                _hapi_mf_drop_rest(data, pos, len, "text after a section header", 0, "");
                 pos = _hapi_mf_skip_to_eol(data, pos, len);
 
                 if (str_eq_cstr(section, "package") == 1) {
                     cur = HAPI_MF_SECT_PACKAGE;
                 } else {
                     if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownSection); }
+                    _hapi_mf_drop(data, nstart, "unknown section [", section, "] and its keys");
                     cur = HAPI_MF_SECT_UNKNOWN;
                 }
             }
             else {
+                var kstart = pos;
                 var kp = 0;
                 var key = _hapi_mf_parse_key(data, pos, len, &kp);
                 pos = kp;
@@ -302,41 +365,72 @@ fn hapi_mf_parse_header_r(data, len): Result {
                 if (pos < len && load8(data + pos) == 61) {
                     pos = pos + 1;
                     pos = _hapi_mf_skip_hws(data, pos, len);
-                    if (pos < len) {
-                        var vc = load8(data + pos);
-                        if (vc == 34) {
-                            var vp = 0;
-                            var val = _hapi_mf_parse_str(data, pos, len, &vp);
-                            pos = vp;
-                            if (cur == HAPI_MF_SECT_PACKAGE) {
-                                if (str_eq_cstr(key, "name") == 1) { store64(m, val); }
-                                elif (str_eq_cstr(key, "version") == 1) { store64(m + 8, val); }
-                                elif (str_eq_cstr(key, "description") == 1) { store64(m + 16, val); }
-                                else {
-                                    if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
+                    var vc = 10;
+                    if (pos < len) { vc = load8(data + pos); }
+                    if (vc == 34) {
+                        var vp = 0;
+                        var val = _hapi_mf_parse_str(data, pos, len, &vp);
+                        pos = vp;
+                        if (cur == HAPI_MF_SECT_PACKAGE) {
+                            var slot = 0 - 1;
+                            if (str_eq_cstr(key, "name") == 1) { slot = 0; }
+                            elif (str_eq_cstr(key, "version") == 1) { slot = 8; }
+                            elif (str_eq_cstr(key, "description") == 1) { slot = 16; }
+                            if (slot >= 0) {
+                                if (load64(m + slot) != 0) {
+                                    _hapi_mf_drop(data, kstart, "the earlier `", key, "`, set again here");
                                 }
-                            } elif (cur == HAPI_MF_SECT_LINK && cur_link != 0) {
-                                if (str_eq_cstr(key, "source") == 1) { store64(cur_link, val); }
-                                elif (str_eq_cstr(key, "target") == 1) { store64(cur_link + 8, val); }
-                                else {
-                                    if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
-                                }
-                            }
-                        }
-                        elif (vc == 91) {
-                            var vp = 0;
-                            var arr = _hapi_mf_parse_str_array(data, pos, len, &vp);
-                            pos = vp;
-                            if (cur == HAPI_MF_SECT_PACKAGE) {
-                                if (str_eq_cstr(key, "ignore") == 1) { store64(m + 32, arr); }
-                                else {
-                                    if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
-                                }
-                            } elif (cur == HAPI_MF_SECT_LINK) {
+                                store64(m + slot, val);
+                            } else {
                                 if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
+                                _hapi_mf_drop(data, kstart, "unknown key `", key, "` in [package]");
                             }
+                        } elif (cur == HAPI_MF_SECT_LINK && cur_link != 0) {
+                            var lslot = 0 - 1;
+                            if (str_eq_cstr(key, "source") == 1) { lslot = 0; }
+                            elif (str_eq_cstr(key, "target") == 1) { lslot = 8; }
+                            if (lslot >= 0) {
+                                if (load64(cur_link + lslot) != 0) {
+                                    _hapi_mf_drop(data, kstart, "the earlier `", key, "`, set again here");
+                                }
+                                store64(cur_link + lslot, val);
+                            } else {
+                                if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
+                                _hapi_mf_drop(data, kstart, "unknown key `", key, "` in a [[link]] row");
+                            }
+                        } elif (cur == HAPI_MF_SECT_NONE) {
+                            _hapi_mf_drop(data, kstart, "key `", key, "` before any section");
                         }
+                        _hapi_mf_drop_rest(data, pos, len, "text after the value of `", key, "`");
                     }
+                    elif (vc == 91) {
+                        var vp = 0;
+                        var arr = _hapi_mf_parse_str_array(data, pos, len, &vp);
+                        pos = vp;
+                        if (cur == HAPI_MF_SECT_PACKAGE && str_eq_cstr(key, "ignore") == 1) {
+                            if (vec_len(hapi_mf_ignore(m)) > 0) {
+                                _hapi_mf_drop(data, kstart, "the earlier `", key, "`, set again here");
+                            }
+                            store64(m + 32, arr);
+                        } elif (cur == HAPI_MF_SECT_PACKAGE) {
+                            if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
+                            _hapi_mf_drop(data, kstart, "unknown key `", key, "` in [package]");
+                        } elif (cur == HAPI_MF_SECT_LINK) {
+                            if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
+                            _hapi_mf_drop(data, kstart, "unknown key `", key, "` in a [[link]] row");
+                        } elif (cur == HAPI_MF_SECT_NONE) {
+                            _hapi_mf_drop(data, kstart, "key `", key, "` before any section");
+                        }
+                        _hapi_mf_drop_rest(data, pos, len, "text after the value of `", key, "`");
+                    }
+                    elif (cur != HAPI_MF_SECT_UNKNOWN) {
+                        # No value, or one that is not a double-quoted string
+                        # or an array: the parse skips the rest of the line.
+                        _hapi_mf_drop(data, kstart, "`", key, "` with a value that is not a double-quoted string");
+                    }
+                } elif (cur != HAPI_MF_SECT_UNKNOWN) {
+                    # An unknown section's lines are covered by its own note.
+                    _hapi_mf_drop(data, kstart, "a line that is not `key = value`", 0, "");
                 }
                 pos = _hapi_mf_skip_to_eol(data, pos, len);
             }
@@ -629,6 +723,136 @@ fn hapi_mf_canonicalize(m, out, cap): i64 {
 
     if (_hapi_mf_canon_ovf == 1) { return 0 - 1; }
     return pos;
+}
+
+# ----------------------------------------------------------------
+# `hapi fmt` (1.7.0): the header rewritten as hapi_mf_canonicalize's bytes
+# ----------------------------------------------------------------
+#
+# The roadmap's condition for shipping fmt in v1.x: what it writes for the
+# header IS the canonical form, so the `sha1c:` manifest hash of a
+# formatted manifest is the hash of the original (ADR 0002). Three things
+# can stop that, and hapi_mf_format_r reports each rather than writing:
+#   - content the parse skipped (comments, unknown keys, ...), recorded by
+#     the parser itself (`_hapi_mf_drops`);
+#   - a value holding a backslash: the parser keeps `\` bytes and the
+#     canonical form escapes them again, so the value would grow on every
+#     pass and its hash change (the F-021 asymmetry, ADR 0001);
+#   - output that does not parse back to these exact canonical bytes —
+#     the proof, run on the bytes fmt would write.
+
+# HapiFmt — 40 bytes.
+#   +0  out: the header to write (canonical bytes, line endings as `crlf`)
+#   +8  out_len
+#   +16 drops: vec of HapiMfDrop (empty when nothing would be lost)
+#   +24 backslash: which field holds one (cstring), or 0
+#   +32 proven: 1 when `out` parses back to the same canonical bytes
+fn hapi_fmt_out(f): i64 { return load64(f); }
+fn hapi_fmt_out_len(f): i64 { return load64(f + 8); }
+fn hapi_fmt_drops(f): i64 { return load64(f + 16); }
+fn hapi_fmt_backslash(f): i64 { return load64(f + 24); }
+fn hapi_fmt_proven(f): i64 { return load64(f + 32); }
+
+fn _hapi_mf_has_backslash(s): i64 {
+    if (s == 0) { return 0; }
+    var d = str_data(s);
+    var n = str_len(s);
+    var i = 0;
+    while (i < n) {
+        if (load8(d + i) == 92) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The first field of `m` holding a backslash, named for a message; 0 if none.
+fn _hapi_mf_backslash_field(m): i64 {
+    if (_hapi_mf_has_backslash(hapi_mf_name(m)) == 1) { return "`name`"; }
+    if (_hapi_mf_has_backslash(hapi_mf_version(m)) == 1) { return "`version`"; }
+    if (_hapi_mf_has_backslash(hapi_mf_description(m)) == 1) { return "`description`"; }
+    var ig = hapi_mf_ignore(m);
+    var i = 0;
+    while (i < vec_len(ig)) {
+        if (_hapi_mf_has_backslash(vec_get(ig, i)) == 1) { return "an `ignore` pattern"; }
+        i = i + 1;
+    }
+    var links = hapi_mf_links(m);
+    var j = 0;
+    while (j < vec_len(links)) {
+        var lk = vec_get(links, j);
+        if (_hapi_mf_has_backslash(hapi_link_source(lk)) == 1) { return "a [[link]] row's `source`"; }
+        if (_hapi_mf_has_backslash(hapi_link_target(lk)) == 1) { return "a [[link]] row's `target`"; }
+        j = j + 1;
+    }
+    return 0;
+}
+
+# m's canonical bytes in a fresh buffer; *len_out gets the length. 0 when
+# they do not fit the sizing hint (the canonicalizer refuses, never cuts).
+fn _hapi_mf_canonical_buf(m, len_out): i64 {
+    var cap = hapi_mf_canonical_size(m);
+    var buf = alloc(cap + 1);
+    var n = hapi_mf_canonicalize(m, buf, cap);
+    if (n < 0) { return 0; }
+    store64(len_out, n);
+    return buf;
+}
+
+# Parse the header `hdr` (len bytes) and build what fmt would write for it,
+# each line ended CR LF when `crlf` is 1. Err(code) when it does not parse.
+fn hapi_mf_format_r(hdr, len, crlf): Result {
+    var drops = vec_new();
+    hapi_mf_track_drops(drops);
+    var r_t, r_v = hapi_mf_parse_header_r(hdr, len);
+    hapi_mf_track_drops(0);
+    if (is_err_result(r_t) == 1) { return Err(r_v); }
+    var m = r_v;
+
+    var f = alloc(40);
+    store64(f, 0);
+    store64(f + 8, 0);
+    store64(f + 16, drops);
+    store64(f + 24, _hapi_mf_backslash_field(m));
+    store64(f + 32, 0);
+
+    var cn = 0;
+    var canon = _hapi_mf_canonical_buf(m, &cn);
+    if (canon == 0) { return Ok(f); }
+
+    var out = canon;
+    var on = cn;
+    if (crlf == 1) {
+        var lines = 0;
+        var i = 0;
+        while (i < cn) {
+            if (load8(canon + i) == 10) { lines = lines + 1; }
+            i = i + 1;
+        }
+        out = alloc(cn + lines + 1);
+        on = 0;
+        i = 0;
+        while (i < cn) {
+            var c = load8(canon + i);
+            if (c == 10) { store8(out + on, 13); on = on + 1; }
+            store8(out + on, c);
+            on = on + 1;
+            i = i + 1;
+        }
+    }
+    store64(f, out);
+    store64(f + 8, on);
+
+    # The proof: the bytes fmt would write parse back to the same
+    # canonical bytes, so the manifest's hash cannot change.
+    var p_t, p_v = hapi_mf_parse_header_r(out, on);
+    if (is_err_result(p_t) == 0) {
+        var bn = 0;
+        var back = _hapi_mf_canonical_buf(p_v, &bn);
+        if (back != 0 && bn == cn) {
+            if (memeq(back, canon, cn) == 1) { store64(f + 32, 1); }
+        }
+    }
+    return Ok(f);
 }
 
 # Map a HapiMfError code to a human cstring. Used by inspect and

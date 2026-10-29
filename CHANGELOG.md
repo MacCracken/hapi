@@ -6,6 +6,117 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.7.0] - 2026-10-29
+
+> **`hapi fmt`.** A new verb rewrites a manifest's header as exactly the bytes hapi
+> hashes for the audit trail (`hapi_mf_canonicalize`), so formatting can never change
+> a manifest's hash, and keeps the body below `---` byte for byte. Anything the
+> canonical form has no place for — comments, unknown keys, a key given twice — is
+> listed with its line, and kept unless `--force`. `--check` answers in the exit code
+> for CI. The last planned 1.x minor. Design and alternatives:
+> [ADR 0008](docs/adr/0008-hapi-fmt.md).
+
+### Added
+
+- **`hapi fmt <package-dir|hapi.cyml>`**, registered after `sync` so no verb id
+  moves. The header becomes the canonical bytes:
+  - `[package]`, then `name`, `version`, `description`, `ignore`;
+  - rows sorted by target, `source` before `target`;
+  - `key = "value"`, and one blank line between sections.
+
+  Each line ends as the file's first line does, LF or CR LF. If there is a body,
+  one blank line follows, then everything from `---` on, unchanged. A second run
+  says `already formatted` and writes nothing.
+- **It refuses to drop anything, unless `--force`.** The manifest parser now records
+  everything it skips, with its line, while `fmt` asks it to. Every other verb's
+  parse records nothing and returns what it did. `fmt` lists each skip and exits 1:
+  - comments;
+  - unknown sections and keys, and keys before any section;
+  - a key given twice;
+  - text after a value or a section header;
+  - a value that is not a double-quoted string;
+  - a non-string array element.
+
+  `--force` drops them and lists each as `(dropped)`.
+- **It always refuses:**
+  - a value holding a backslash, which the canonical form would escape again,
+    changing the value and its hash;
+  - a header that would not parse back to the same canonical bytes. `fmt` proves
+    this on the bytes it is about to write;
+  - a manifest that does not parse;
+  - a symlinked `hapi.cyml` (F-058).
+- **`--check`** writes nothing and exits 1 when the manifest is not formatted.
+  **`--dry-run`** prints the header it would write and exits as the real run would.
+- `fmt` holds the package-directory lock from its read to its rename, as `adopt`
+  does, so an `adopt` running at the same moment cannot lose its row. It writes no
+  trail entry: it moves no link, and the hash it leaves is the one already recorded.
+- The usage text gains the `fmt` rows, and lists `fmt` among the `--dry-run` verbs.
+
+### Security
+
+The roadmap marked `fmt` P(-1): no, but it adds a path argument and a write path,
+which CLAUDE.md lists as triggers, so the pass ran. The record is the *1.7.0
+addendum* of [`docs/audit/2026-10-28-audit.md`](docs/audit/2026-10-28-audit.md). No
+finding.
+
+- **Seeded reverts: 31 of 33 caught.** The two equivalents are recorded with their
+  reasons. Removing `fmt`'s lock is caught by the concurrency harness instead, which
+  lost 1 – 3 rows a run without it. Every earlier set is still caught.
+- **A model-checked fuzz of `fmt`, 20,000 generated manifests**, found no problem. It
+  checks that `fmt` refuses exactly when something droppable is present, that the
+  parsed manifest never changes, and that `fmt` is idempotent. Against a build that
+  missed comments, it found 50 failures in 1,000 cases.
+
+### Tests
+
+- `tests/hapi.tcyr` 1,444 → **1,643** assertions (149 → 154 groups). A new `fmt` tier
+  covers:
+  - the exact bytes written, with and without a body;
+  - the hash unchanged;
+  - `--check` before and after, and idempotence;
+  - seventeen cases of skipped content, each named with its line and dropped by
+    `--force`, with the strict parse accepting the result;
+  - several drops listed in order;
+  - the backslash refusals, naming the field;
+  - a header with no name, and a delimiter on line 1;
+  - a symlinked manifest, refused by the real run and `--dry-run` and read by
+    `--check`;
+  - CR LF kept;
+  - the read-back proof refusing a multi-line value in a CR LF file;
+  - trailing and doubled commas;
+  - `--dry-run`'s output;
+  - the verb's flags, `--check` refused on the other ten verbs, and the usage
+    errors.
+- `tests/agnos.tcyr` 84 → **88** (12 → 13 groups): an `fmt` round trip with absolute
+  paths, under mirshi too.
+- `scripts/concurrency-test.sh`: sixteen `adopt`s racing four `fmt` loops on one
+  package. Every row must survive, and the manifest must end formatted with its body
+  intact.
+- Verified:
+  - x86_64, `--aarch64`, `--agnos` and `CYRIUS_DCE=1` builds;
+  - `cyrius lint` 0 warnings;
+  - `cyrius test` and `cyrius test --aarch64`;
+  - `cyrius fuzz` and `cyrius bench`;
+  - the concurrency harness;
+  - `scripts/agnos-smoke.sh` under mirshi, all five checks;
+  - `cyrius deps --verify` 114 / 114.
+
+  The 819-line golden against 1.6.0: 700 cases identical, 45 the version line, 74
+  the usage text. A 50,000-line argv fuzz against 1.6.0 found no mismatch.
+
+### Notes
+
+- **Comments in the header cannot survive `fmt`**: the canonical form has no place
+  for them. Keep notes in the body, which `fmt` never touches. A formatter that keeps
+  comments needs a richer canonical form, which is v2.0 (roadmap).
+- **A value with a backslash cannot be formatted** until the parser gains an
+  un-escape, also v2.0.
+- **On a real agnos kernel**, `fmt` fails safe as `adopt` does (F-059: ext2 cannot
+  rename over an existing file); it is gated with `adopt` on the roadmap.
+- **Benchmarks:** flat to slightly faster against 1.6.0 (cold 134–137 vs 137–139 ms),
+  trail byte-identical. `fmt` rewrites a 3 MB manifest in 10 ms. DCE binary
+  617,280 → 630,928 bytes.
+
 ## [1.6.0] - 2026-10-28
 
 > **`--absolute`.** ADR 0003 made relative links the default and reserved an

@@ -15,6 +15,7 @@ the real run would have returned.
 | `hapi sync`       | ✓         | ✓       |
 | `hapi rollback`   | ✓         | —       |
 | `hapi checkpoint` | ✓         | —       |
+| `hapi fmt`        | ✓ (prints the header it would write) | — |
 | `hapi status`     | — (already read-only) | ✓ |
 | `hapi list`       | — (already read-only) | ✓ |
 | `hapi inspect`    | — (already read-only) | — |

@@ -104,6 +104,49 @@ rows2=$(grep -c '^\[\[link\]\]' "$PKG/hapi.cyml" || true)
 check "row appended past the stale tmp" "$rows2" "$((N + 1))"
 grep -q GARBAGE "$PKG/hapi.cyml" && { echo "  FAIL  stale tmp content leaked into the manifest"; FAIL=1; } || echo "  ok    stale tmp content did not leak"
 
+# ── 1.7.0: fmt racing adopt ─────────────────────────────────────────
+# `hapi fmt` rewrites the whole header, so an adopt that appended a row
+# between fmt's read and its commit would lose that row. Both take the
+# package-directory lock across their read-modify-write; this proves it,
+# with the same large body widening the window.
+echo "1.7.0: $N concurrent adopts racing four fmt loops against one package"
+HOME2="$WORK/home2"; STATE2="$WORK/state2"; PKG2="$WORK/pkg2"
+mkdir -p "$HOME2" "$STATE2" "$PKG2"
+{
+    printf '[package]\nversion = "1.0.0"\nname = "conc2"\n\n---\n'
+    i=0
+    while [ $i -lt $((BODY_MB * 12)) ]; do
+        awk 'BEGIN{s="";for(i=0;i<1000;i++)s=s "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";print s}'
+        i=$((i + 1))
+    done
+} > "$PKG2/hapi.cyml"
+i=1
+while [ $i -le $N ]; do echo "content $i" > "$HOME2/.f$i"; i=$((i + 1)); done
+# Adopts queue on the lock, so they commit one after another over a
+# while; four fmt loops keep rewriting across that whole stretch, rather
+# than all finishing before the first adopt commits.
+i=1
+while [ $i -le $N ]; do
+    HOME="$HOME2" XDG_STATE_HOME="$STATE2" "$HAPI" adopt ".f$i" "$PKG2" > /dev/null 2>&1 &
+    i=$((i + 1))
+done
+w=1
+while [ $w -le 4 ]; do
+    ( k=0; while [ $k -lt 30 ]; do "$HAPI" fmt "$PKG2" > /dev/null 2>&1; k=$((k + 1)); done ) &
+    w=$((w + 1))
+done
+wait
+"$HAPI" fmt "$PKG2" > /dev/null 2>&1 || true
+rows3=$(grep -c '^\[\[link\]\]' "$PKG2/hapi.cyml" || true)
+moved3=$(find "$PKG2" -maxdepth 1 -name 'f*' | wc -l | tr -d ' ')
+stray3=$(find "$PKG2" -maxdepth 1 -name '*.tmp*' | wc -l | tr -d ' ')
+check "manifest rows"      "$rows3"  "$N"
+check "rows == files moved" "$rows3" "$moved3"
+check "stray tmp files"    "$stray3" "0"
+"$HAPI" check "$PKG2" > /dev/null 2>&1 && echo "  ok    the manifest parses" || { echo "  FAIL  the manifest does not parse"; FAIL=1; }
+"$HAPI" fmt --check "$PKG2" > /dev/null 2>&1 && echo "  ok    and it is formatted" || { echo "  FAIL  not formatted after a final fmt"; FAIL=1; }
+grep -q yyyyy "$PKG2/hapi.cyml" && echo "  ok    body preserved" || { echo "  FAIL  body lost"; FAIL=1; }
+
 if [ $FAIL -eq 0 ]; then
     echo "PASS: concurrency harness"
 else

@@ -4,6 +4,10 @@
 #   manifest_append_link_row — adopt's "close the loop" edit
 #   manifest_remove_link_row — rollback-of-adopt
 #
+# Since 1.7.0 `hapi fmt` rewrites the header through the pieces below
+# (manifest_lock … manifest_commit): the same lock, read, body delimiter
+# and atomic commit, so its rewrite keeps the body byte for byte too.
+#
 # Atomicity: write the new content to `<path>.tmp` in the same
 # directory, fsync, then rename(2) over the original. Crash
 # windows produce either the original or the new — never a
@@ -582,4 +586,31 @@ fn _hmw_remove_unlocked(manifest_path, source, target): i64 {
     var new_len = cut_start + (len - found_end);
 
     return _hmw_write_atomic(manifest_path, out, new_len);
+}
+
+# ----------------------------------------------------------------
+# The pieces `hapi fmt` (1.7.0) rewrites a manifest with. A caller holds
+# the lock from its read to its commit, as the two edits above do, so an
+# `adopt` cannot land a row between them and be overwritten.
+# ----------------------------------------------------------------
+
+# Take the package-directory lock (see _hmw_lock). The fd, or -1.
+fn manifest_lock(manifest_path): i64 { return _hmw_lock(manifest_path); }
+fn manifest_unlock(fd): i64 { return _hmw_unlock(fd); }
+
+# The whole file, sized from the file (see _hmw_slurp); 0 on a failed or
+# grown read. *len_out gets the length.
+fn manifest_read(manifest_path, len_out): i64 { return _hmw_slurp(manifest_path, len_out); }
+
+# Offset of the first body delimiter line, or -1 (the reader's rule).
+fn manifest_body_start(buf, n): i64 { return _hmw_find_separator(buf, n); }
+
+# 1 when the manifest's line ending is CR LF (judged by its first line).
+fn manifest_uses_crlf(buf, n): i64 { return _hmw_crlf(buf, n); }
+
+# Replace the manifest with buf[0..n]: staging file, fsync, rename. 0, or
+# a negated HapiMfWriteError. A symlinked manifest is refused (F-058).
+fn manifest_commit(manifest_path, buf, n): i64 {
+    if (hapi_mfw_manifest_is_symlink(manifest_path) == 1) { return 0 - HapiMfwManifestIsSymlink; }
+    return _hmw_write_atomic(manifest_path, buf, n);
 }
