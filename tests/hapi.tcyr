@@ -3077,6 +3077,7 @@ fn _test_canonical_hash_of(src): i64 {
 }
 
 fn _test_cstr_eq(a, b): i64 {
+    if (a == 0 || b == 0) { return 0; }
     var la = strlen(a);
     var lb = strlen(b);
     if (la != lb) { return 0; }
@@ -4558,6 +4559,441 @@ fn test_sync_prune_cli() {
     return 0;
 }
 
+# ------------------------------------------------------------
+# 1.5.0 — status --quiet, checkpoint --label, rollback --steps / --to
+# (ADR 0002, 1.5.0 addendum)
+# ------------------------------------------------------------
+
+# Link package `name`: one row, source `name`, target `.name`, from a
+# package directory of its own.
+fn _r15_link(name): i64 {
+    var pkg = _sy_pkg(_fsl_path_join(_test_scratch_dir(), name), name, name);
+    return cmd_link(pkg, 0);
+}
+
+fn _r15_live(scope, name): i64 {
+    if (_sy_kind(scope, _cli_cat(".", name)) == HAPI_LP_SYMLINK) { return 1; }
+    return 0;
+}
+
+fn _r15_last(audit_path): i64 {
+    var t = audit_read(audit_path);
+    return vec_get(t, vec_len(t) - 1);
+}
+
+# 1 when the trail's last entry is a closing marker with this `from`.
+fn _r15_sealed_from(audit_path, from): i64 {
+    var e = _r15_last(audit_path);
+    if (_test_cstr_eq(hae_op(e), "rollback-marker") == 0) { return 0; }
+    return _test_cstr_eq(hae_from(e), from);
+}
+
+# Append a hand-written line to the trail.
+fn _r15_append_raw(audit_path, line): i64 {
+    var fd = file_open(audit_path, O_WRONLY | O_CREAT | O_APPEND, 0x1A4);
+    file_write(fd, line, strlen(line));
+    file_close(fd);
+    return 0;
+}
+
+fn test_status_quiet() {
+    test_group("status --quiet: drift exits 0, only an error exits 1 (1.5.0)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _sy_pkg(_test_scratch_dir(), "q", "q1 q2");
+
+    var av = _cli_av("hapi status");
+    _cli_add(av, pkg);
+    assert_eq(_cli_run(av), 1, "status: drift exits 1, as before");
+    var out = _cli_out;
+    var out_n = _cli_out_n;
+    _cli_add(av, "--quiet");
+    assert_eq(_cli_run(av), 0, "status --quiet: drift exits 0");
+    assert(_cli_out_n == out_n && memeq(_cli_out, out, out_n) == 1, "...printing the same rows");
+    assert_eq(_cli_err_n, 0, "...and nothing on stderr");
+    cmd_link(pkg, 0);
+    assert_eq(_cli_run(av), 0, "status --quiet: clean exits 0");
+
+    # A target status cannot check is an error: a path through a file.
+    var bad = _test_scratch_dir();
+    _test_write_file(_fsl_path_join(bad, "hapi.cyml"),
+      "[package]\nname = \"e\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"x\"\ntarget = \"blk/.x\"\n");
+    _test_write_file(_fsl_path_join(bad, "x"), "x");
+    _test_write_file(_fsl_path_join(scope, "blk"), "a file in the way");
+    var avb = _cli_av("hapi status --quiet");
+    _cli_add(avb, bad);
+    _cli_expect(avb, 1, 0, "hapi: 1 target could not be checked (ERROR above)\n",
+      "status --quiet: a target that could not be checked exits 1");
+    assert(_test_substr(_cli_out, _cli_out_n, "ERROR") >= 0, "...and its row says ERROR");
+    var avn = _cli_av("hapi status");
+    _cli_add(avn, bad);
+    _cli_expect(avn, 1, 0, "", "status: the same, with nothing extra on stderr");
+
+    _test_write_file(_fsl_path_join(bad, "hapi.cyml"), "garbage\n");
+    assert_eq(_cli_run(avb), 1, "status --quiet: an unparseable manifest exits 1");
+    assert_eq(_cli_run(_cli_av("hapi status --quiet")), 2, "status --quiet with no package is bad usage");
+    assert_eq(_test_file_size(audit_path) > 0, 1, "seed: link wrote the trail");
+    var size = _test_file_size(audit_path);
+    _cli_run(av);
+    assert_eq(_test_file_size(audit_path), size, "status --quiet writes no trail entry");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_checkpoint_label() {
+    test_group("checkpoint --label: names the marker (1.5.0)");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+    assert_eq(cmd_checkpoint(), 0, "a plain checkpoint");
+    assert_eq(cmd_checkpoint_label("pre-deploy"), 0, "a labelled one");
+    var body = _cli_slurp(audit_path);
+    assert(_test_substr(body, strlen(body), "\",\"op\":\"rollback-marker\"}\n") >= 0,
+      "the plain marker is 1.4.0's, byte for byte");
+    assert(_test_substr(body, strlen(body), "\",\"op\":\"rollback-marker\",\"label\":\"pre-deploy\"}\n") >= 0,
+      "the label is written after op");
+    var t = audit_read(audit_path);
+    assert_eq(hae_label(vec_get(t, 0)), 0, "a plain marker reads back with no label");
+    assert_eq(_test_cstr_eq(hae_label(vec_get(t, 1)), "pre-deploy"), 1, "the label reads back");
+    assert_eq(hae_lineno(vec_get(t, 1)), 2, "an entry knows its line");
+
+    hapi_set_dry_run(1);
+    var size = _test_file_size(audit_path);
+    assert_eq(cmd_checkpoint_label("x"), 0, "checkpoint --label --dry-run");
+    assert_eq(_test_file_size(audit_path), size, "...writes nothing");
+    hapi_set_dry_run(0);
+
+    var a64 = alloc(66);
+    var i = 0;
+    while (i < 65) { store8(a64 + i, 97); i = i + 1; }
+    store8(a64 + 65, 0);
+    assert_eq(audit_label_ok(a64), 0, "a label of 65 characters is refused");
+    store8(a64 + 64, 0);
+    assert_eq(audit_label_ok(a64), 1, "64 is accepted");
+    assert_eq(audit_label_ok("Pre.deploy_2-x"), 1, "letters, digits, . _ -");
+    assert_eq(audit_label_ok("a"), 1, "one character");
+    assert_eq(audit_label_ok(""), 0, "empty is refused");
+    assert_eq(audit_label_ok(0), 0, "none is refused");
+    assert_eq(audit_label_ok("-x"), 0, "a leading - is refused");
+    assert_eq(audit_label_ok("a b"), 0, "a space is refused");
+    assert_eq(audit_label_ok("a/b"), 0, "a slash is refused");
+    assert_eq(audit_label_ok("a:b"), 0, "a colon is refused");
+    assert_eq(audit_label_ok("x\x1b[31m"), 0, "a control byte is refused");
+    assert_eq(audit_label_ok("\xc3\xa9"), 0, "a non-ASCII byte is refused");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_rollback_steps() {
+    test_group("rollback --steps: one checkpoint window per step (1.5.0)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    _r15_link("sa");            # line 1
+    cmd_checkpoint();           # 2
+    _r15_link("sb");            # 3
+    cmd_checkpoint();           # 4
+    cmd_checkpoint();           # 5: back to back with 4, one step
+    _r15_link("sc");            # 6
+
+    assert_eq(cmd_rollback_run(1, 0), 0, "--steps 1");
+    assert(_r15_live(scope, "sc") == 0 && _r15_live(scope, "sb") == 1, "...undoes the newest window only");
+    assert_eq(_r15_sealed_from(audit_path, "6"), 1, "...and its marker records `from` 6");
+    assert_eq(cmd_rollback_run(1, 0), 0, "--steps 1 again");
+    assert(_r15_live(scope, "sb") == 0 && _r15_live(scope, "sa") == 1,
+      "...steps over that range and two markers to the window before");
+    assert_eq(_r15_sealed_from(audit_path, "3"), 1, "...from 3");
+    assert_eq(cmd_rollback_run(1, 0), 0, "--steps 1 a third time");
+    assert_eq(_r15_live(scope, "sa"), 0, "...reaches the start of the trail");
+    assert_eq(_r15_sealed_from(audit_path, "1"), 1, "...from 1");
+    var size = _test_file_size(audit_path);
+    assert_eq(cmd_rollback_run(1, 0), 0, "--steps 1 with every entry rolled back exits 0");
+    assert_eq(cmd_rollback(), 0, "so does the no-arg form");
+    assert_eq(_test_file_size(audit_path), size, "...and neither writes");
+    assert_eq(_sy_entries(audit_path), 12, "three undos, no replay: 6 + 3 unlinks + 3 markers");
+
+    # Several steps at once, and more steps than there are.
+    var env2 = _test_fresh_env();
+    scope = load64(env2);
+    audit_path = load64(env2 + 8);
+    _r15_link("ta");
+    cmd_checkpoint();
+    _r15_link("tb");
+    size = _test_file_size(audit_path);
+    assert_eq(cmd_rollback_run(3, 0), 1, "--steps 3 with two steps is refused");
+    assert(_test_file_size(audit_path) == size && _r15_live(scope, "ta") == 1 && _r15_live(scope, "tb") == 1,
+      "...with nothing changed");
+    hapi_set_dry_run(1);
+    assert_eq(cmd_rollback_run(2, 0), 0, "--steps 2 --dry-run");
+    assert(_test_file_size(audit_path) == size && _r15_live(scope, "ta") == 1, "...changes nothing");
+    hapi_set_dry_run(0);
+    assert_eq(cmd_rollback_run(2, 0), 0, "--steps 2");
+    assert(_r15_live(scope, "ta") == 0 && _r15_live(scope, "tb") == 0, "...undoes both windows");
+    assert_eq(_r15_sealed_from(audit_path, "1"), 1, "...in one range, from 1");
+
+    # After the no-arg form, a step goes one further: a multi-level undo.
+    var env3 = _test_fresh_env();
+    scope = load64(env3);
+    audit_path = load64(env3 + 8);
+    _r15_link("ua");
+    cmd_checkpoint();
+    _r15_link("ub");
+    assert_eq(cmd_rollback(), 0, "the no-arg form");
+    assert_eq(_r15_sealed_from(audit_path, "3"), 1, "...records `from` too");
+    assert_eq(cmd_rollback_run(1, 0), 0, "then --steps 1");
+    assert(_r15_live(scope, "ua") == 0, "...undoes the window before");
+    assert_eq(_sy_entries(audit_path), 7, "...without replaying the first undo");
+
+    # A window whose entries need no reversal is still sealed by --steps,
+    # so the next step moves on; the no-arg form keeps its 1.1.1 rule.
+    var env4 = _test_fresh_env();
+    scope = load64(env4);
+    audit_path = load64(env4 + 8);
+    _r15_link("va");
+    cmd_checkpoint();
+    _r15_link("vb");
+    hapi_unlink(_fsl_path_join(scope, ".vb"));
+    size = _test_file_size(audit_path);
+    assert_eq(cmd_rollback(), 0, "no-arg over a window already undone by hand");
+    assert_eq(_test_file_size(audit_path), size, "...writes no marker");
+    assert_eq(cmd_rollback_run(1, 0), 0, "--steps 1 over the same window");
+    assert_eq(_r15_sealed_from(audit_path, "3"), 1, "...seals it");
+    assert_eq(cmd_rollback_run(1, 0), 0, "--steps 1 again");
+    assert_eq(_r15_live(scope, "va"), 0, "...moves on to the window before");
+
+    # A rollback from before 1.5.0 closed with a plain marker. It counts as
+    # a checkpoint, and its range is replayed: no net change, one step used.
+    var env5 = _test_fresh_env();
+    scope = load64(env5);
+    audit_path = load64(env5 + 8);
+    _r15_link("wa");
+    cmd_checkpoint();
+    _r15_link("wb");
+    cmd_unlink("wb");
+    audit_append_rollback_marker_r();
+    assert_eq(cmd_rollback_run(1, 0), 0, "--steps 1 over a 1.4.0 rollback");
+    assert(_r15_live(scope, "wb") == 0 && _r15_live(scope, "wa") == 1, "...replays it to the same state");
+    assert_eq(cmd_rollback_run(1, 0), 0, "the next step");
+    assert_eq(_r15_live(scope, "wa"), 0, "...goes on to the window before");
+
+    _test_clear_env();
+    return 0;
+}
+
+# A closing marker's `from` is trusted only when it names a line before
+# the marker's own; anything else makes it a checkpoint. Line 1 links ra,
+# line 2 is the marker, line 3 links rb. As a checkpoint the marker makes
+# two steps; as the end of a range covering line 1, one.
+fn _r15_from_case(from, steps_found): i64 {
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    _r15_link("ra");
+    _r15_append_raw(audit_path,
+      _cli_cat(_cli_cat("{\"ts\":\"2026-10-28T00:00:00Z\",\"op\":\"rollback-marker\",\"from\":\"", from), "\"}\n"));
+    _r15_link("rb");
+    var label = _cli_cat("`from` ", from);
+    if (steps_found == 2) {
+        assert_eq(cmd_rollback_run(2, 0), 0, _cli_cat(label, " is a checkpoint: --steps 2 runs"));
+        assert_eq(_r15_live(scope, "ra"), 0, _cli_cat(label, " ...and reaches line 1"));
+    } else {
+        assert_eq(cmd_rollback_run(2, 0), 1, _cli_cat(label, " ends a range: --steps 2 is refused"));
+        assert_eq(_r15_live(scope, "ra"), 1, _cli_cat(label, " ...and line 1 is left"));
+    }
+    return 0;
+}
+
+fn test_rollback_from_is_validated() {
+    test_group("rollback: a closing marker's `from` is checked before it is trusted (1.5.0)");
+
+    _r15_from_case("1", 1);
+    _r15_from_case("2", 2);                    # its own line
+    _r15_from_case("9", 2);                    # past it
+    _r15_from_case("0", 2);
+    _r15_from_case("", 2);
+    _r15_from_case("x", 2);
+    _r15_from_case("-1", 2);
+    _r15_from_case("1x", 2);
+    _r15_from_case("1234567890123456789", 2);  # 19 digits
+    # Each of these would read as 1 without the guard that refuses it: a
+    # non-digit, and a number that wraps (2^64 + 1).
+    _r15_from_case("/;", 2);
+    _r15_from_case("18446744073709551617", 2);
+    _test_clear_env();
+    return 0;
+}
+
+# A run that hit an error writes no closing marker, so that it can be
+# re-run (F-056): in every form. Here the error is an adopt reversal whose
+# manifest row could not be removed, which leaves the trail writable.
+fn test_rollback_errored_run_is_not_sealed() {
+    test_group("rollback: an errored run is not sealed, in any form (1.5.0)");
+
+    var forms = 0;
+    while (forms < 2) {
+        var env = _test_fresh_env();
+        var scope = load64(env);
+        var audit_path = load64(env + 8);
+        var pkg = _test_make_package(0, 0);
+        var mpath = _fsl_path_join(pkg, "hapi.cyml");
+        _test_write_file(_fsl_path_join(scope, ".zshrc"), "user content");
+        assert_eq(cmd_adopt(".zshrc", pkg), 0, "seed: adopt");
+        var stage = _t111_plant_staging(mpath);
+        var rc = 0;
+        if (forms == 0) { rc = cmd_rollback(); } else { rc = cmd_rollback_run(1, 0); }
+        var label = "rollback";
+        if (forms == 1) { label = "rollback --steps 1"; }
+        assert_eq(rc, 1, _cli_cat(label, ": the row left behind is an error"));
+        assert_eq(_test_cstr_eq(hae_op(_r15_last(audit_path)), "unadopt"), 1,
+          _cli_cat(label, ": ...and no closing marker follows the reversal"));
+        hapi_unlink(stage);
+        forms = forms + 1;
+    }
+    _test_clear_env();
+    return 0;
+}
+
+fn test_rollback_to_label() {
+    test_group("rollback --to: back to a labelled checkpoint (1.5.0)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    cmd_checkpoint_label("k");      # line 1
+    _r15_link("ya");                # 2
+    cmd_checkpoint_label("L");      # 3
+    _r15_link("yb");                # 4
+    _r15_link("yc");                # 5
+    cmd_rollback();                 # 6, 7: unlinks; 8: marker from 4
+    _r15_link("yd");                # 9
+    assert(_r15_live(scope, "yb") == 0 && _r15_live(scope, "yd") == 1, "seed");
+
+    assert_eq(cmd_rollback_run(0, "L"), 0, "--to L");
+    assert(_r15_live(scope, "yd") == 0 && _r15_live(scope, "ya") == 1, "...undoes what came after L");
+    assert_eq(_sy_entries(audit_path), 11, "...without replaying the earlier rollback (one unlink, one marker)");
+    assert_eq(_r15_sealed_from(audit_path, "4"), 1, "...one range from L's next line");
+    var size = _test_file_size(audit_path);
+    assert_eq(cmd_rollback_run(0, "L"), 0, "--to L again: nothing to do, exit 0");
+    assert_eq(cmd_rollback_run(0, "nope"), 1, "--to an unknown label exits 1");
+    assert_eq(_test_file_size(audit_path), size, "...and neither writes");
+    assert_eq(cmd_rollback_run(0, "k"), 0, "--to k");
+    assert_eq(_r15_live(scope, "ya"), 0, "...goes past L");
+    size = _test_file_size(audit_path);
+    assert_eq(cmd_rollback_run(0, "L"), 0, "--to L, now inside a rolled-back range: exit 0");
+    assert_eq(_test_file_size(audit_path), size, "...writing nothing");
+
+    # The most recent marker with the label is the one.
+    cmd_checkpoint_label("d");
+    _r15_link("ye");
+    cmd_checkpoint_label("d");
+    _r15_link("yf");
+    assert_eq(cmd_rollback_run(0, "d"), 0, "--to a label used twice");
+    assert(_r15_live(scope, "yf") == 0 && _r15_live(scope, "ye") == 1, "...goes to the most recent");
+
+    # F-061: a reversal whose entry the trail refuses is taken back, and the
+    # range is not sealed.
+    _r15_link("yg");
+    audit_test_fail_appends(1);
+    assert_eq(cmd_rollback_run(0, "d"), 1, "--to with the trail refusing entries exits 1");
+    audit_test_fail_appends(0);
+    assert_eq(_r15_live(scope, "yg"), 1, "...the link is put back");
+    assert_eq(_test_cstr_eq(hae_op(_r15_last(audit_path)), "link"), 1, "...and no marker was written");
+    assert_eq(cmd_rollback_run(0, "d"), 0, "re-run once the trail takes writes");
+    assert_eq(_r15_live(scope, "yg"), 0, "...undoes it");
+
+    _test_clear_env();
+    return 0;
+}
+
+# --steps names the marker it goes back to, from the trail. A label or ts
+# a hand edit made unprintable is left out, not written to the terminal.
+fn test_rollback_names_only_printable_fields() {
+    test_group("rollback --steps: prints a marker's label and ts only when printable (1.5.0)");
+
+    var env = _test_fresh_env();
+    var audit_path = load64(env + 8);
+    _r15_link("pa");
+    _r15_append_raw(audit_path,
+      "{\"ts\":\"2026\u001b[2J\",\"op\":\"rollback-marker\",\"label\":\"x\u001b]0;t\u0007\"}\n");
+    _r15_link("pb");
+    assert_eq(_cli_run(_cli_av("hapi rollback --steps 1")), 0, "rollback --steps 1");
+    var head = "rolling back 1 step, to the checkpoint on line 2\n";
+    assert(_cli_out_n > strlen(head) && memeq(_cli_out, head, strlen(head)) == 1,
+      "...names the marker by its line alone");
+    assert_eq(_test_substr(_cli_out, _cli_out_n, "\x1b"), 0 - 1, "...and prints no escape byte");
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cli_script_flags() {
+    test_group("cli: 1.5.0's flags, each on its own verb");
+
+    var verbs = _cli_av("inspect link unlink adopt rollback checkpoint status list check sync");
+    var i = 0;
+    while (i < load64(verbs)) {
+        var v = load64(verbs + 8 + i * 8);
+        _cli_flag_probe(v, "--quiet", 0, _test_cstr_eq(v, "status"));
+        _cli_flag_probe(v, "--steps", 1, _test_cstr_eq(v, "rollback"));
+        _cli_flag_probe(v, "--to", 1, _test_cstr_eq(v, "rollback"));
+        _cli_flag_probe(v, "--label", 1, _test_cstr_eq(v, "checkpoint"));
+        i = i + 1;
+    }
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var steps = "hapi: --steps takes a whole number from 1 to 999999999\n";
+    var to = "hapi: --to takes a label: 1 to 64 characters from A-Z a-z 0-9 . _ -,\n  not starting with -\n";
+    var lab = "hapi: --label takes a label: 1 to 64 characters from A-Z a-z 0-9 . _ -,\n  not starting with -\n";
+    _cli_expect(_cli_av("hapi rollback --steps 0"), 2, "", steps, "--steps 0");
+    _cli_expect(_cli_av("hapi rollback --steps x"), 2, "", steps, "--steps x");
+    _cli_expect(_cli_av("hapi rollback --steps -1"), 2, "", steps, "--steps -1");
+    _cli_expect(_cli_av("hapi rollback --steps 1x"), 2, "", steps, "--steps 1x");
+    _cli_expect(_cli_av("hapi rollback --steps 1000000000"), 2, "", steps, "--steps past nine digits");
+    _cli_expect(_cli_av("hapi rollback --steps"), 2, "", steps, "--steps with no value");
+    _cli_expect(_cli_av("hapi rollback --steps="), 2, "", steps, "--steps=");
+    _cli_expect(_cli_av("hapi rollback --steps x --steps 1"), 2, "", steps, "every --steps is checked");
+    _cli_expect(_cli_av("hapi rollback --to"), 2, "", to, "--to with no value");
+    _cli_expect(_cli_av("hapi rollback --to --dry-run"), 2, "", to, "--to takes no flag as its label");
+    _cli_expect(_cli_av("hapi rollback --to=-x"), 2, "", to, "--to=-x");
+    _cli_expect(_cli_av("hapi rollback --to a/b"), 2, "", to, "--to a/b");
+    _cli_expect(_cli_av("hapi checkpoint --label"), 2, "", lab, "--label with no value");
+    _cli_expect(_cli_av("hapi checkpoint --label="), 2, "", lab, "--label=");
+    var avs = _cli_av("hapi checkpoint --label");
+    _cli_add(avs, "a b");
+    _cli_expect(avs, 2, "", lab, "--label with a space");
+    _cli_expect(_cli_av("hapi rollback --steps 1 --to k"), 2, "",
+      "hapi: `rollback` takes --steps or --to, not both\n", "--steps and --to together");
+    assert_eq(_test_file_size(audit_path), 0, "no usage error touched the trail");
+
+    _r15_link("za");
+    _cli_expect(_cli_av("hapi checkpoint --label pre"), 0, "checkpoint `pre` written\n", "",
+      "hapi checkpoint --label pre");
+    _cli_expect(_cli_av("hapi checkpoint --label=x --dry-run"), 0,
+      "checkpoint `x` (dry-run; no entry written)\n", "", "--label=x --dry-run");
+    _cli_reset(scope);
+    _r15_link("zb");
+    assert_eq(_r15_live(scope, "zb"), 1, "seed: zb is linked for real");
+    assert_eq(_cli_run(_cli_av("hapi rollback --to pre")), 0, "hapi rollback --to pre");
+    var head = "rolling back to checkpoint `pre` on line 2 (";
+    assert(_cli_out_n > strlen(head) && memeq(_cli_out, head, strlen(head)) == 1, "...names where it goes");
+    assert(_r15_live(scope, "zb") == 0 && _r15_live(scope, "za") == 1, "...and goes there");
+    assert_eq(_cli_run(_cli_av("hapi rollback --steps 1")), 0, "hapi rollback --steps 1");
+    head = "rolling back 1 step, to the start of the trail\n";
+    assert(_cli_out_n > strlen(head) && memeq(_cli_out, head, strlen(head)) == 1, "...names where it goes");
+    assert_eq(_r15_live(scope, "za"), 0, "...and goes there");
+    _cli_expect(_cli_av("hapi rollback --steps 2"), 0,
+      "nothing to roll back (every entry is already rolled back)\n", "", "nothing left to step back over");
+
+    _test_clear_env();
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -4694,6 +5130,14 @@ fn main() {
     test_unlink_removes_made_dirs();
     test_rollback_and_prune_remove_made_dirs();
     test_created_dir_is_bounded();
+    test_status_quiet();
+    test_checkpoint_label();
+    test_rollback_steps();
+    test_rollback_from_is_validated();
+    test_rollback_errored_run_is_not_sealed();
+    test_rollback_to_label();
+    test_rollback_names_only_printable_fields();
+    test_cli_script_flags();
     return assert_summary();
 }
 

@@ -17,6 +17,15 @@
 # unlinked / overwrote / reorganized something, we leave it
 # alone. That makes rollback idempotent — running it twice
 # produces the same end state as running it once.
+#
+# 1.5.0 adds two ways to reach further back; the no-arg form above is
+# unchanged. `--steps N` reverses the N most recent checkpoint windows
+# still in effect; `--to <label>` reverses back to the most recent marker
+# `checkpoint --label` named so. Both step over a range an earlier
+# rollback already undid, which its closing marker records as `from`
+# (the line the range began on), so they are a multi-level undo rather
+# than a redo of the last one. Design: ADR 0007; the fields: ADR 0002,
+# 1.5.0 addendum.
 
 include "src/audit.cyr"
 include "src/audit_reader.cyr"
@@ -216,7 +225,161 @@ fn _hrb_report_unwritten(entry, rc, left): i64 {
     return audit_report_unwritten(hae_abs_target(entry), 0, left);
 }
 
-fn cmd_rollback(): i64 {
+fn cmd_rollback(): i64 { return cmd_rollback_run(0, 0); }
+
+# The line a closing marker's range began on, or 0 when `e` is no such
+# marker: no `from` (a checkpoint, or a rollback before 1.5.0), or one
+# that is not a line before the marker's own — digits only, few enough not
+# to wrap, at least 1. Such a marker is treated as a checkpoint, which only
+# ever makes a walk stop sooner.
+fn _hrb_from_line(e): i64 {
+    var f = hae_from(e);
+    if (f == 0) { return 0; }
+    var n = strlen(f);
+    if (n == 0 || n > 18) { return 0; }
+    var v = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(f + i);
+        if (c < 48 || c > 57) { return 0; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    if (v >= hae_lineno(e)) { return 0; }
+    return v;                     # 0 for "0": no line, as for no `from`
+}
+
+# The ops a rollback reverses.
+fn _hrb_reversible(op): i64 {
+    if (_hrb_cstr_eq(op, "link") == 1) { return 1; }
+    if (_hrb_cstr_eq(op, "unlink") == 1) { return 1; }
+    if (_hrb_cstr_eq(op, "adopt") == 1) { return 1; }
+    return 0;
+}
+
+# Walk back from EOF over what is still in effect, for `--steps` (steps >
+# 0) or `--to` (label), pushing the index of each reversible entry onto
+# `live`, newest first. A closing marker with a `from` ends a range an
+# earlier rollback undid: the walk jumps to the line before it, so neither
+# its reversals nor what they reversed are touched again. Every other
+# marker is a checkpoint. For --steps it closes a window, and counts only
+# if the window holds a live entry — back-to-back markers are one step,
+# and a window a rollback emptied is none. Returns the boundary marker's
+# index, -1 for the start of the trail, or -2 when the walk ran out; then
+# *windows_out says how many steps there were.
+fn _hrb_select(trail, steps, label, live, windows_out): i64 {
+    var i = vec_len(trail) - 1;
+    var windows = 0;
+    var in_window = 0;
+    var boundary = 0 - 2;
+    while (i >= 0 && boundary == 0 - 2) {
+        var e = vec_get(trail, i);
+        var op = hae_op(e);
+        var next = i - 1;
+        if (_hrb_cstr_eq(op, "rollback-marker") == 1) {
+            var f = _hrb_from_line(e);
+            if (f > 0) {
+                while (next >= 0 && hae_lineno(vec_get(trail, next)) >= f) { next = next - 1; }
+            } elif (steps > 0) {
+                if (in_window > 0) { windows = windows + 1; in_window = 0; }
+                if (windows == steps) { boundary = i; }
+            } elif (_hrb_cstr_eq(hae_label(e), label) == 1) {
+                boundary = i;
+            }
+        } elif (_hrb_reversible(op) == 1) {
+            vec_push(live, i);
+            in_window = in_window + 1;
+        }
+        i = next;
+    }
+    if (boundary == 0 - 2 && steps > 0) {
+        if (in_window > 0) { windows = windows + 1; }
+        if (windows == steps) { boundary = 0 - 1; }
+    }
+    store64(windows_out, windows);
+    return boundary;
+}
+
+# 1 when any marker in the trail carries `label`, inside a rolled-back
+# range or not.
+fn _hrb_label_anywhere(trail, label): i64 {
+    var i = 0;
+    while (i < vec_len(trail)) {
+        var e = vec_get(trail, i);
+        if (_hrb_cstr_eq(hae_op(e), "rollback-marker") == 1
+            && _hrb_cstr_eq(hae_label(e), label) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when `s` is printable ASCII, space through `~`.
+fn _hrb_printable(s): i64 {
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 32 || c > 126) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Name the marker a --steps / --to run goes back to. Its label and ts come
+# from the trail, where a hand edit can put any byte (the reader unescapes
+# \u001b), so each is printed only in a shape hapi itself writes: a label
+# that passes the label rule, a ts that is printable.
+fn _hrb_say_boundary(trail, b): i64 {
+    if (b < 0) { _hrb_puts("the start of the trail"); return 0; }
+    var e = vec_get(trail, b);
+    if (audit_label_ok(hae_label(e)) == 1) {
+        _hrb_puts("checkpoint `");
+        _hrb_puts(hae_label(e));
+        _hrb_puts("` on line ");
+    } else {
+        _hrb_puts("the checkpoint on line ");
+    }
+    _hrb_puts(_har_itoa(hae_lineno(e)));
+    if (hae_ts(e) != 0 && _hrb_printable(hae_ts(e)) == 1) {
+        _hrb_puts(" (");
+        _hrb_puts(hae_ts(e));
+        _hrb_puts(")");
+    }
+    return 0;
+}
+
+# A --steps / --to walk that ran out (`_hrb_select` returned -2). Nothing
+# was changed.
+fn _hrb_report_unreached(trail, steps, label, windows): i64 {
+    if (steps > 0) {
+        if (windows == 0) {
+            _hrb_puts("nothing to roll back (every entry is already rolled back)\n");
+            return 0;
+        }
+        _hrb_eputs("hapi: --steps ");
+        _hrb_eputs(_har_itoa(steps));
+        _hrb_eputs(" asks for more than the trail holds: ");
+        _hrb_eputs(_har_itoa(windows));
+        if (windows == 1) { _hrb_eputs(" step to roll back\n"); }
+        else { _hrb_eputs(" steps to roll back\n"); }
+        _hrb_eputs("  nothing was changed\n");
+        return 1;
+    }
+    if (_hrb_label_anywhere(trail, label) == 1) {
+        _hrb_puts("nothing to roll back (checkpoint `");
+        _hrb_puts(label);
+        _hrb_puts("` is in a range already rolled back)\n");
+        return 0;
+    }
+    _hrb_eputs("hapi: no checkpoint labelled `");
+    _hrb_eputs(label);
+    _hrb_eputs("` in the trail\n  nothing was changed\n");
+    return 1;
+}
+
+# `steps` 0 and `to_label` 0 is the v1.0 form: back to the most recent
+# marker of either kind. `steps` > 0 is --steps, `to_label` --to; the
+# command line refuses both at once, and checks the label (audit_label_ok).
+fn cmd_rollback_run(steps, to_label): i64 {
     # A trail that exists but will not read, or that has a malformed
     # interior line, is a conflict with the user's own history — surface
     # it rather than acting on a partial view. An ABSENT trail is still
@@ -241,12 +404,34 @@ fn cmd_rollback(): i64 {
         return 0;
     }
 
-    var marker = _hrb_find_marker(trail, n - 1);
-    var start = marker + 1;
-
-    if (start >= n) {
-        _hrb_puts("nothing to roll back (already at most recent marker)\n");
-        return 0;
+    # The entries to reverse, newest first, and the index the range
+    # begins at: its line is what the closing marker records as `from`.
+    var idxs = vec_new();
+    var first = 0;
+    var b = 0;
+    if (steps == 0 && to_label == 0) {
+        var marker = _hrb_find_marker(trail, n - 1);
+        var start = marker + 1;
+        if (start >= n) {
+            _hrb_puts("nothing to roll back (already at most recent marker)\n");
+            return 0;
+        }
+        var k = n - 1;
+        while (k >= start) { vec_push(idxs, k); k = k - 1; }
+        first = start;
+    } else {
+        var windows = 0;
+        b = _hrb_select(trail, steps, to_label, idxs, &windows);
+        if (b == 0 - 2) { return _hrb_report_unreached(trail, steps, to_label, windows); }
+        # Only --to gets here: a --steps boundary is counted only past a
+        # window that holds a live entry, so its range is never empty.
+        if (vec_len(idxs) == 0) {
+            _hrb_puts("nothing to roll back (already at checkpoint `");
+            _hrb_puts(to_label);
+            _hrb_puts("`)\n");
+            return 0;
+        }
+        first = b + 1;
     }
 
     # Prove the trail takes a write before reversing anything (F-055) —
@@ -261,14 +446,27 @@ fn cmd_rollback(): i64 {
         }
     }
 
+    if (steps > 0 || to_label != 0) {
+        _hrb_puts("rolling back ");
+        if (steps > 0) {
+            _hrb_puts(_har_itoa(steps));
+            if (steps == 1) { _hrb_puts(" step, to "); }
+            else { _hrb_puts(" steps, to "); }
+        } else {
+            _hrb_puts("to ");
+        }
+        _hrb_say_boundary(trail, b);
+        _hrb_puts("\n");
+    }
+
     var applied = 0;
     var skipped = 0;
     var errored = 0;
     var stop = 0;
 
-    var i = n - 1;
-    while (i >= start && stop == 0) {
-        var entry = vec_get(trail, i);
+    var x = 0;
+    while (x < vec_len(idxs) && stop == 0) {
+        var entry = vec_get(trail, vec_get(idxs, x));
         var op = hae_op(entry);
         var rc = 0;
         var dr_suffix = "";
@@ -360,13 +558,13 @@ fn cmd_rollback(): i64 {
         # records; rollback ignores them (they exist for forward
         # replay, not for re-reversal — same pattern as
         # unlink-entries-after-link rollback).
-        i = i - 1;
+        x = x + 1;
     }
 
     _hrb_puts("rolled back ");
     fmt_int(applied);
     _hrb_puts(" / ");
-    fmt_int(n - start);
+    fmt_int(vec_len(idxs));
     _hrb_puts(" entries");
     if (skipped > 0) {
         _hrb_puts(" (");
@@ -382,8 +580,20 @@ fn cmd_rollback(): i64 {
     # The guide promised "a second run … does nothing". A marker here,
     # the entry `checkpoint` writes, makes that true. Only after a clean
     # run that changed something: an errored one is meant to be re-run.
-    if (hapi_dry_run() == 0 && applied > 0 && errored == 0) {
-        var mk_t, mk_v = audit_append_rollback_marker_r();
+    #
+    # Since 1.5.0 the marker records `from`, the line the range began on,
+    # so --steps and --to can step over what this run undid. They also seal
+    # a range in which nothing needed reversing: their walk passes a sealed
+    # range, so the next `--steps 1` moves on to the window before instead
+    # of finding this one again. The no-arg form keeps its rule.
+    var seal = 0;
+    if (hapi_dry_run() == 0 && errored == 0) {
+        if (applied > 0) { seal = 1; }
+        if (steps > 0 || to_label != 0) { seal = 1; }
+    }
+    if (seal == 1) {
+        var from = _har_itoa(hae_lineno(vec_get(trail, first)));
+        var mk_t, mk_v = audit_append_marker_r(0, from);
         if (is_err_result(mk_t) == 1) {
             _hrb_eputs("hapi: rolled back, but could not append the closing marker\n");
             _hrb_eputs("  (a later rollback would re-reverse this run's entries)\n");

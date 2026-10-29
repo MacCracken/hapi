@@ -5,20 +5,24 @@
 
 ## Version
 
-**1.4.0** (2026-10-28) — `created_dir` on `op:link`, on the cyrius 6.7
-line (pin `6.7.18`). A link entry records the outermost directory its
-creation made (ADR 0002, 1.4.0 addendum). `unlink`, `sync --prune` and
-`rollback` remove those directories with the link: deepest first, only
-once empty, never above that directory, never through a symlink, and only
-after removing the link themselves. The field is additive, and 1.3.0
-reads a 1.4.0 trail unchanged. Its P(-1) (the *1.4.0 addendum* of
-[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)) caught
-**F-062** before it shipped: the removal walk resolved through a made
-directory swapped for a symlink. The manifest schema and the line shape
-are unchanged. Both suites pass on x86_64 and on aarch64 under qemu, and
-`tests/agnos.tcyr` also passes on agnos under mirshi.
+**1.5.0** (2026-10-28) — script-facing flags, on the cyrius 6.7 line (pin
+`6.7.18`). `status --quiet` keeps the rows and exits 0 on drift, 1 only on
+an actual error. `checkpoint --label <label>` names a marker, and
+`rollback --to <label>` goes back to it; `rollback --steps N` undoes the N
+most recent checkpoint windows still in effect. Both step over every range
+an earlier rollback undid, which its closing marker now records as `from`
+([ADR 0007](../adr/0007-rollback-steps-and-to.md); ADR 0002, 1.5.0
+addendum). The no-arg `rollback` is unchanged, and 1.1.1 – 1.4.0 read a
+1.5.0 trail as before. Its P(-1) is the *1.5.0 addendum* of
+[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md): no defect;
+F-063 (a write concurrent with a rollback is stepped over) accepted. The
+manifest schema and the line shape are unchanged. Both suites pass on
+x86_64 and on aarch64 under qemu, and `tests/agnos.tcyr` also passes on
+agnos under mirshi.
 
-Before it, 1.3.0 added `hapi sync` with no package (every package under
+Before it, 1.4.0 recorded `created_dir` on `op:link`, so `unlink`,
+`sync --prune` and `rollback` remove the directories `link` made (F-062
+caught before release). 1.3.0 added `hapi sync` with no package (every package under
 `HAPI_PACKAGE_ROOTS`) and `sync --prune` ([ADR
 0006](../adr/0006-sync-package-roots-and-prune.md)), and fixed F-061 (a
 removal whose trail entry failed after the pre-flight is now taken back).
@@ -85,7 +89,9 @@ checkpoint), and `--backup-to <dir>` (parsed on link / sync / adopt; effective
 on `link --force` / `adopt` only — `sync` never overwrites, so it
 is inert there) —
 opt-in pre-`--force` snapshot. Since 1.3.0 `sync` also takes `--prune`,
-and `--force` with it, which lifts prune's limit and nothing else.
+and `--force` with it, which lifts prune's limit and nothing else. Since
+1.5.0 `status` takes `--quiet`, `checkpoint` `--label <label>`, and
+`rollback` `--steps N` or `--to <label>`.
 
 ### Current command surface (frozen at v1.0)
 
@@ -94,12 +100,12 @@ and `--force` with it, which lifts prune's limit and nothing else.
 | `hapi inspect`        | 0 ok / 1 parse / 2 args  |
 | `hapi link`           | 0 ok / 1 fail / 2 args   |
 | `hapi unlink`         | 0 ok / 1 refused / 2 args|
-| `hapi rollback`       | 0 ok / 1 IO error        |
+| `hapi rollback`       | 0 ok / 1 IO error / 2 args |
 | `hapi adopt`          | 0 ok / 1 refused / 2 args|
 | `hapi list`           | 0 ok / 1 env error       |
 | `hapi sync`           | 0 ok / 1 fail / 2 args   |
 | `hapi status`         | 0 ok / 1 drift / 2 args  |
-| `hapi checkpoint`     | 0 ok / 1 IO error        |
+| `hapi checkpoint`     | 0 ok / 1 IO error / 2 args |
 | `hapi check --strict` | 0 ok / 1 parse / 2 args  |
 | `hapi --version`      | 0                        |
 | `hapi --help`         | 0                        |
@@ -108,7 +114,10 @@ Additive since 1.2.0: `hapi <verb> --help` / `-h` and `--version` /
 `-v` (exit 0), `--root=PATH` and `--backup-to=DIR`, `--` to end a
 verb's flags, and a lone `-` as a positional. Since 1.3.0: `hapi sync`
 with no package (every package under `HAPI_PACKAGE_ROOTS`; exit 2 when it
-is unset), and `sync --prune [--force]`. Nothing is accepted
+is unset), and `sync --prune [--force]`. Since 1.5.0: `status --quiet`
+(drift exits 0; 1 only on an error), `checkpoint --label <label>`, and
+`rollback --steps N` / `--to <label>` (exit 1, nothing changed, for an
+unknown label or more steps than the trail holds). Nothing is accepted
 before the verb, and a leading `--help` / `--version` answers whatever
 follows it.
 
@@ -122,7 +131,7 @@ for `--root` / `--backup-to` is refused rather than consumed (F-019 —
 spelling). On a line with more than one error, a flag error is named
 before an extra positional, and a usage error (2) before a `--root`
 denial (1). `status` exits 1 on drift, which is an assertion, not a
-predicate.
+predicate; `status --quiet` (1.5.0) is the predicate.
 
 Two accepted keys do nothing, and a state snapshot is the right place to
 say so: `--backup-to` is **inert on `sync`** (no `--force` there, so no
@@ -207,9 +216,12 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 - `src/cmd/adopt.cyr` — file-into-package move + symlink +
   manifest edit + audit
 - `src/cmd/rollback.cyr` — reverse-replay; handles
-  link / unlink / adopt entries
+  link / unlink / adopt entries. Since 1.5.0 `_hrb_select` picks the
+  range for `--steps` / `--to`, stepping over a closing marker's `from`
+  range (`_hrb_from_line` decides whether to trust it), and the closing
+  marker records `from`
 - `src/cmd/checkpoint.cyr` — appends `op:rollback-marker`
-  via `audit_append_rollback_marker_r`
+  via `audit_append_marker_r`, with a `label` under `--label`
 - `src/cmd/status.cyr` — read-only drift classifier over
   manifest [[link]] rows
 - `src/cmd/list.cyr` — trail walker; per-package live-link
@@ -278,6 +290,9 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   the field per ADR 0002's growth contract. `created_dir` (1.4.0) on
   `link` entries whose creation made a directory: the outermost one,
   the rest implied. One string, written last; pre-1.4.0 readers drop it.
+  On `rollback-marker` (1.5.0): `label`, from `checkpoint --label`, and
+  `from`, the line a rollback's range began on, on the marker closing it.
+  The reader also records each entry's line (`hae_lineno`).
 - **Readers**: `unlink`, `rollback`, `list`, `status`, `sync`
   — every verb that consults the trail walks via
   `src/audit_reader.cyr`.
@@ -291,7 +306,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. **1,035 assertions across 134 test
+- `tests/hapi.tcyr` — primary suite. **1,340 assertions across 142 test
   groups.** Re-derive rather than recount by hand — these figures have
   rotted twice, and the per-tier breakdown below drifted 16 groups
   short before the 2026-08-26 sweep:
@@ -303,19 +318,20 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
     | sort | uniq -c | sort -rn                 # per-tier breakdown
   ```
 
-  Groups by tier, as measured at 1.4.0: link 10, cli 10, sync 10,
-  cap 9, rollback 8, manifest 8, manifest_write 8, check 8, backup 7,
-  adopt 7, fs_link 6, dry-run 6, status 5, canonical 5, audit_reader 5,
-  audit 5, created_dir 4, audit-repair 4, unlink 4, list 3,
-  checkpoint 1, agnos_compat 1. The `cli` tier (1.2.0) runs `hapi_cli_run` with a
+  Groups by tier (first word of the group name), as measured at 1.5.0:
+  rollback 13, cli 11, link 10, sync 10, cap 9, manifest 8,
+  manifest_write 8, check 8, backup 7, adopt 7, status 6, fs_link 6,
+  dry-run 6, canonical 5, audit_reader 5, audit 5, created_dir 4,
+  audit-repair 4, unlink 4, list 3, checkpoint 2, agnos_compat 1. The `cli` tier (1.2.0) runs `hapi_cli_run` with a
   synthetic argv and its stdout / stderr captured through `dup2`, so the
   v1.0 messages are asserted byte for byte.
-- `tests/agnos.tcyr` — **67 assertions across 10 groups**, all
+- `tests/agnos.tcyr` — **77 assertions across 11 groups**, all
   target-neutral: the agnos-conditional paths (no-follow open,
   exclusive create, absent trail, trail and manifest round trips,
   backup copy, the fs shims, `link` / `status` / `unlink` with the
   scope at `/`, since 1.3.0 a package-root scan and a prune, and since
-  1.4.0 a made-directory round trip). `cyrius test` runs it on x86_64 and aarch64; the agnos
+  1.4.0 a made-directory round trip, since 1.5.0 `rollback --to` and
+  `--steps`). `cyrius test` runs it on x86_64 and aarch64; the agnos
   smoke builds it with `--agnos` and runs it under mirshi. Absolute
   paths only, no chmod, no environment — what an agnos run allows.
 
@@ -325,7 +341,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 beside it as shell harnesses. **CI runs both.**
 
 The suite itself also runs on aarch64 — `cyrius test --aarch64` under
-`qemu-aarch64` (1,035 / 1,035 and 67 / 67 at 1.4.0). **CI runs it** as of 1.0.12
+`qemu-aarch64` (1,340 / 1,340 and 77 / 77 at 1.5.0). **CI runs it** as of 1.0.12
 (`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
 qemu fails the step, it never skips). Before that the aarch64 step was
 compile-only, which is how the `O_NOFOLLOW` literal went unseen from
@@ -410,10 +426,13 @@ means downstream packagers (zugot recipes) and user manifests.
 
 The 2026-10-28 P(-1) pass is **closed** in 1.1.1. Its 1.2.0 addendum
 (the argument surface under cmdit) closed with F-060 fixed, its 1.3.0
-addendum (`sync`'s scan and prune) with F-061 fixed, and its 1.4.0
-addendum (`created_dir`) with F-062 caught before release.
-Every finding is fixed except F-059, accepted as an agnos kernel gap
-([`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)).
+addendum (`sync`'s scan and prune) with F-061 fixed, its 1.4.0
+addendum (`created_dir`) with F-062 caught before release, and its 1.5.0
+addendum (the script-facing flags) with no defect and F-063 accepted.
+Every finding is fixed except two that are accepted: F-059, an agnos
+kernel gap
+([`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)),
+and F-063, a boundary of concurrent use.
 Two upstream follow-ups came out of it, both filed upstream on
 2026-10-28: mirshi's divergences from the kernel (its roadmap, § *Open
 defects — kernel fidelity*) and agnos ext2's missing
@@ -422,8 +441,8 @@ rename-over-existing (an agnos issue file). [`roadmap.md`](roadmap.md)
 
 Forward-looking work is **not** listed here — it lives in
 [`roadmap.md`](roadmap.md), which carries only work that has not
-shipped. **Next is 1.5.0, script-facing flags** (`status --quiet`,
-`rollback --steps` / `--to`); 1.6.0 – 1.7.0 are planned there one theme
-per minor, with upstream-gated work
+shipped. **Next is 1.6.0, `--absolute`** (opt-in absolute symlink
+targets); 1.7.0 (`hapi fmt`) is planned there too, one theme per minor,
+with upstream-gated work
 listed apart. Open dogfood papercuts are in [`issues/`](issues/) (2
 open, 9 archived).

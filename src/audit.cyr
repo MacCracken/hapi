@@ -346,6 +346,15 @@ fn audit_format_unadopt(out, cap, pkg, pkg_version, manifest_hash,
 # Compose a rollback-marker entry. Minimal fields — just `ts`
 # and `op`. Used to delimit rollback windows (ADR 0002).
 fn audit_format_rollback_marker(out, cap): i64 {
+    return audit_format_marker(out, cap, 0, 0);
+}
+
+# A rollback-marker with its 1.5.0 additive fields (ADR 0002, 1.5.0
+# addendum), each written only when given, so a plain marker is
+# byte-identical to 1.4.0's. `label` is what `checkpoint --label` names it;
+# `from` (a decimal cstring) is the line a rollback's range began on, on
+# the closing marker rollback writes. A marker carries one or neither.
+fn audit_format_marker(out, cap, label, from): i64 {
     var pos = 0;
     _audit_ovf = 0;
     var ts = iso8601_now();
@@ -353,10 +362,40 @@ fn audit_format_rollback_marker(out, cap): i64 {
     _audit_emit_field(out, &pos, cap, "ts", ts);
     _audit_emit_comma(out, &pos, cap);
     _audit_emit_field(out, &pos, cap, "op", "rollback-marker");
+    if (label != 0 && strlen(label) > 0) {
+        _audit_emit_comma(out, &pos, cap);
+        _audit_emit_field(out, &pos, cap, "label", label);
+    }
+    if (from != 0 && strlen(from) > 0) {
+        _audit_emit_comma(out, &pos, cap);
+        _audit_emit_field(out, &pos, cap, "from", from);
+    }
     _audit_put8(out, &pos, cap, 125);
     _audit_put8(out, &pos, cap, 10);
     if (_audit_ovf == 1) { return 0 - 1; }
     return pos;
+}
+
+# 1 when `label` is a checkpoint label: 1 to 64 bytes of A-Z a-z 0-9
+# `.` `_` `-`, not starting with `-` (it would read as a flag). Narrow on
+# purpose: rollback prints labels back, and matches them byte for byte.
+fn audit_label_ok(label): i64 {
+    if (label == 0) { return 0; }
+    var n = strlen(label);
+    if (n == 0 || n > 64) { return 0; }
+    if (load8(label) == 45) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var c = load8(label + i);
+        var ok = 0;
+        if (c >= 65 && c <= 90) { ok = 1; }          # A-Z
+        if (c >= 97 && c <= 122) { ok = 1; }         # a-z
+        if (c >= 48 && c <= 57) { ok = 1; }          # 0-9
+        if (c == 46 || c == 95 || c == 45) { ok = 1; }   # . _ -
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
 }
 
 # Append a formatted entry to the audit trail. Shared core
@@ -538,8 +577,14 @@ fn audit_append_unadopt_r(pkg, pkg_version, manifest_hash,
 }
 
 fn audit_append_rollback_marker_r(): Result {
+    return audit_append_marker_r(0, 0);
+}
+
+# A marker with a `label` or a `from` (cstrings; 0 for none). A label is
+# at most 64 bytes and `from` a number, so the fixed buffer holds either.
+fn audit_append_marker_r(label, from): Result {
     var buf = alloc(4096);
-    var n = audit_format_rollback_marker(buf, 4096);
+    var n = audit_format_marker(buf, 4096, label, from);
     return _audit_append_bytes(buf, n);
 }
 

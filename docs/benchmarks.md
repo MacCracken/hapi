@@ -71,6 +71,8 @@ real HDD or under cgroup-throttled IO.
 
 | 1.4.0   | —         | —         | 0 bytes           | 2026-10-28 | `created_dir`: `fs_link.cyr`'s directory walk now says what it made, and removals take those directories with them. **Relative row**, same scratch path. Interleaved A/B against 1.3.0, five pairs — old 136–137 / 109–112, new 133–134 / 107–110: **flat to slightly faster**. The old walk called `mkdir` on every target's parent twice, the new one once. Per-process floor flat (old 118–119, new 116–117). Trail byte-identical: the harness's targets sit directly in `$HOME`, so no entry gains the field. DCE binary 603,424 → 607,560 bytes. |
 
+| 1.5.0   | —         | —         | 0 bytes           | 2026-10-28 | Script-facing flags: the trail reader records each entry's line and two marker fields (`HapiAuditEntry` 88 → 112 bytes), and rollback's walk was reworked for `--steps` / `--to`. **Relative row**, same scratch path. Interleaved A/B against 1.4.0, five pairs — old 135–137 / 112–113, new 131–134 / 109–110: **flat to slightly faster**, likely the reader now zeroing each entry 8 bytes at a time instead of 1. Per-process floor flat (old 118–120, new 116–118). Trail byte-identical (157,850 bytes / 350 entries). Rollback, measured once as it changed: `rollback --dry-run` over a 1,500-link trail takes 50 ms per run on 1.4.0 and on 1.5.0, and `--steps 1 --dry-run` the same. DCE binary 607,560 → 617,000 bytes. |
+
 ⚠ **On the 0.9.0 → 1.0.4 delta.** Three things changed at once between
 the two rows: the compiler (6.0.1 → 6.5.35), the kernel (7.0.9 → 7.1.9),
 and hapi's own `link_probe`. The 0.9.0 row is a single run; the 1.0.4 row

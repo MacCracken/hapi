@@ -35,7 +35,9 @@ Third leg of the terminal-aesthetics set:
   authentication).
 - **Lightweight audit trail** — every `link` / `unlink` / `adopt` /
   `sync` writes a JSONL entry under `$XDG_STATE_HOME/hapi/`. Clean
-  rollback is exactly *"replay the trail in reverse."*
+  rollback is exactly *"replay the trail in reverse."* Name a point with
+  `hapi checkpoint --label <name>` and return to it with
+  `hapi rollback --to <name>`, or step back with `--steps N`.
 - **Idempotent** — re-running `hapi sync` over a clean tree produces
   zero filesystem changes and zero audit growth.
 - **One-command recovery** — with `HAPI_PACKAGE_ROOTS` naming the
@@ -45,7 +47,7 @@ Third leg of the terminal-aesthetics set:
 
 ## Status
 
-**v1.4.0** — the v1.0 contract, frozen 2026-05-23, still holds:
+**v1.5.0** — the v1.0 contract, frozen 2026-05-23, still holds:
 command surface (ten verbs plus five global flags), `hapi.cyml`
 manifest schema (ADR 0001), and audit-trail format (ADR 0002) are all
 contractual. 1.2.0 is the first release to add surface, all of it
@@ -54,7 +56,9 @@ additive: argument parsing moved to
 `--root=PATH`, `--` and `hapi <verb> --help`, with every 1.1.1 message
 kept. 1.3.0 adds `hapi sync` with no package and `sync --prune`, the
 two dogfood issues on `sync`, and 1.4.0 has `unlink` / `rollback` remove
-the directories `link` made, recorded as proof in the trail. The releases
+the directories `link` made, recorded as proof in the trail. 1.5.0 adds
+script-facing flags: `status --quiet`, `checkpoint --label`, and
+`rollback --to <label>` / `--steps N`, a multi-level undo. The releases
 before 1.2.0 added teeth: 1.0.5 → 1.0.10 closed all
 twenty findings of the
 [2026-08-25 P(-1) audit](docs/audit/2026-08-25-audit.md), and 1.1.1
@@ -71,7 +75,7 @@ for the v1.0 surface.
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/hapi   # compile
 ./build/hapi --help                    # see the verb set
-cyrius test                            # 1035 + 67 assertions, two suites
+cyrius test                            # 1340 + 77 assertions, two suites
 ```
 
 A worked example lives at
@@ -84,15 +88,17 @@ file with `hapi adopt ~/.somerc somepackage`.
 - [`docs/guides/`](docs/guides/) — per-verb how-tos (link, sync,
   rollback, adopt, …) plus cross-cutting flags (`--root`,
   `--dry-run`, `--backup-to`) and the upstream-drift merge ritual.
-- [`docs/adr/`](docs/adr/) — six Architecture Decision Records: the
-  five frozen at v1.0, and 0006 (`sync`'s package roots and `--prune`).
+- [`docs/adr/`](docs/adr/) — seven Architecture Decision Records: the
+  five frozen at v1.0, 0006 (`sync`'s package roots and `--prune`) and
+  0007 (`rollback --steps` / `--to`).
 - [`docs/audit/`](docs/audit/) — the P(-1) security audit passes
   (index + four dated passes). The
   [2026-10-28 pass](docs/audit/2026-10-28-audit.md) is the current one;
   its findings F-035 – F-059 are repaired in 1.1.1, its 1.2.0
   addendum re-walks the argument surface under cmdit (F-060), and its
-  1.3.0 and 1.4.0 addenda cover `sync`'s scan and prune (F-061) and the
-  removal of directories `link` made (F-062).
+  1.3.0, 1.4.0 and 1.5.0 addenda cover `sync`'s scan and prune (F-061),
+  the removal of directories `link` made (F-062), and the script-facing
+  flags (F-063, accepted).
 - [`docs/benchmarks.md`](docs/benchmarks.md) — sync over a 100-pkg
   synthetic home.
 - [`docs/development/state.md`](docs/development/state.md) — live

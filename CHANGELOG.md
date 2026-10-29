@@ -6,6 +6,126 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.5.0] - 2026-10-28
+
+> **Script-facing flags.** `status --quiet` stops failing on drift, so a
+> `status && link --force` chain runs. `checkpoint --label` names a checkpoint, and
+> `rollback --to <label>` goes back to it; `rollback --steps N` undoes the N most
+> recent checkpoint windows. Both reach past the markers the no-arg form stops at,
+> and step over what an earlier rollback already undid, so rollback becomes a
+> multi-level undo. The no-arg form is unchanged. Two fields on `rollback-marker`
+> are additive under ADR 0002 (addendum), and hapi 1.1.1 – 1.4.0 read a 1.5.0 trail
+> as before. The design, and what was weighed instead, is
+> [ADR 0007](docs/adr/0007-rollback-steps-and-to.md).
+
+### Added
+
+- **`hapi status --quiet`**: the rows print as before, and only the exit code
+  changes. Drift exits 0. Exit 1 means an actual error: a manifest that will not
+  resolve or parse, no `$HOME`, or a target that could not be checked (an `ERROR`
+  row, counted on one stderr line). The default stays the assertion CI wants. This
+  is Tier-2 of the archived `status` exit-code issue.
+- **`hapi checkpoint --label <label>`** writes the marker with a `"label"` field.
+  - A label is 1 to 64 characters from `A-Z a-z 0-9 . _ -`, not starting with `-`.
+    Anything else is exit 2.
+  - A plain `hapi checkpoint` is byte-identical to 1.4.0's.
+- **`hapi rollback --to <label>`** reverses everything after the most recent marker
+  with that label, past any other checkpoints.
+  - An unknown label is exit 1, with nothing changed.
+  - If the checkpoint is already reached, or lies inside a range an earlier
+    rollback went past, there is nothing to roll back: exit 0.
+- **`hapi rollback --steps N`** undoes the N most recent checkpoint windows that are
+  still in effect.
+  - A window runs from one marker to the next. Back-to-back checkpoints are one
+    step, and a window a rollback emptied is none, so repeating `--steps 1` steps
+    back one window at a time.
+  - Asking for more steps than the trail holds is exit 1, with nothing changed and
+    the number available named.
+  - `--steps` takes 1 to 999999999; it cannot be combined with `--to` (exit 2).
+- Both forms print one line first naming where they go, such as
+  ``rolling back to checkpoint `pre-deploy` on line 41 (<ts>)``. Then come the same
+  reversal lines as the no-arg form.
+- **Rollback's closing marker records `"from"`**: the trail line its range began
+  on. That is how `--steps` and `--to` tell the end of an undo from a checkpoint, and
+  step over the undo: its reversing entries and what they reversed are never
+  touched again.
+  - Every closing marker carries it, the no-arg form's included.
+  - It is trusted only as digits naming a line before its own marker. Anything
+    else makes the marker a checkpoint.
+- **`--steps` and `--to` close a range with a marker even when nothing in it needed
+  reversing**, so the next step moves on. The no-arg form keeps 1.1.1's rule: a
+  marker only after a run that changed something.
+- The trail reader records each entry's line, and the entries `label` and `from`.
+
+### Security
+
+P(-1) ran: 1.5.0 grows the trail format and lets rollback choose what it reverses.
+The record is the *1.5.0 addendum* of
+[`docs/audit/2026-10-28-audit.md`](docs/audit/2026-10-28-audit.md). No defect was
+found.
+
+- **F-063 [LOW] — accepted.** A hapi write that runs while a rollback runs can land
+  inside the range the rollback closes, and later `--steps` / `--to` step over it.
+  It was reproduced against a 1,500-link rollback.
+  - It fails safe: the link stays, and `hapi unlink` still finds it.
+  - The no-arg form has hidden such an entry the same way since 1.1.1.
+  - Closing it would mean marking every entry rollback writes (ADR 0007).
+- **Hardening:** `--steps` names its boundary marker from the trail. It prints a
+  label or `ts` only in a shape hapi writes, so a hand-edited trail cannot send
+  escape sequences to the terminal.
+- **Every new guard is held by a test that a seeded revert turns red:** 38 of 38.
+  1.2.0's 15, 1.3.0's 26 and 1.4.0's 19 are still caught.
+  - The first run left four reverts green, and the pass closed each one.
+  - One was a rule unpinned since 1.1.1: an errored rollback writes no closing
+    marker. It is now tested in both forms.
+  - One was a redundant check, now removed.
+
+### Tests
+
+- `tests/hapi.tcyr` 1,035 → **1,340** assertions (134 → 142 groups). A new tier
+  covers:
+  - `status --quiet`: drift, clean, an `ERROR` row, a bad manifest, no package;
+  - `checkpoint --label`, and the label rule at its edges;
+  - `--steps`: one window at a time, several at once, back-to-back checkpoints,
+    more steps than exist, after the no-arg form, a window needing no reversal, and
+    a 1.4.0-style closing marker;
+  - `from`'s validation, eleven ways;
+  - `--to`: across an earlier rollback without replaying it, a label used twice,
+    an unknown one, one inside a rolled-back range, and F-061's take-back;
+  - an errored run not sealed, in both forms;
+  - unprintable label and `ts` bytes kept off the terminal;
+  - every new flag accepted on its verb and refused on the other nine, with each
+    usage error's exact message.
+- `tests/agnos.tcyr` 67 → **77** (10 → 11 groups): `checkpoint --label`,
+  `rollback --to` and `--steps` with the scope at `/`, under mirshi too.
+- Verified:
+  - x86_64, `--aarch64`, `--agnos` and `CYRIUS_DCE=1` builds;
+  - `cyrius lint` 0 warnings;
+  - `cyrius test` and `cyrius test --aarch64`;
+  - `cyrius fuzz` and `cyrius bench`;
+  - `scripts/concurrency-test.sh`;
+  - `scripts/agnos-smoke.sh` under mirshi, all five checks;
+  - `cyrius deps --verify` 114 / 114.
+
+  The 819-line golden against 1.4.0: 695 cases identical, 45 the version line, 74
+  the usage text's new rows, 5 a closing marker's `from`. A model-checked
+  differential fuzz of 50,000 lines against 1.4.0 found no mismatch. Lines without a
+  new flag are byte-identical, and every refused line matches the model.
+
+### Notes
+
+- **`--steps 1` is not the no-arg form.** They differ in three cases:
+  - right after a rollback, where the no-arg form finds nothing;
+  - after back-to-back checkpoints;
+  - over a window where nothing needed reversing, which only `--steps` / `--to`
+    close with a marker.
+- **A rollback from before 1.5.0** left a closing marker without `from`. `--steps`
+  and `--to` read it as a checkpoint and replay its range, with no net change: run
+  one more step.
+- **Benchmarks:** flat to slightly faster against 1.4.0 (cold 131–134 vs 135–137 ms),
+  trail byte-identical. `rollback --dry-run` over 1,500 links is flat at 50 ms. DCE
+  binary 607,560 → 617,000 bytes.
+
 ## [1.4.0] - 2026-10-28
 
 > **`created_dir` on `op:link`.** Through 1.3.0 the directories `link` made for a

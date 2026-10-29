@@ -55,6 +55,7 @@ enum HapiVerb {
 enum HapiFlag {
     HAPI_F_FORCE = 1; HAPI_F_STRICT = 2; HAPI_F_DRY_RUN = 4;
     HAPI_F_ROOT = 8; HAPI_F_BACKUP_TO = 16; HAPI_F_PRUNE = 32;
+    HAPI_F_QUIET = 64; HAPI_F_STEPS = 128; HAPI_F_TO = 256; HAPI_F_LABEL = 512;
 }
 
 # `hapi --version` prints `hapi <version>`. The number is
@@ -81,9 +82,14 @@ fn hapi_print_usage(): i64 {
     println("  link <path> [--force]     create symlinks for the package");
     println("  unlink <pkg>              remove this package's symlinks from the trail");
     println("  adopt <file> <pkg>        move a file into a package, link back");
-    println("  rollback                  reverse the audit trail to the last marker");
-    println("  checkpoint                append a rollback-marker to the audit trail");
-    println("  status <path>             show drift between manifest and on-disk symlinks");
+    println("  rollback [--steps N | --to <label>]");
+    println("                            reverse the audit trail to the last marker; or");
+    println("                            undo the N most recent checkpoint windows, or");
+    println("                            back to the checkpoint named <label>");
+    println("  checkpoint [--label <l>]  append a rollback-marker to the audit trail,");
+    println("                            optionally named for `rollback --to`");
+    println("  status <path> [--quiet]   show drift between manifest and on-disk symlinks;");
+    println("                            --quiet: drift exits 0, only an error exits 1");
     println("  list                      list packages tracked in the audit trail");
     println("  check <path> [--strict]   parse + display a manifest, optionally strict");
     println("  sync [<path>] [--prune]   re-apply a manifest (idempotent); with no path,");
@@ -120,6 +126,54 @@ fn _hapi_missing_value(flag, kind): i64 {
     _hapi_eputs(kind);
     _hapi_eputs(" argument (a value starting with `-` must be spelled `./-name`)\n");
     return 0;
+}
+
+# The one message for a missing or unusable --steps / --to / --label value
+# (1.5.0). Unlike --root's, it gives no `./-name` advice: these are not paths.
+fn _hapi_bad_value(flag): i64 {
+    _hapi_eputs("hapi: ");
+    _hapi_eputs(flag);
+    if (load8(flag + 2) == 115) {    # --steps
+        _hapi_eputs(" takes a whole number from 1 to 999999999\n");
+        return 0;
+    }
+    _hapi_eputs(" takes a label: 1 to 64 characters from A-Z a-z 0-9 . _ -,\n");
+    _hapi_eputs("  not starting with -\n");
+    return 0;
+}
+
+# --steps' value, or 0 when it is not a whole number from 1 to 999999999.
+fn _hapi_steps_value(s): i64 {
+    var n = strlen(s);
+    if (n == 0 || n > 9) { return 0; }
+    var v = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c < 48 || c > 57) { return 0; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+# Every value of a --to / --label must be a label, and every --steps a
+# count: each is checked, as each --root is, and the last is the one used.
+fn _hapi_values_fit(vh, idx, flag): i64 {
+    var n = cmdit_repeat_count(vh, idx);
+    var i = 0;
+    while (i < n) {
+        var v = cmdit_repeat_get(vh, idx, i);
+        var ok = 0;
+        if (load8(flag + 2) == 115) {
+            if (_hapi_steps_value(v) > 0) { ok = 1; }
+        } else {
+            ok = audit_label_ok(v);
+        }
+        if (ok == 0) { _hapi_bad_value(flag); return 0; }
+        i = i + 1;
+    }
+    return 1;
 }
 
 # Print a stock "unexpected argument" error. Every verb rejects a
@@ -197,9 +251,9 @@ fn _hapi_verb_flags(v): i64 {
     if (v == HAPI_V_LINK)       { return HAPI_F_FORCE | HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO; }
     if (v == HAPI_V_UNLINK)     { return HAPI_F_DRY_RUN; }
     if (v == HAPI_V_ADOPT)      { return HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO; }
-    if (v == HAPI_V_ROLLBACK)   { return HAPI_F_DRY_RUN; }
-    if (v == HAPI_V_CHECKPOINT) { return HAPI_F_DRY_RUN; }
-    if (v == HAPI_V_STATUS)     { return HAPI_F_ROOT; }
+    if (v == HAPI_V_ROLLBACK)   { return HAPI_F_DRY_RUN | HAPI_F_STEPS | HAPI_F_TO; }
+    if (v == HAPI_V_CHECKPOINT) { return HAPI_F_DRY_RUN | HAPI_F_LABEL; }
+    if (v == HAPI_V_STATUS)     { return HAPI_F_ROOT | HAPI_F_QUIET; }
     if (v == HAPI_V_LIST)       { return HAPI_F_ROOT; }
     if (v == HAPI_V_CHECK)      { return HAPI_F_STRICT; }
     if (v == HAPI_V_SYNC) {
@@ -263,7 +317,7 @@ fn _hapi_values_ok(vh, idx, flag, kind): i64 {
 # Render a verb's parse error in hapi's 1.1.1 words. Whatever the verb
 # does not take — an unknown flag (`--x`), a bundled short (`-xy`), a
 # bool given a value (`--force=1`) — is "unexpected", named as typed.
-fn _hapi_parse_error(vh, verb, f_root, f_backup): i64 {
+fn _hapi_parse_error(vh, verb, f_root, f_backup, f_steps, f_to, f_label): i64 {
     var e = cmdit_error(vh);
     if (e == CMDIT_ERR_UNKNOWN || e == CMDIT_ERR_BUNDLED || e == CMDIT_ERR_UNEXPECTED_VALUE) {
         _hapi_unexpected_flag(verb, cmdit_err_token(vh));
@@ -273,6 +327,9 @@ fn _hapi_parse_error(vh, verb, f_root, f_backup): i64 {
         var fi = cmdit_err_flag(vh);
         if (fi >= 0 && fi == f_root) { _hapi_missing_value("--root", "path"); return 2; }
         if (fi >= 0 && fi == f_backup) { _hapi_missing_value("--backup-to", "directory"); return 2; }
+        if (fi >= 0 && fi == f_steps) { _hapi_bad_value("--steps"); return 2; }
+        if (fi >= 0 && fi == f_to) { _hapi_bad_value("--to"); return 2; }
+        if (fi >= 0 && fi == f_label) { _hapi_bad_value("--label"); return 2; }
     }
     return cmdit_print_error(vh);    # out of memory, or a finalize error: cmdit's own words
 }
@@ -292,15 +349,21 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     var f_strict = _hapi_bool_flag(vh, set, HAPI_F_STRICT, "strict", "refuse unknown manifest keys");
     var f_dry    = _hapi_bool_flag(vh, set, HAPI_F_DRY_RUN, "dry-run", "print actions; no syscalls or audit writes");
     var f_prune  = _hapi_bool_flag(vh, set, HAPI_F_PRUNE, "prune", "also remove links whose row left the manifest");
+    var f_quiet  = _hapi_bool_flag(vh, set, HAPI_F_QUIET, "quiet", "exit 0 on drift; 1 only on an error");
     var f_root   = _hapi_value_flag(vh, set, HAPI_F_ROOT, "root", "path", "open a non-$HOME scope");
     var f_backup = _hapi_value_flag(vh, set, HAPI_F_BACKUP_TO, "backup-to", "dir",
       "snapshot a file before overwriting it");
+    var f_steps  = _hapi_value_flag(vh, set, HAPI_F_STEPS, "steps", "N", "undo the N most recent windows");
+    var f_to     = _hapi_value_flag(vh, set, HAPI_F_TO, "to", "label", "undo back to a named checkpoint");
+    var f_label  = _hapi_value_flag(vh, set, HAPI_F_LABEL, "label", "label", "name the checkpoint");
 
     var r = cmdit_parse_argv(vh, argc - 1, argv + 8);
     # The rest of cmdit_parse_verb: env fallbacks and required flags. hapi
     # registers neither today; finalizing means a flag that does later works.
     if (r == CMDIT_OK) { r = cmdit_finalize(vh); }
-    if (r == CMDIT_RESULT_ERR) { return _hapi_parse_error(vh, verb, f_root, f_backup); }
+    if (r == CMDIT_RESULT_ERR) {
+        return _hapi_parse_error(vh, verb, f_root, f_backup, f_steps, f_to, f_label);
+    }
     if (r == CMDIT_HELP) { hapi_print_usage(); return 0; }
     if (r == CMDIT_VERSION) { return hapi_print_version(); }
     if (cmdit_require_positionals_max(vh, _hapi_verb_positionals(v)) == CMDIT_RESULT_ERR) {
@@ -309,6 +372,13 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     }
     if (_hapi_values_ok(vh, f_root, "--root", "path") == 0) { return 2; }
     if (_hapi_values_ok(vh, f_backup, "--backup-to", "directory") == 0) { return 2; }
+    if (_hapi_values_fit(vh, f_steps, "--steps") == 0) { return 2; }
+    if (_hapi_values_fit(vh, f_to, "--to") == 0) { return 2; }
+    if (_hapi_values_fit(vh, f_label, "--label") == 0) { return 2; }
+    if (cmdit_repeat_count(vh, f_steps) > 0 && cmdit_repeat_count(vh, f_to) > 0) {
+        _hapi_eputs("hapi: `rollback` takes --steps or --to, not both\n");
+        return 2;
+    }
     # On sync, --force only lifts --prune's limit; alone it would read as
     # link's "overwrite", which sync never does.
     if (v == HAPI_V_SYNC && cmdit_get_bool(vh, f_force) == 1 && cmdit_get_bool(vh, f_prune) == 0) {
@@ -333,9 +403,13 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     if (v == HAPI_V_LINK)       { return cmd_link(p0, cmdit_get_bool(vh, f_force)); }
     if (v == HAPI_V_UNLINK)     { return cmd_unlink(p0); }
     if (v == HAPI_V_ADOPT)      { return cmd_adopt(p0, cmdit_positional(vh, 1)); }
-    if (v == HAPI_V_ROLLBACK)   { return cmd_rollback(); }
-    if (v == HAPI_V_CHECKPOINT) { return cmd_checkpoint(); }
-    if (v == HAPI_V_STATUS)     { return cmd_status(p0); }
+    if (v == HAPI_V_ROLLBACK) {
+        var steps = 0;
+        if (cmdit_repeat_count(vh, f_steps) > 0) { steps = _hapi_steps_value(cmdit_get_str(vh, f_steps)); }
+        return cmd_rollback_run(steps, cmdit_get_str(vh, f_to));
+    }
+    if (v == HAPI_V_CHECKPOINT) { return cmd_checkpoint_label(cmdit_get_str(vh, f_label)); }
+    if (v == HAPI_V_STATUS)     { return cmd_status_run(p0, cmdit_get_bool(vh, f_quiet)); }
     if (v == HAPI_V_LIST)       { return cmd_list(); }
     if (v == HAPI_V_CHECK)      { return cmd_check(p0, cmdit_get_bool(vh, f_strict)); }
     if (v == HAPI_V_SYNC) {

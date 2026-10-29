@@ -25,3 +25,4 @@ Decisions about hapi — what we chose, the context, and the consequences we acc
 - [0004 — `hapi adopt` semantics](0004-adopt-op-semantics.md)
 - [0005 — Capability-bounded roots](0005-capability-bounded-roots.md)
 - [0006 — `sync`: package roots and `--prune`](0006-sync-package-roots-and-prune.md)
+- [0007 — `rollback`: `--steps` and `--to`](0007-rollback-steps-and-to.md)

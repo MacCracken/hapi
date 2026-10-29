@@ -22,6 +22,8 @@ include "src/cmd/link.cyr"
 include "src/cmd/status.cyr"
 include "src/cmd/unlink.cyr"
 include "src/cmd/sync.cyr"
+include "src/cmd/rollback.cyr"
+include "src/cmd/checkpoint.cyr"
 
 var _ta_counter = 0;
 
@@ -409,6 +411,41 @@ fn test_made_dirs_round_trip() {
     return 0;
 }
 
+# 1.5.0: the marker fields and the walk are target-neutral, but they read
+# line numbers from the trail and reverse through the shims, so the round
+# trip runs here too.
+fn test_rollback_steps_and_to() {
+    test_group("rollback: --to a labelled checkpoint, then --steps, with the scope at /");
+
+    var d = _ta_scratch();
+    var pa = _fsl_path_join(d, "pa");
+    var pb = _fsl_path_join(d, "pb");
+    hapi_mkdir(pa, 0x1C0);
+    hapi_mkdir(pb, 0x1C0);
+    _ta_sync_manifest(pa, "agnos-ra", d, "a");
+    _ta_sync_manifest(pb, "agnos-rb", d, "b");
+    var trail = _fsl_path_join(d, "audit.jsonl");
+    link_set_scope_root("/");
+    audit_set_trail_path(trail);
+
+    assert_eq(cmd_link(pa, 0), 0, "link a");
+    assert_eq(cmd_checkpoint_label("mid"), 0, "checkpoint --label mid");
+    assert_eq(cmd_link(pb, 0), 0, "link b");
+    assert_eq(cmd_rollback_run(0, "mid"), 0, "rollback --to mid");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "b"))), HAPI_LP_ABSENT, "b is undone");
+    assert_eq(_ta_holds(_fsl_path_join(d, "a"), "a"), 1, "a stays");
+    var t = audit_read(trail);
+    var m = vec_get(t, vec_len(t) - 1);
+    assert_eq(_har_cstr_eq(hae_from(m), "3"), 1, "the closing marker records `from` 3");
+    assert_eq(_har_cstr_eq(hae_label(vec_get(t, 1)), "mid"), 1, "the label reads back");
+    assert_eq(cmd_rollback_run(1, 0), 0, "rollback --steps 1");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "a"))), HAPI_LP_ABSENT,
+      "steps over the undone range to a");
+    link_set_scope_root(0);
+    audit_set_trail_path(0);
+    return 0;
+}
+
 fn main(): i64 {
     test_nofollow_open();
     test_exclusive_create();
@@ -420,6 +457,7 @@ fn main(): i64 {
     test_verbs_with_root_scope();
     test_sync_scan_and_prune();
     test_made_dirs_round_trip();
+    test_rollback_steps_and_to();
     return assert_summary();
 }
 

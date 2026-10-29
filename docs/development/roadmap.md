@@ -9,13 +9,16 @@
 
 ## Status
 
-- **Shipped: 1.4.0** — `created_dir` on `op:link`: `unlink`, `sync
-  --prune` and `rollback` now remove the directories `link` made, with
-  proof (ADR 0002, 1.4.0 addendum). Its P(-1), the *1.4.0 addendum* of
-  [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md), caught
-  F-062 before it shipped. Before it, 1.3.0 added no-package `sync` and
-  `--prune`, and 1.2.x moved argument parsing to cmdit.
-- **Next: 1.5.0 — Script-facing flags** (below).
+- **Shipped: 1.5.0** — script-facing flags: `status --quiet`,
+  `checkpoint --label`, and `rollback --to <label>` / `--steps N`, which
+  step over what an earlier rollback undid
+  ([ADR 0007](../adr/0007-rollback-steps-and-to.md); ADR 0002, 1.5.0
+  addendum). Its P(-1) is the *1.5.0 addendum* of
+  [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md). Before it,
+  1.4.0 recorded and removed the directories `link` made, 1.3.0 added
+  no-package `sync` and `--prune`, and 1.2.x moved argument parsing to
+  cmdit.
+- **Next: 1.6.0 — `--absolute`** (below).
 - **1.6.0 → 1.7.0** — the rest of v1.x's additive work, one theme per
   minor. The command surface, ADR 0001's schema and ADR 0002's line
   shape stay frozen throughout; everything here is additive.
@@ -31,8 +34,9 @@
   only: a `1.N.x` adds nothing.
 - **Order: dependency first, then dogfood pressure.** cmdit went first
   (1.2.0) because every later flag registers through it; sync's two
-  dogfood issues went next (1.3.0), then `created_dir` (1.4.0). The order
-  of 1.5 – 1.7 is a proposal and can be swapped when pressure changes.
+  dogfood issues went next (1.3.0), then `created_dir` (1.4.0) and the
+  script-facing flags (1.5.0). The order of 1.6 – 1.7 is a proposal and
+  can be swapped when pressure changes.
 - **Standing obligations, per release** (CLAUDE.md, not repeated in each
   section): a P(-1) re-run when the release touches a path argument, a
   syscall, the capability surface or the trail format (each section
@@ -41,21 +45,6 @@
   suites run on x86_64, aarch64 and agnos.
 
 ---
-
-## 1.5.0 — Script-facing flags
-
-**P(-1): no** for `--quiet`. **Yes** for the rollback flags (they choose what is removed).
-
-- **`hapi status --quiet`** — return 0 unless there's an actual error (manifest parse failure, IO
-  error), flipping the exit-code semantic for scripted `&&` chains. The v1.0 workaround is `link
-  --dry-run` per [`guides/status.md`](../guides/status.md) *Exit-1 is an assertion, not a
-  predicate*.
-- **`hapi rollback --steps N` / `--to <marker>`** — refine the no-arg form, which stays the
-  default. **Open design question:** markers carry only `ts`, so `--to` needs a way to name one —
-  by position (`--to 2`, the second most recent), by timestamp, or by a `label` field that
-  `checkpoint --label` writes (additive under ADR 0002). Since 1.1.1, rollback writes its own
-  closing marker (F-056). Whether `--steps` / `--to` should count those markers, or skip them, has
-  to be decided too; an additive field that marks who wrote a marker would settle it.
 
 ## 1.6.0 — `--absolute`
 

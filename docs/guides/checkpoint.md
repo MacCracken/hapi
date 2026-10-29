@@ -7,18 +7,37 @@ everything before is sealed, everything after is in-scope.
 ## Synopsis
 
 ```sh
-hapi checkpoint
+hapi checkpoint [--label <label>] [--dry-run]
 ```
 
-No arguments.
+No positional argument.
 
 ## What it does
 
 1. Appends a single JSON line to `$XDG_STATE_HOME/hapi/audit.jsonl`:
    ```
    {"ts":"...","op":"rollback-marker"}
+   {"ts":"...","op":"rollback-marker","label":"pre-deploy"}    # with --label pre-deploy
    ```
 2. Returns 0.
+
+## Naming a checkpoint: `--label`
+
+Since 1.5.0, `--label` names the marker, so that
+[`hapi rollback --to <label>`](rollback.md#--to-label) can go back to it,
+past any checkpoints made after it:
+
+```sh
+$ hapi checkpoint --label pre-deploy
+checkpoint `pre-deploy` written
+```
+
+- **1 to 64 characters** from `A-Z a-z 0-9 . _ -`, not starting with `-`.
+  Anything else is exit 2, with nothing written.
+- **Labels need not be unique.** `rollback --to` takes the most recent
+  marker with the label, so a script can reuse one on every run.
+- A label is the one thing that tells your checkpoints apart. To list
+  them: `grep '"label"' ~/.local/state/hapi/audit.jsonl`.
 
 The marker writer (`audit_append_rollback_marker_r`) and the
 walk-to-marker logic in `hapi rollback` use the same audit-trail
@@ -59,9 +78,11 @@ dotfiles-zsh link too. The marker is the bookmark that says
 |------|---------------------------------------------------------------|
 | 0    | marker appended                                               |
 | 1    | audit-trail write failed (mkdir or write error)               |
+| 2    | bad usage: a positional argument, or a `--label` that is not a label |
 
 ## See also
 
-- [`rollback.md`](rollback.md) — the consumer of the marker.
+- [`rollback.md`](rollback.md) — the consumer of the marker, and its
+  `--to` / `--steps` forms.
 - [ADR 0002 — Audit-trail format](../adr/0002-audit-trail-format.md) — the
   `op:rollback-marker` entry shape and v1.0 freeze guarantee.

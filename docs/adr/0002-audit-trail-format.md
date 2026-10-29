@@ -110,6 +110,8 @@ window without `Breaking` every minor.
 |---------------|--------|------------|--------------------------------------------------------|
 | `backup_path` | string | Unreleased | absolute path to a pre-`--force` snapshot of the prior file content. Present on `link` / `adopt` entries when the writer was invoked with `--backup-to <dir>`; omitted otherwise. Readers that don't know this field ignore it per the growth contract. |
 | `created_dir` | string | 1.4.0 | absolute path of the **outermost directory this link's creation made**; every directory from it down to `abs_target`'s parent was made too. Present on `link` entries only, and only when the creation made a directory; written last. See the 1.4.0 addendum. |
+| `label`       | string | 1.5.0 | on a `rollback-marker` that `hapi checkpoint --label` wrote: the name `hapi rollback --to` finds it by. 1 to 64 of `A-Z a-z 0-9 . _ -`. See the 1.5.0 addendum. |
+| `from`        | string | 1.5.0 | on the `rollback-marker` that `hapi rollback` writes to close a run: the 1-based line of the first trail line the run covered, in decimal. See the 1.5.0 addendum. |
 
 ### Hash
 
@@ -331,3 +333,44 @@ Design note and the trade-off accepted (a directory emptied across two
 separate runs is left), with the P(-1) record:
 [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md), *1.4.0
 addendum*.
+
+## Addendum — 2026-10-28 (1.5.0): `label` and `from` on `rollback-marker`
+
+**Additive: the line shape and the required-field set are unchanged.** A
+`rollback-marker` may now carry one more field, and at most one:
+
+```
+{"ts":"...","op":"rollback-marker","label":"pre-deploy"}    # hapi checkpoint --label pre-deploy
+{"ts":"...","op":"rollback-marker","from":"12"}             # the marker closing a rollback
+```
+
+A plain `hapi checkpoint` is byte-identical to 1.4.0's. Both values are
+strings, as every value in this format must be (see the 1.4.0 addendum).
+
+**Why.** `hapi rollback --to <label>` needs a marker it can name, and
+`--steps` / `--to` need to tell the two writers of a marker apart: a
+boundary the user placed, and the end of a range rollback already undid.
+`from` says where that range began, so a later walk can step over all of
+it, the reversing entries and what they reversed, instead of redoing the
+undo. The design and what was weighed instead are
+[ADR 0007](0007-rollback-steps-and-to.md).
+
+**`from` is a line number** of the trail file, counted from 1, as
+`audit_corrupt_line` counts. The trail is append-only, so a line's number
+never changes. A `from` that is not digits naming a line before the
+marker's own is ignored, and the marker is read as a checkpoint. That only
+ever makes a walk stop sooner.
+
+**Compatibility.** Readers since 1.0 drop an unknown string field, and
+every hapi rollback before 1.5.0 stops at any `rollback-marker`, so an older
+binary's rollback behaves as it always did on a 1.5.0 trail. That was
+checked against the released 1.1.1, 1.2.1, 1.3.0 and 1.4.0 binaries. In the
+other direction, a closing marker written before 1.5.0 has no `from`;
+1.5.0 reads it as a checkpoint, and a walk past it replays the range it
+undid, to the same end state.
+
+**Not recorded.** Which entries a rollback wrote is not marked on those
+entries; the closing marker's range stands for them. A hapi write that
+runs concurrently with a rollback can land inside that range and be
+stepped over by later walks (F-063, accepted). `unlink`, which reads no
+markers, still finds it.

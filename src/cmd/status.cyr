@@ -18,6 +18,12 @@
 #   0  all rows OK
 #   1  any row drifted, or manifest parse failed
 #   2  bad usage
+#
+# `--quiet` (1.5.0) keeps the rows and changes only the exit code: drift
+# exits 0, and 1 means an actual error — a manifest that will not resolve
+# or parse, no $HOME, or a target that could not be checked (ERROR). It is
+# the predicate a `status && link --force` chain wants; the default stays
+# the assertion CI wants (guides/status.md).
 
 include "src/manifest.cyr"
 include "src/fs_link.cyr"
@@ -53,7 +59,9 @@ fn _hst_cstr_eq(a, b): i64 {
     return memeq(a, b, an);
 }
 
-fn cmd_status(pkg_arg): i64 {
+fn cmd_status(pkg_arg): i64 { return cmd_status_run(pkg_arg, 0); }
+
+fn cmd_status_run(pkg_arg, quiet): i64 {
     if (pkg_arg == 0) {
         _hst_eputs("usage: hapi status <package-dir|hapi.cyml>\n");
         return 2;
@@ -98,6 +106,7 @@ fn cmd_status(pkg_arg): i64 {
     var nlinks = vec_len(links);
     var ok = 0;
     var drift = 0;
+    var unchecked = 0;    # ERROR rows: the probe itself failed
 
     var i = 0;
     while (i < nlinks) {
@@ -159,6 +168,7 @@ fn cmd_status(pkg_arg): i64 {
 
         if (row_ok == 1) { ok = ok + 1; }
         else { drift = drift + 1; }
+        if (kind == HAPI_LP_ERROR) { unchecked = unchecked + 1; }
         i = i + 1;
     }
 
@@ -173,6 +183,14 @@ fn cmd_status(pkg_arg): i64 {
         _hst_puts(" drift)");
     }
     _hst_puts("\n");
+    if (quiet == 1) {
+        if (unchecked == 0) { return 0; }
+        _hst_eputs("hapi: ");
+        fmt_int_fd(2, unchecked);
+        if (unchecked == 1) { _hst_eputs(" target could not be checked (ERROR above)\n"); }
+        else { _hst_eputs(" targets could not be checked (ERROR above)\n"); }
+        return 1;
+    }
     if (drift > 0) { return 1; }
     return 0;
 }

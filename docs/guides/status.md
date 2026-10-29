@@ -7,7 +7,7 @@ mutation.
 ## Synopsis
 
 ```sh
-hapi status <package-dir|hapi.cyml>
+hapi status <package-dir|hapi.cyml> [--quiet] [--root <path>]
 ```
 
 ## What it does
@@ -67,6 +67,14 @@ Exit code 1 communicates drift; the next call should be
 | 1    | one or more rows drifted, or manifest parse failed            |
 | 2    | bad usage (no path argument)                                  |
 
+With `--quiet` (1.5.0), drift no longer fails:
+
+| code | meaning                                                       |
+|------|---------------------------------------------------------------|
+| 0    | the rows were checked, drifted or not                         |
+| 1    | an actual error: a manifest that will not resolve or parse, `$HOME` unset, or a target that could not be checked (an `ERROR` row; one line on stderr says how many) |
+| 2    | bad usage (no path argument)                                  |
+
 ## Exit-1 is an assertion, not a predicate
 
 `status`'s exit code answers *"does the on-disk state match the
@@ -80,6 +88,19 @@ hapi status pkg && hapi link --force pkg
 #   link --force never runs.
 ```
 
+Since 1.5.0, `--quiet` turns the assertion off. The rows print exactly
+as before, so you still see what is about to change, and only an actual
+error stops the chain:
+
+```sh
+hapi status --quiet pkg && hapi link --force pkg   # shows the drift, then links
+```
+
+The name says what it does to the drift, not to the output: `--quiet`
+does not silence the rows. It is not `git diff --quiet`, which prints
+nothing and answers in its exit code. For that, plain `status` already
+answers, with its rows sent to `/dev/null`.
+
 For the *"if a real run would succeed, apply it"* predicate use
 [`link --dry-run`](dry-run.md) instead — it returns the same
 exit codes as the real run (0 success / 1 conflict / 2 bad usage)
@@ -90,7 +111,8 @@ wants:
 hapi link --dry-run pkg && hapi link --force pkg   # composes
 ```
 
-Rule of thumb: reach for `status` when you want *"is this clean?"*
+Rule of thumb: reach for `status` when you want *"is this clean?"*,
+`status --quiet` when you want to *see* the drift without failing on it,
 and `link --dry-run` when you want *"would my next action succeed?"*.
 
 ## See also
