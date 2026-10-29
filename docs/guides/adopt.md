@@ -96,9 +96,19 @@ loop.
 | already inside the package         | refused — e.g. `~/.ssh -> dotfiles/pkg/ssh`; the file is package content (1.1.1) |
 | `hapi.cyml` is a symlink           | refused — the atomic rewrite would replace the link with a copy (1.1.1) |
 | audit trail not writable           | refused before anything moves (1.1.1) |
+| another package's source           | refused — reached through that package's link, the file is its content (1.7.1, F-070) |
+| audit trail not readable           | refused — hapi cannot tell whose file it is (1.7.1) |
 
 Every refusal is non-destructive: the target file (or whatever
 is at the target path) is untouched on refusal.
+
+**Two adopts at once** (1.7.1, F-071). adopt holds the package lock from
+reading the manifest to writing its trail entry, so two adopts into one
+package run one after the other. Its move never replaces anything at the
+package-side name. Through 1.7.0 two adopts deriving the same name both
+passed their checks, and the second replaced the first one's file. If
+the move cannot be undone after a later step fails, adopt says where the
+file is rather than `file restored`.
 
 ## Preserving the original bytes — `--backup-to`
 

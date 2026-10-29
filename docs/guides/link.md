@@ -72,7 +72,7 @@ data; if you genuinely want to replace one, `rm -rf` with your
 eyes on the screen and then re-run `hapi link`. The flag is a
 small escape hatch, not a sledgehammer.
 
-Four refusals are never overridden by `--force`, because following
+These refusals are never overridden by `--force`, because following
 the generic "rerun with --force" advice is exactly what made each one
 destructive:
 
@@ -85,6 +85,27 @@ destructive:
   that file — the only copy — and linked it to itself.
 - **The target lies beneath another row's target** (1.1.1). The outer
   row becomes a symlink, so the inner one would be written through it.
+  Since 1.7.1 the rows are compared where they physically are, so
+  `./.x/inner`, `/.x/inner` and a row reached through your own
+  `alias -> .x` count too (F-067).
+- **Two rows name the same target** (1.7.1), in different spellings
+  (`.a` and `./.a`). The second link would replace the first.
+- **The target resolves into another package's source** (1.7.1). With
+  package A's `.config/nvim -> A/nvim`, package B's row
+  `.config/nvim/init.lua` is A's file. hapi reads the trail for a row
+  reached through a symlink, and refuses (F-070).
+- **The row's source leads back to its own target** (1.7.1). The layout
+  people migrate from, `pkg/bashrc -> ~/.bashrc` with the row
+  `bashrc -> .bashrc`, would delete the only copy and leave a link to
+  itself. A source that holds its target, or one that loops, is refused
+  too (F-069). Move the file into the package with `hapi adopt` instead.
+
+`--force` replaces a file or a link in one step (1.7.1, F-068): the new
+link is made beside it and renamed over it, so if the link cannot be
+made the old file is still there. Once a run has written anything, each
+later row is checked again before it is written. A row whose place an
+earlier write changed stops the run: "a link this run made changed where
+it leads" (F-067).
 
 ### Under a symlinked parent
 
@@ -95,6 +116,12 @@ spelled parent, so under `~/.config -> data/deep/config` a row
 1.1.0 wrote there still counts as hapi's for `unlink` and `rollback`;
 `link` sees it as a conflict (`--force` replaces it) and `status`
 reports it.
+
+1.1.1 – 1.7.0 resolved that parent wrongly when it was a *relative*
+symlink (`~/.config -> dotfiles/config`), so the text they wrote may be
+off (F-065). The same rule applies: `unlink`, `sync --prune` and
+`rollback` accept it, `status` calls it `WRONG`, and
+`hapi link --force <pkg>` rewrites it.
 
 ## Preserving the original bytes — `--backup-to`
 
@@ -190,10 +217,11 @@ the link is taken back, and since 1.4.0 so are the directories it made.
 |------|------------------------------------------------------------------|
 | 0    | links applied (or already up-to-date)                            |
 | 1    | manifest parse failure, conflict without `--force`, IO error,    |
-|      | audit-trail write failure, or one of the three refusals          |
-|      | `--force` does **not** override: an existing directory, a row    |
-|      | whose **source is missing**, or a target that **resolves         |
-|      | outside the scope root**                                         |
+|      | audit-trail write failure, a row that moved mid-run, or one of   |
+|      | the refusals `--force` does **not** override (above): an existing|
+|      | directory, a missing source, a target outside the scope root, in |
+|      | the package, beneath or the same as another row's, in another    |
+|      | package's source, or a source that leads back to its target      |
 | 2    | bad usage — missing argument, an unknown flag, an extra          |
 |      | positional, or a flag-shaped value after `--root`/`--backup-to`  |
 |      | (`--absolute` takes no value: `--absolute=1` is an unknown flag) |

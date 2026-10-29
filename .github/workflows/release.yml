@@ -39,11 +39,11 @@ jobs:
   version-verify:
     name: Version verify
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       version: ${{ steps.extract.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract VERSION / tag / cyml version / changelog section
         id: extract
@@ -81,11 +81,11 @@ jobs:
   package:
     name: Package
     needs: version-verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       VERSION: ${{ needs.version-verify.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Cyrius toolchain
         # The cyrius.cyml `[package].cyrius` pin is the single source of truth
@@ -179,10 +179,10 @@ jobs:
       - name: Generate SHA256
         run: |
           cd out
-          sha256sum * > SHA256SUMS.bin
+          sha256sum -- * > SHA256SUMS.bin
 
       - name: Upload binary artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-bin
           path: |
@@ -199,11 +199,11 @@ jobs:
   source:
     name: Source tarball
     needs: version-verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       VERSION: ${{ needs.version-verify.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Create source tarball
         run: |
@@ -215,7 +215,7 @@ jobs:
           sha256sum "hapi-${VERSION}-src.tar.gz" > SHA256SUMS.src
 
       - name: Upload source artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-source
           path: |
@@ -232,14 +232,14 @@ jobs:
   release:
     name: GitHub release
     needs: [package, source, version-verify]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       VERSION: ${{ needs.version-verify.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download all release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist-raw
 
@@ -268,7 +268,7 @@ jobs:
           fi
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: "hapi ${{ env.VERSION }}"
           body_path: /tmp/body.md

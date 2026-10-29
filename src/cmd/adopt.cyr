@@ -127,6 +127,20 @@ fn _hap_manifest_has_source(m, source_cstr): i64 {
     return 0;
 }
 
+# Move the file back from the package after a failed adopt, and say what
+# happened. Through 1.7.0 the move back was a plain rename whose result
+# was ignored, and the message said `restored` regardless.
+fn _hap_say_restored(abs_source, abs_target): i64 {
+    if (hapi_rename_noreplace(abs_source, abs_target) == 0) {
+        _hap_eputs(" (file restored)\n");
+        return 0;
+    }
+    _hap_eputs("\n  the file could NOT be moved back; it is in the package at\n  ");
+    _hap_eputs(abs_source);
+    _hap_eputs("\n");
+    return 0 - 1;
+}
+
 fn cmd_adopt(file_arg, pkg_arg): i64 {
     if (file_arg == 0 || pkg_arg == 0) {
         _hap_eputs("usage: hapi adopt <file> <package-dir>\n");
@@ -256,6 +270,63 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
         return 1;
     }
 
+    # Nor is a file that is ANOTHER package's source, reached through
+    # a link that package made (F-070): adopt moved it from that package
+    # into this one and planted a link inside the other package's tree.
+    var others = hlnk_package_sources();
+    if (others == 0) {
+        _hap_eputs("hapi: the audit trail could not be read, so hapi cannot tell\n");
+        _hap_eputs("  whether the file is another package's; nothing was changed\n");
+        return 1;
+    }
+    var aphys = fsl_physical_target(abs_target);
+    var owner = hlnk_owner_at(others, aphys);
+    if (owner != 0) {
+        _hap_eputs("hapi: file is package `");
+        _hap_eputs(owner);
+        _hap_eputs("`'s source: ");
+        _hap_eputs(abs_target);
+        _hap_eputs("\n  (it resolves to ");
+        _hap_eputs(aphys);
+        _hap_eputs("); change it through that package\n");
+        return 1;
+    }
+
+    # From the manifest read to the trail entry, adopt holds the package
+    # lock (F-071). Through 1.7.0 its checks — no row has this source or
+    # target, nothing sits at the package-side name — ran with nothing
+    # held, and the lock covered only the append. Two adopts deriving the
+    # same name both passed, and the second rename replaced the first
+    # one's file: the user's only copy. A --dry-run changes nothing and
+    # takes no lock.
+    # A package that is not one — no manifest, or one that does not parse
+    # — is reported as such, before the lock, which needs its directory.
+    var pre_t, pre_v = hapi_mf_parse_file_r(manifest_path);
+    if (is_err_result(pre_t) == 1) {
+        _hap_eputs("hapi: ");
+        _hap_eputs(hapi_mf_err_msg(pre_v));
+        _hap_eputs(" (");
+        _hap_eputs(manifest_path);
+        _hap_eputs(")\n");
+        return 1;
+    }
+    var lk = 0 - 1;
+    if (hapi_dry_run() == 0) {
+        lk = manifest_lock(manifest_path);
+        if (lk < 0) {
+            _hap_eputs("hapi: could not lock the package directory of ");
+            _hap_eputs(manifest_path);
+            _hap_eputs("\n");
+            return 1;
+        }
+    }
+    var rc = _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs);
+    if (lk >= 0) { manifest_unlock(lk); }
+    return rc;
+}
+
+# The rest of cmd_adopt, under the package lock when the run writes.
+fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     # Parse the manifest (must exist).
     var mr_t, mr_v = hapi_mf_parse_file_r(manifest_path);
     if (is_err_result(mr_t) == 1) {
@@ -357,7 +428,7 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     var pf_t, pf_v = audit_preflight_r();
     if (is_err_result(pf_t) == 1) {
         _hap_eputs("hapi: audit trail is not writable; refusing to adopt\n  ");
-        _hap_eputs(audit_trail_path());
+        _hap_eputs(audit_trail_path_shown());
         _hap_eputs("\n  every hapi write must be auditable; nothing was changed\n");
         return 1;
     }
@@ -388,37 +459,46 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
         return 1;
     }
 
-    # 1. Move the file into the package (sys_rename).
-    var rrc = hapi_rename(abs_target, abs_source);
+    # 1. Move the file into the package, never over anything there
+    # (F-071): the probe above and this move are one step only because
+    # every hapi writer holds the lock, and a non-hapi writer does not.
+    # The target is checked again for the same reason.
+    if (link_probe_kind(link_probe(abs_target)) != HAPI_LP_FILE) {
+        _hap_eputs("hapi: target changed before it could be moved: ");
+        _hap_eputs(abs_target);
+        _hap_eputs("\n  (nothing was moved)\n");
+        return 1;
+    }
+    var rrc = hapi_rename_noreplace(abs_target, abs_source);
     if (rrc < 0) {
         _hap_eputs("hapi: rename failed (");
         _hap_eputs(abs_target);
         _hap_eputs(" -> ");
         _hap_eputs(abs_source);
-        _hap_eputs(")\n");
+        if (rrc == 0 - 17) { _hap_eputs(": the package-side name now exists"); }
+        _hap_eputs(")\n  (nothing was moved)\n");
         return 1;
     }
 
     # 2. Create the symlink back. Same relative-target math as link.
     var crc = link_create(rel, abs_target);
     if (crc < 0) {
-        # Rollback the move on failure.
-        hapi_rename(abs_source, abs_target);
+        # Move it back — never over something that appeared meanwhile.
         _hap_eputs("hapi: symlink failed at ");
         _hap_eputs(abs_target);
-        _hap_eputs(" (file restored)\n");
+        _hap_say_restored(abs_source, abs_target);
         return 1;
     }
 
-    # 3. Append the [[link]] row to the manifest.
-    var mwrc = manifest_append_link_row(manifest_path, source_cstr, target_cstr);
+    # 3. Append the [[link]] row to the manifest, under the lock held.
+    var mwrc = manifest_append_link_row_locked(manifest_path, source_cstr, target_cstr);
     if (mwrc < 0) {
         # Undo symlink + move on failure to keep the world consistent.
         hapi_unlink(abs_target);
-        hapi_rename(abs_source, abs_target);
         _hap_eputs("hapi: manifest edit failed (");
         _hap_eputs(hapi_mfw_err_msg(0 - mwrc));
-        _hap_eputs("); filesystem restored\n");
+        _hap_eputs(")");
+        _hap_say_restored(abs_source, abs_target);
         return 1;
     }
 

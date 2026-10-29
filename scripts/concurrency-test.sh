@@ -147,6 +147,37 @@ check "stray tmp files"    "$stray3" "0"
 "$HAPI" fmt --check "$PKG2" > /dev/null 2>&1 && echo "  ok    and it is formatted" || { echo "  FAIL  not formatted after a final fmt"; FAIL=1; }
 grep -q yyyyy "$PKG2/hapi.cyml" && echo "  ok    body preserved" || { echo "  FAIL  body lost"; FAIL=1; }
 
+# ── 1.7.1: adopts deriving one package-side name (F-071) ────────────
+# adopt's checks ran before the package lock, and its move was a plain
+# rename(2): two adopts whose files derive one name in the package both
+# passed, and the second replaced the first one's file, the user's only
+# copy (34 losses in 200 runs on 1.7.0). Each round, both contents must
+# survive, in the package or where they were, and exactly one adopt win.
+ROUNDS=40
+echo "1.7.1: two adopts deriving one package-side name, $ROUNDS rounds"
+HOME3="$WORK/home3"; STATE3="$WORK/state3"; PKG3="$WORK/pkg3"
+lost=0; notone=0
+r=1
+while [ $r -le $ROUNDS ]; do
+    rm -rf "$HOME3" "$STATE3" "$PKG3"
+    mkdir -p "$HOME3/.config/a" "$HOME3/.config/b" "$STATE3" "$PKG3"
+    printf '[package]\nname = "conc3"\nversion = "1.0.0"\n' > "$PKG3/hapi.cyml"
+    echo "A $r" > "$HOME3/.config/a/config"
+    echo "B $r" > "$HOME3/.config/b/config"
+    HOME="$HOME3" XDG_STATE_HOME="$STATE3" "$HAPI" adopt "$HOME3/.config/a/config" "$PKG3" > /dev/null 2>&1 &
+    HOME="$HOME3" XDG_STATE_HOME="$STATE3" "$HAPI" adopt "$HOME3/.config/b/config" "$PKG3" > /dev/null 2>&1 &
+    wait
+    # grep -r reads regular files and skips symlinks, so each content
+    # counts only where its bytes really are.
+    grep -rqsx "A $r" "$HOME3" "$PKG3" || lost=$((lost + 1))
+    grep -rqsx "B $r" "$HOME3" "$PKG3" || lost=$((lost + 1))
+    rows=$(grep -c '^\[\[link\]\]' "$PKG3/hapi.cyml" || true)
+    [ "$rows" = "1" ] || notone=$((notone + 1))
+    r=$((r + 1))
+done
+check "contents lost"                    "$lost"   "0"
+check "rounds without exactly one adopt" "$notone" "0"
+
 if [ $FAIL -eq 0 ]; then
     echo "PASS: concurrency harness"
 else

@@ -29,6 +29,13 @@ hapi status <package-dir|hapi.cyml> [--quiet] [--root <path>]
 | `DIR`          | a directory lives at the target                        |
 | `ERROR`        | probe failed (permission, etc.)                        |
 
+**After upgrading to 1.7.1**, a link an older hapi made under a *relative*
+symlinked parent (`~/.config -> dotfiles/config`) may show `WRONG`.
+1.1.1 – 1.7.0 computed its text from a mis-resolved directory (F-065),
+so some of those links dangle and some resolve by a longer path.
+`hapi link --force <pkg>` rewrites them, and `unlink` and `rollback`
+still remove them as hapi's.
+
 ## Example: clean state
 
 ```sh

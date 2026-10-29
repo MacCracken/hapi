@@ -271,3 +271,19 @@ The schema is unchanged. Two of its properties set what `fmt` can do:
   parser an un-escape.
 
 Design and alternatives: [ADR 0008](0008-hapi-fmt.md).
+
+## Addendum — 2026-10-29 (1.7.1): an unterminated value, and two spellings of one target
+
+**A value with no closing quote is an error** (`a value has no closing
+quote`, F-074). Through 1.7.0 the string was read to the end of the
+header. So a manifest cut mid-row by a torn read or a crashed editor
+parsed cleanly, with a truncated target, and `link` wrote it. No manifest
+this ADR describes has an open value, since every value is a
+double-quoted string, so no valid manifest changes meaning. The parse of
+every other byte is as before.
+
+**Two rows naming one target in different spellings** (`.a` and `./.a`)
+still pass the parser, whose duplicate check compares the values as
+written. Changing that would change what parses. `link` refuses them
+instead, comparing the rows at their physical locations (F-067), with
+`two rows name the same target`, before anything is written.

@@ -161,7 +161,13 @@ fn _hmw_itoa(n): i64 {
 # everything beyond it at exit 0. ADR 0001 sanctions an arbitrarily
 # long markdown body below the `---` separator, so that size is
 # reachable without the user doing anything unusual.
+# Set by _hmw_slurp when it refused a read because the file changed
+# under it, as opposed to one it could not open or read at all.
+var _hmw_torn = 0;
+fn manifest_read_was_torn(): i64 { return _hmw_torn; }
+
 fn _hmw_slurp(path, out_len): i64 {
+    _hmw_torn = 0;
     var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) { return 0; }
     var size = xlseek(fd, 0, 2);              # SEEK_END
@@ -175,14 +181,25 @@ fn _hmw_slurp(path, out_len): i64 {
     var rgo = 1;
     while (rgo == 1) {
         var n = file_read(fd, buf + total, cap - total);
-        if (n <= 0) { rgo = 0; }
+        # A failed read is not the end of the file (F-073). Through 1.7.0
+        # it was taken as one, and adopt committed the bytes read so far —
+        # header, rows and body cut at the error.
+        if (n < 0) { file_close(fd); return 0; }
+        if (n == 0) { rgo = 0; }
         else {
             total = total + n;
             if (total >= cap) { rgo = 0; }
         }
     }
+    var after = xlseek(fd, 0, 2);
     file_close(fd);
-    if (total > size) { return 0; }           # grew mid-read: refuse
+    # The bytes read must be the whole file, as it was when the read
+    # began and still is (F-073). A file that grew or shrank meanwhile is
+    # one another program is rewriting in place, and its bytes are a mix:
+    # adopt and fmt committed such a read, and prune acted on half a
+    # manifest. A writer that pauses across hapi's whole run with the
+    # size unchanged is not detected.
+    if (total != size || after != size) { _hmw_torn = 1; return 0; }
     store64(out_len, total);
     return buf;
 }
@@ -307,6 +324,15 @@ fn manifest_append_link_row(manifest_path, source, target): i64 {
     var rc = _hmw_append_unlocked(manifest_path, source, target);
     _hmw_unlock(lk);
     return rc;
+}
+
+# manifest_append_link_row for a caller that already holds manifest_lock
+# (adopt, since 1.7.1: F-071).
+fn manifest_append_link_row_locked(manifest_path, source, target): i64 {
+    if (_hmw_representable(source) == 0) { return 0 - HapiMfwUnrepresentable; }
+    if (_hmw_representable(target) == 0) { return 0 - HapiMfwUnrepresentable; }
+    if (hapi_mfw_manifest_is_symlink(manifest_path) == 1) { return 0 - HapiMfwManifestIsSymlink; }
+    return _hmw_append_unlocked(manifest_path, source, target);
 }
 
 # 1 when the manifest's line ending is CR LF, judged by its first line.

@@ -209,3 +209,33 @@ an absolute link can only be removed by 1.6.0 or later.
 expect. A plain `sync` would then keep a package absolute without the
 flag. But `status` would depend on the trail, and after a trail loss it
 would call every absolute link wrong.
+
+## Addendum — 2026-10-29 (1.7.1): the physical parent, resolved correctly, and the text 1.1.1–1.7.0 wrote
+
+The 1.1.1 addendum computes the text from the directory the link
+physically sits in. The resolver behind it dropped the first byte of every
+relative symlink text it followed (F-065): with `~/.config ->
+dotfiles/config`, the parent of `.config/nvim/init.lua` resolved to
+`~/otfiles/config/nvim`. The text 1.1.1–1.7.0 wrote there,
+`../../../dotfiles/nvim/init.lua`, sometimes resolves by luck and
+sometimes dangles. 1.7.1 resolves the parent correctly, so the text for
+that row is now `../../nvim/init.lua`.
+
+**Removal keeps accepting the old text**, as it has accepted 1.1.0's
+lexical text since F-046. `fsl_link_text_matches` recognizes four texts
+as hapi's: today's, the absolute text, the lexical-parent text, and the
+text 1.7.0's resolver computes. 1.7.0's resolver is kept verbatim as
+`_fsl_resolve_path_legacy`, used for that match and nothing else.
+`unlink`, `sync --prune` and `rollback` therefore remove links an older
+hapi made, and the trail and the filesystem do not part ways on upgrade.
+
+**Creation and `status` accept only today's texts**, the relative one and
+the absolute one. A link with the old text is `WRONG` in `status` and a
+conflict to `link`, and `hapi link --force <pkg>` rewrites it. A no-arg
+`sync` refuses such a package until then.
+
+**Weighed and not taken:** treating the old text as hapi's own but stale,
+and rewriting it without `--force`. That is new planner behaviour in a
+patch release. The old text also proves only that an older hapi computed
+it, not that the link still names the right file, so the user decides, as
+with F-046.

@@ -442,7 +442,7 @@ fn cmd_rollback_run(steps, to_label): i64 {
         var pf_t, pf_v = audit_preflight_r();
         if (is_err_result(pf_t) == 1) {
             _hrb_eputs("hapi: audit trail is not writable; refusing to roll back\n  ");
-            _hrb_eputs(audit_trail_path());
+            _hrb_eputs(audit_trail_path_shown());
             _hrb_eputs("\n  every hapi write must be auditable; nothing was changed\n");
             return 1;
         }

@@ -14,9 +14,13 @@ concurrency:
 jobs:
   build-and-test:
     name: Build & Test
-    runs-on: ubuntu-latest
+    # Pinned to the LTS, not `ubuntu-latest`: that label still meant 24.04
+    # when 26.04 shipped, and it moves on GitHub's schedule rather than
+    # hapi's. release.yml pins the same image, so a release builds where
+    # CI tested.
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Cyrius toolchain
         # The cyrius.cyml `[package].cyrius` pin is the single source of truth

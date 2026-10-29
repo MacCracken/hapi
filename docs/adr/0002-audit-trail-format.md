@@ -404,3 +404,19 @@ earlier versions read a 1.6.0 trail without error. They do not know the
 absolute text, so they treat an absolute link as not hapi's and leave it
 in place. That was checked against the released 1.1.1, 1.2.1, 1.3.0,
 1.4.0 and 1.5.0 binaries.
+
+## Addendum — 2026-10-29 (1.7.1): only an absolute base locates the trail
+
+*Location* gives `$XDG_STATE_HOME/hapi/audit.jsonl`, falling back to
+`$HOME/.local/state/hapi/audit.jsonl`. Through 1.7.0 the code went
+further than this ADR. With HOME unset or empty it used
+`/tmp/.local/state`, and a relative `XDG_STATE_HOME` or HOME was used
+under whatever the cwd was (F-072). Either can be a directory another
+local user owns, whose planted entries then drive `rollback`.
+
+**1.7.1 follows the XDG Base Directory spec exactly.** A relative
+`XDG_STATE_HOME` is invalid and ignored, so the fallback applies; the
+fallback needs an absolute HOME. With neither there is no trail.
+Readers report *no audit-trail location*, writers fail their pre-flight,
+and no verb that needs the trail acts. The line shape, the fields and
+the reader contract are unchanged.

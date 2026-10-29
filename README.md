@@ -47,7 +47,7 @@ Third leg of the terminal-aesthetics set:
 
 ## Status
 
-**v1.7.0** — the v1.0 contract, frozen 2026-05-23, still holds:
+**v1.7.1** — the v1.0 contract, frozen 2026-05-23, still holds:
 command surface (ten verbs plus five global flags), `hapi.cyml`
 manifest schema (ADR 0001), and audit-trail format (ADR 0002) are all
 contractual. 1.2.0 is the first release to add surface, all of it
@@ -61,7 +61,10 @@ script-facing flags: `status --quiet`, `checkpoint --label`, and
 `rollback --to <label>` / `--steps N`, a multi-level undo. 1.6.0 adds
 `--absolute`, for links that should name their source by its full path;
 either shape counts as hapi's link. 1.7.0 adds `hapi fmt`, which rewrites a
-manifest's header in canonical form without changing its hash. The releases
+manifest's header in canonical form without changing its hash, and 1.7.1
+repairs the [2026-10-29 P(-1) pass](docs/audit/2026-10-29-audit.md): a
+relative symlink's text had lost its first byte in the resolver since
+1.1.1, which left the capability boundary open for relative links. The releases
 before 1.2.0 added teeth: 1.0.5 → 1.0.10 closed all
 twenty findings of the
 [2026-08-25 P(-1) audit](docs/audit/2026-08-25-audit.md), and 1.1.1
@@ -78,7 +81,7 @@ for the v1.0 surface.
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/hapi   # compile
 ./build/hapi --help                    # see the verb set
-cyrius test                            # 1643 + 88 assertions, two suites
+cyrius test                            # 1797 + 98 assertions, two suites
 ```
 
 A worked example lives at
@@ -95,9 +98,11 @@ file with `hapi adopt ~/.somerc somepackage`.
   five frozen at v1.0, 0006 (`sync`'s package roots and `--prune`), 0007
   (`rollback --steps` / `--to`) and 0008 (`hapi fmt`).
 - [`docs/audit/`](docs/audit/) — the P(-1) security audit passes
-  (index + four dated passes). The
-  [2026-10-28 pass](docs/audit/2026-10-28-audit.md) is the current one;
-  its findings F-035 – F-059 are repaired in 1.1.1, its 1.2.0
+  (index + five dated passes). The
+  [2026-10-29 pass](docs/audit/2026-10-29-audit.md) is the current one:
+  F-064 – F-075, repaired in 1.7.1, with two more tiers planned. Before
+  it, the [2026-10-28 pass](docs/audit/2026-10-28-audit.md)'s findings
+  F-035 – F-059 were repaired in 1.1.1, its 1.2.0
   addendum re-walks the argument surface under cmdit (F-060), and its
   1.3.0 – 1.7.0 addenda cover `sync`'s scan and prune (F-061), the
   removal of directories `link` made (F-062), the script-facing flags
@@ -107,8 +112,8 @@ file with `hapi adopt ~/.somerc somepackage`.
 - [`docs/development/state.md`](docs/development/state.md) — live
   state snapshot.
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) —
-  the plan: 1.5.0 through 1.7.0, upstream-gated work, and
-  v2.0 candidates.
+  the plan: 1.7.2 and 1.7.3 (the rest of the 2026-10-29 audit), 1.8.0
+  (recovering a lost trail), upstream-gated work, and v2.0 candidates.
 
 ## License
 

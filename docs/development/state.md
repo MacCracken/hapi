@@ -5,20 +5,31 @@
 
 ## Version
 
-**1.7.0** (2026-10-29) — `hapi fmt`, on the cyrius 6.7 line (pin
-`6.7.18`). A new verb rewrites a manifest's header as
-`hapi_mf_canonicalize`'s bytes, so the `sha1c:` manifest hash cannot
-change, and keeps the body below `---` byte for byte. It refuses to drop
-what the canonical form cannot hold (comments, unknown keys, a repeated
-key, text after a value) unless `--force`, and always refuses a value
-holding a backslash. `--check` answers in the exit code, for CI. It holds
-the package-directory lock from read to rename and writes no trail entry
-([ADR 0008](../adr/0008-hapi-fmt.md)). The manifest schema, the trail
-format and every other verb's behaviour are unchanged. Both suites pass on
-x86_64 and on aarch64 under qemu, and `tests/agnos.tcyr` also passes on
-agnos under mirshi.
+**1.7.1** (2026-10-29) — the P(-1) sweep after 1.7.0, on the cyrius 6.7
+line (pin `6.7.18`). A 14-unit audit with paired verifiers
+([2026-10-29 audit](../audit/2026-10-29-audit.md)) found the resolver
+dropping the first byte of every relative symlink text (F-065), which had
+left the capability boundary open for relative links since 1.1.1. 1.7.1
+repairs the audit's tier 1, F-064 – F-075, and adds no surface:
 
-Before it, 1.6.0 added `--absolute` (a link of either shape is hapi's; the
+- an unprobeable component ends the walk (F-066);
+- rows are compared at their physical places (F-067);
+- `--force` replaces in one rename (F-068);
+- a source leading back to its target is refused (F-069), and so is
+  another package's file (F-070);
+- adopt is locked end to end and never replaces a name (F-071);
+- the trail lives only under an absolute base (F-072);
+- manifest reads are whole or refused (F-073), and an open value is an
+  error (F-074);
+- `link` hashes what it parsed (F-075);
+- the suites clean up after themselves (F-064).
+
+Removal still accepts the text 1.1.1–1.7.0 wrote under a relative
+symlinked parent. Tiers 2 and 3 are planned as 1.7.2 and 1.7.3. Both
+suites pass on x86_64 and on aarch64 under qemu, and `tests/agnos.tcyr`
+also passes on agnos under mirshi. CI and release run on `ubuntu-26.04`.
+
+Before it, 1.7.0 added `hapi fmt` ([ADR 0008](../adr/0008-hapi-fmt.md)). Before it, 1.6.0 added `--absolute` (a link of either shape is hapi's; the
 trail records `"shape":"absolute"`). 1.5.0 added `status --quiet`, `checkpoint --label` and
 `rollback --to` / `--steps`, a multi-level undo
 ([ADR 0007](../adr/0007-rollback-steps-and-to.md); F-063 accepted).
@@ -332,7 +343,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. **1,643 assertions across 154 test
+- `tests/hapi.tcyr` — primary suite. **1,797 assertions across 172 test
   groups.** Re-derive rather than recount by hand — these figures have
   rotted twice, and the per-tier breakdown below drifted 16 groups
   short before the 2026-08-26 sweep:
@@ -344,22 +355,25 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
     | sort | uniq -c | sort -rn                 # per-tier breakdown
   ```
 
-  Groups by tier (first word of the group name), as measured at 1.7.0:
-  rollback 13, cli 13, link 10, sync 10, cap 9, manifest 8,
-  manifest_write 8, check 8, backup 7, adopt 7, `--absolute` 6, status 6,
-  fs_link 6, dry-run 6, canonical 5, audit_reader 5, audit 5, fmt 4,
-  created_dir 4, audit-repair 4, unlink 4, list 3, checkpoint 2,
-  agnos_compat 1. The `cli` tier (1.2.0) runs `hapi_cli_run` with a
+  Groups by tier (first word of the group name), as measured at 1.7.1:
+  link 18, rollback 13, cli 13, sync 11, manifest 10, cap 9,
+  manifest_write 8, check 8, backup 7, adopt 8, status 6, fs_link 6,
+  dry-run 6, audit 6, `--absolute` 6, unlink 5, canonical 5,
+  audit_reader 5, fmt 4, created_dir 4, audit-repair 4, list 3, scratch 2,
+  resolve 2, checkpoint 2, agnos_compat 1. The two `scratch` groups run
+  last: they remove every directory the run made under /tmp and assert
+  that nothing of it is left (F-064, `tests/scratch.cyr`). The `cli` tier (1.2.0) runs `hapi_cli_run` with a
   synthetic argv and its stdout / stderr captured through `dup2`, so the
   v1.0 messages are asserted byte for byte.
-- `tests/agnos.tcyr` — **88 assertions across 13 groups**, all
+- `tests/agnos.tcyr` — **98 assertions across 15 groups**, all
   target-neutral: the agnos-conditional paths (no-follow open,
   exclusive create, absent trail, trail and manifest round trips,
   backup copy, the fs shims, `link` / `status` / `unlink` with the
   scope at `/`, since 1.3.0 a package-root scan and a prune, and since
   1.4.0 a made-directory round trip, since 1.5.0 `rollback --to` and
   `--steps`, since 1.6.0 an absolute link's round trip, since 1.7.0 an
-  `fmt` round trip). `cyrius test` runs it on x86_64 and aarch64; the agnos
+  `fmt` round trip, since 1.7.1 the no-replace move and a cleanup of every
+  scratch directory). `cyrius test` runs it on x86_64 and aarch64; the agnos
   smoke builds it with `--agnos` and runs it under mirshi. Absolute
   paths only, no chmod, no environment — what an agnos run allows.
 
@@ -369,7 +383,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 beside it as shell harnesses. **CI runs both.**
 
 The suite itself also runs on aarch64 — `cyrius test --aarch64` under
-`qemu-aarch64` (1,643 / 1,643 and 88 / 88 at 1.7.0). **CI runs it** as of 1.0.12
+`qemu-aarch64` (1,797 / 1,797 and 98 / 98 at 1.7.1). **CI runs it** as of 1.0.12
 (`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
 qemu fails the step, it never skips). Before that the aarch64 step was
 compile-only, which is how the `O_NOFOLLOW` literal went unseen from

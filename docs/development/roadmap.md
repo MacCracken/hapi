@@ -9,19 +9,18 @@
 
 ## Status
 
-- **Shipped: 1.7.0** — `hapi fmt`: a manifest's header rewritten as the
-  canonical bytes, so its hash cannot change, refusing to drop what the
-  canonical form cannot hold unless `--force`
-  ([ADR 0008](../adr/0008-hapi-fmt.md)). That was the last planned 1.x
-  minor. Before it, 1.6.0 added `--absolute`, 1.5.0 the script-facing
-  flags, 1.4.0 `created_dir`, 1.3.0 no-package `sync` and `--prune`, and
-  1.2.x moved argument parsing to cmdit.
-- **Next: nothing planned.** Every additive theme the v1.0 release notes
-  reserved has shipped. What remains is **gated** (below), landing in the
-  next 1.x minor when its gate opens, and the v2.0 bucket. New 1.x
-  minors are cut from dogfood pressure as it arrives. The command
-  surface, ADR 0001's schema and ADR 0002's line shape stay frozen; any
-  1.x addition is additive.
+- **Shipped: 1.7.1** — the P(-1) sweep after 1.7.0
+  ([2026-10-29 audit](../audit/2026-10-29-audit.md)). The resolver had
+  dropped the first byte of every relative symlink text since 1.1.1
+  (F-065), so the capability boundary was open for relative links. 1.7.1
+  closes the audit's tier 1, containment and data loss (F-064 – F-075),
+  and adds no surface. Before it, 1.7.0 added `hapi fmt`, 1.6.0
+  `--absolute`, 1.5.0 the script-facing flags, 1.4.0 `created_dir`,
+  1.3.0 no-package `sync` and `--prune`, and 1.2.x moved argument
+  parsing to cmdit.
+- **Next: 1.7.2, then 1.7.3** — the rest of that audit, one tier per
+  patch (below). Then **1.8.0**, the one additive gap left before v2.0:
+  recovering a lost trail (F-006).
 - **Gated** — work that waits on something outside hapi, scheduled when
   the gate opens.
 - **v2.0** — candidates that *must* earn a major bump because they break
@@ -43,6 +42,97 @@
   says whether it does). A [`../benchmarks.md`](../benchmarks.md) row
   when it touches `link` / `audit` / `fs_link` / the parser. Both
   suites run on x86_64, aarch64 and agnos.
+
+---
+
+## Planned 1.x releases
+
+The 2026-10-29 audit returned about 120 distinct issues, deduplicated and
+tiered in
+[`issues/2026-10-29-p1-triage.md`](issues/2026-10-29-p1-triage.md). 1.7.1
+took tier 1. Each item below is reproduced in the tree, as a failing test,
+before it is fixed, and gets its `F-NNN` id then: many of that pass's
+verdicts were made while /tmp was out of inodes, from reading the code
+alone (F-064).
+
+### 1.7.2 — correctness and error handling (tier 2; fixes only)
+
+Touches path arguments and the trail write path: P(-1) re-run, benchmark
+row.
+
+- **Probe errors under `--force` and in rollback** (T2-A, T2-B).
+  `link --force` skips a row whose target it cannot probe and exits 0,
+  after the refusal advised `--force`. rollback counts such an entry as
+  already done, and `--steps` / `--to` seal it.
+- **Ownership** (T2-C). After `link --force` over another package's link,
+  the old owner's entry stays live, and its `unlink` and `prune` refuse
+  forever. A renamed `$HOME` or `[package].name` orphans every link.
+  prune removes a same-name package's links.
+- **Prune's scope and identity** (T2-D). A `$HOME` prune removes a
+  `--root ~/sub` run's links, and re-spelling a kept row prunes it. The
+  more-than-half limit counts links that are already absent, and kept
+  rows are planned before the run's own removals.
+- **A row that targets the trail** or one of its ancestors (T2-E).
+- **Trail write failures** (T2-F). A short write leaves a torn tail that
+  blocks every later write, and an fsync or close failure after a
+  complete write is taken as not written.
+- **The adopt reversal** (T2-G) edits `<dir>/hapi.cyml` even for a named
+  `*.cyml`.
+- **Snapshots** (T2-H). `--backup-to` writes 0644, so a 0600 secret
+  becomes world-readable. It is composed through links the same run
+  made, and it leaves files behind on a refusal.
+- **SIGPIPE** (T2-I) kills `unlink`, `prune` and `rollback` mid-run under
+  `| head`.
+- **Parser edges** (T2-J). A `[[entries]]` line moves the header's end,
+  and the writer never reads back the row it appended.
+- **unlink of an already-absent link** (T2-K) reports a removal and
+  writes no entry.
+- **A dangling or self-referencing source** (T2-L) counts as present in
+  `status` and `check`.
+- **`rollback --to`** (T2-M) walks past a same-named checkpoint inside a
+  rolled-back range.
+- **agnos: a stat failure read as absent** for the trail (T2-N).
+
+### 1.7.3 — robustness, messages, docs and refactors (tier 3; fixes only)
+
+- **Hangs and hostile bytes.**
+  - FIFOs that hang `status`, `check`, `sync` and `--backup-to`.
+  - NUL and control bytes in manifest values.
+  - A trail that is a FIFO.
+- **Contracts.**
+  - Exit codes `--dry-run` does not keep.
+  - `check`'s `*.tmp` and orphan-prefix edges.
+- **Messages** that advise what cannot help, among them `sync`'s "rerun
+  with --force".
+- **Memory.** `link_probe`'s 4 KiB per call.
+- **Docs drift.** Guide examples, exit-code tables, UTC timestamps.
+- **The refactors.**
+  - Six copies of the manifest-argument resolver.
+  - Eleven `puts` / `eputs` pairs and seven `cstr_eq` copies.
+  - Duplicated containment primitives.
+  - Dead code.
+
+  Each one keeps the golden byte-identical.
+- **Test gaps** the tests-ci unit listed, and **CI** items:
+  - verify `cyrius.lock`;
+  - run DCE, fuzz, bench and lint in CI;
+  - tighten the smoke's check 3.
+
+### 1.8.0 — recovering a lost trail (F-006)
+
+The audit trail is hapi's record of what it made. When the state
+directory is lost, through a drive move or a fresh install, `list`,
+`unlink` and `rollback` undercount for good: `link` sees its links up to
+date and records nothing. The issue
+[`issues/2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](issues/2026-05-24-audit-trail-lost-on-state-dir-wipe.md)
+weighs three shapes: document the boundary; an additive
+`hapi sync --reseed`, which records the links it finds up to date; or a
+one-shot reconstruction from `status`.
+
+1.8.0 picks one in an ADR first. It must not let a re-seed claim a link
+hapi cannot prove it wrote. F-065's legacy matcher shows how narrow that
+proof has to be. The release touches the trail format additively (an
+`op` or a field), so it needs a P(-1) re-run.
 
 ---
 

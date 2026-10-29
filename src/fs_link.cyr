@@ -284,13 +284,22 @@ fn fsl_canonical_arg(path): i64 {
 # exactly the property the capability cap-check needs to reject
 # `--root /home/user/../etc` while leaving the symlink-resolution
 # question for the kavach migration.
-# Split an absolute path into its components (no ".", no "..", already
-# collapsed by fsl_lexical_normalize). Returns a vec of Str.
-fn _fsl_split(path): i64 {
+# Split a path into its components, absolute or relative. Returns a vec
+# of Str; an empty segment (a leading or doubled `/`) is dropped, so
+# `/a/b` and `a/b` split alike. `.` and `..` are kept for the caller.
+#
+# Through 1.7.0 the scan began at byte 1, as if every path began with
+# `/`. fsl_resolve_path also splits a symlink's own text, which is
+# usually relative, so its first byte was lost: `../outside` read as
+# `./outside`, `dotfiles/config` as `otfiles/config`. A relative link
+# out of $HOME then resolved inside it, and every check made on the
+# resolved path was made on the wrong one (F-065). `from` is 1 only for
+# the legacy resolver below.
+fn _fsl_split_from(path, from): i64 {
     var parts = vec_new();
     var n = strlen(path);
-    var start = 1;
-    var i = 1;
+    var start = from;
+    var i = from;
     while (i <= n) {
         var at_sep = 0;
         if (i == n) { at_sep = 1; }
@@ -304,6 +313,8 @@ fn _fsl_split(path): i64 {
     }
     return parts;
 }
+
+fn _fsl_split(path): i64 { return _fsl_split_from(path, 0); }
 
 # Resolve `path` by following a symlink at EVERY component, left to
 # right — the physical path, as the kernel would reach it.
@@ -329,10 +340,32 @@ fn _fsl_split(path): i64 {
 # kernel's physical parent, and a symlink's own text is spliced in raw
 # for the same reason.
 #
+# A component hapi cannot probe ends the walk with 0 (F-066). Through
+# 1.7.0 an ERROR probe was kept as a plain name, like an absent one. But
+# the probe spells the RESOLVED prefix, and the kernel walks the short
+# path it is given: past 4096 resolved bytes readlink says ENAMETOOLONG,
+# and a symlink there was never followed by hapi while the write
+# followed it out of the scope. Only an absent component is kept
+# literally; nothing below it can be a symlink.
+#
 # Hop-capped at 40 (the kernel's own ELOOP budget). Returns 0 if the cap
-# is hit — the caller must treat that as "cannot prove containment" and
-# refuse, never as "contained".
-fn fsl_resolve_path(path): i64 {
+# is hit, or a component cannot be probed — the caller must treat that as
+# "cannot prove containment" and refuse, never as "contained".
+fn fsl_resolve_path(path): i64 { return _fsl_resolve(path, 0); }
+
+# The resolver 1.1.1–1.7.0 shipped, kept for one use only: recognizing
+# the link texts those versions wrote (fsl_link_text_matches), so the
+# links stay removable after the fix. It splits a link's text from byte 1
+# and keeps an unprobeable component as a name. Never use it to decide
+# containment, the package guard, or a text to create.
+fn _fsl_resolve_path_legacy(path): i64 { return _fsl_resolve(path, 1); }
+
+# fsl_source_reaches' watch: while set, the walk notes any path it visits
+# that lies within `_fsl_watch`.
+var _fsl_watch = 0;
+var _fsl_watch_hit = 0;
+
+fn _fsl_resolve(path, legacy): i64 {
     var abs = fsl_to_absolute(path);
     if (abs == 0) { return 0; }
     var hops = 0;
@@ -352,8 +385,13 @@ fn fsl_resolve_path(path): i64 {
             continue;
         }
         var cand = _fsl_path_join(acc, seg);
+        if (_fsl_watch != 0) {
+            if (_fsl_within(cand, _fsl_watch) == 1) { _fsl_watch_hit = 1; }
+        }
         var probe = link_probe(cand);
-        if (link_probe_kind(probe) == HAPI_LP_SYMLINK) {
+        var kind = link_probe_kind(probe);
+        if (kind == HAPI_LP_ERROR && legacy == 0) { return 0; }
+        if (kind == HAPI_LP_SYMLINK) {
             hops = hops + 1;
             if (hops > 40) { return 0; }
             var tgt = link_probe_target(probe);
@@ -366,7 +404,7 @@ fn fsl_resolve_path(path): i64 {
                 acc = alloc(2);
                 store8(acc, 47); store8(acc + 1, 0);
             }
-            var merged = _fsl_split(tgt);
+            var merged = _fsl_split_from(tgt, legacy);
             var r = idx;
             while (r < vec_len(parts)) { vec_push(merged, vec_get(parts, r)); r = r + 1; }
             parts = merged;
@@ -376,6 +414,28 @@ fn fsl_resolve_path(path): i64 {
         }
     }
     return acc;
+}
+
+# 1 when the source, followed to where it physically leads, reaches the
+# target `phys_tgt`: it passes through it, ends inside it, or holds it —
+# or when the walk cannot be finished, since the caller refuses on 1
+# (F-069). Through 1.7.0 the source was only probed for presence, and a
+# symlink counted as present without being followed. So the layout people
+# migrate from, `pkg/bashrc -> ~/.bashrc` with the row `bashrc ->
+# .bashrc`, was an ordinary conflict, and `--force` deleted the only copy
+# and planted `.bashrc -> pkg/bashrc -> .bashrc`, a loop status called
+# OK. A source that holds its target (`pkg/cfg -> ~/.config`, row
+# `.config/app`) made a directory cycle the same way.
+fn fsl_source_reaches(abs_src, phys_tgt): i64 {
+    if (abs_src == 0 || phys_tgt == 0) { return 1; }
+    _fsl_watch = phys_tgt;
+    _fsl_watch_hit = 0;
+    var end = fsl_resolve_path(abs_src);
+    _fsl_watch = 0;
+    if (end == 0) { return 1; }
+    if (_fsl_watch_hit == 1) { return 1; }          # through it, or ends inside it
+    if (_fsl_within(phys_tgt, end) == 1) { return 1; }
+    return 0;
 }
 
 fn _fsl_seg_is(seg, lit): i64 {
@@ -518,28 +578,30 @@ fn fsl_shape_of(text): i64 {
 }
 
 # 1 when the symlink text `text` at `abs_target` is one hapi wrote for
-# `abs_source`: today's text, the absolute text (1.6.0), or the
-# lexical-parent text hapi 1.1.0 and earlier wrote. Removal (unlink,
-# rollback) accepts all three, so a link an older hapi planted under a
-# symlinked parent stays removable — "we only remove what we created".
-# Creation and `status` accept today's relative text and the absolute one.
+# `abs_source`: today's text, the absolute text (1.6.0), the
+# lexical-parent text hapi 1.1.0 and earlier wrote, or the text 1.1.1–
+# 1.7.0 wrote from a parent their resolver mis-resolved (F-065). Removal
+# (unlink, rollback, prune) accepts all four, so a link an older hapi
+# planted under a symlinked parent stays removable — "we only remove what
+# we created". Creation and `status` accept today's relative text and the
+# absolute one.
 fn fsl_link_text_matches(text, abs_target, abs_source): i64 {
     if (text == 0) { return 0; }
     if (fsl_is_absolute_text(text, abs_source) == 1) { return 1; }
-    var tn = strlen(text);
-    var now = fsl_link_text(abs_target, abs_source);
-    if (now != 0) {
-        if (strlen(now) == tn) {
-            if (memeq(text, now, tn) == 1) { return 1; }
-        }
-    }
-    var old = fsl_compute_relative(_fsl_path_dirname(abs_target), abs_source);
-    if (old != 0) {
-        if (strlen(old) == tn) {
-            if (memeq(text, old, tn) == 1) { return 1; }
-        }
-    }
+    var parent = _fsl_path_dirname(abs_target);
+    if (_fsl_text_is(text, fsl_link_text(abs_target, abs_source)) == 1) { return 1; }
+    if (_fsl_text_is(text, fsl_compute_relative(parent, abs_source)) == 1) { return 1; }
+    var lp = _fsl_resolve_path_legacy(parent);
+    if (lp == 0) { lp = parent; }
+    if (_fsl_text_is(text, fsl_compute_relative(lp, abs_source)) == 1) { return 1; }
     return 0;
+}
+
+fn _fsl_text_is(text, want): i64 {
+    if (want == 0) { return 0; }
+    var n = strlen(text);
+    if (strlen(want) != n) { return 0; }
+    return memeq(text, want, n);
 }
 
 fn fsl_lexical_normalize(path): i64 {

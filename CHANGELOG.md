@@ -4,8 +4,109 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.7.1] - 2026-10-29
+
+> **The P(-1) sweep after 1.7.0.** A deep audit (14 units, 8 probes, every finding
+> checked by two verifiers: [2026-10-29 audit](docs/audit/2026-10-29-audit.md)) found
+> that the path resolver dropped the first byte of every relative symlink's text, so
+> a relative link out of `$HOME` read as inside it. That reopened the capability
+> boundary for `link --force`, `adopt`, `--root` and the allowlist, on every release
+> since 1.1.1. This release fixes it, with the rest of the audit's containment and
+> data-loss tier (F-065 to F-075). The other tiers are planned in the
+> [roadmap](docs/development/roadmap.md) as 1.7.2 and 1.7.3. No flag, verb, manifest
+> field or trail field was added.
+
+### Upgrading
+
+- **Links an older hapi made under a relative symlinked parent** (`~/.config ->
+  dotfiles/config`, say) were given a text computed from the wrong directory. Some
+  dangle; others resolve, by luck, the long way round. `unlink`, `sync --prune` and
+  `rollback` still recognize them as hapi's and remove them. `status` now calls them
+  `WRONG`, and `hapi link --force <package>` rewrites each with the right text; a
+  no-arg `sync` refuses those packages until then. Run `hapi status` once after
+  upgrading.
+- **A link 1.1.1–1.7.0 placed outside the scope** through such a parent is found by
+  `hapi list` and removed by `hapi unlink <pkg>`.
+
+### Changed
+
+- **CI and release run on Ubuntu 26.04 LTS, with current actions.** Every job is pinned
+  to `ubuntu-26.04`, not `ubuntu-latest` (which still points at 24.04), so a release
+  builds on the image CI tested. Actions moved to their current majors:
+  `actions/checkout@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`,
+  and `softprops/action-gh-release@v3`, all on the Node 24 runtime. Downloads now fail
+  on a digest mismatch (download-artifact v8's default). The release checksum step
+  ends its options with `--`; the `SHA256SUMS` contents are unchanged.
+
+### Security
+
+- **A relative symlink's text is followed whole (F-065, HIGH).** `_fsl_split` began at
+  byte 1, as if every path began with `/`, and the resolver also splits a symlink's
+  own text. So `../outside` was walked as `./outside`, and a relative link out of
+  `$HOME` resolved inside it. Every check decided on the resolved path (F-015's scope
+  boundary, F-045's package guard, F-046's link text, F-051's `--root` and allowlist
+  grants) was made on the wrong one: `link --force` replaced a file outside `$HOME`,
+  `adopt` moved one in, `--root` through a relative link out of `$HOME` was granted,
+  and a plain no-arg `sync` wrote outside `$HOME` through hapi's own relative links.
+  From 1.1.1, on every target.
+- **A path component hapi cannot probe ends the walk (F-066, HIGH).** The resolver kept
+  an `ERROR` probe as a plain name. Past 4096 resolved bytes `readlink` says
+  ENAMETOOLONG, so a symlink there was never followed by hapi while the kernel, which
+  walks the short spelled path, followed it out of the scope. It now refuses, as it
+  does at the hop cap.
+- **Rows are compared where they are, not as spelled (F-067, HIGH).** F-057's
+  nested-row guard and the duplicate check compared raw strings, so `./.x/inner`,
+  `/.x/inner` and a user's `alias -> .x` with a row `alias/inner` were written through
+  the outer row's new link, out of the scope. Each row is now compared at its physical
+  location, and two rows naming one place are refused (`two rows name the same
+  target`). As a backstop, once a run has written anything, each later row is checked
+  again before it is written, and the run stops before one whose place moved.
+- **Another package's files are not this package's target (F-070, HIGH).** F-045 asked
+  only about the current package. With package A's `.config/nvim -> A/nvim`, package
+  B's row `.config/nvim/init.lua` is A's only copy, which `link --force B` deleted;
+  `adopt` moved such a file between packages, and one no-arg `sync` sent a package's
+  writes into another's repository. `link` and `adopt` now read the trail and refuse a
+  target inside any package source it records. `link` does that for each row whose
+  target is reached through a symlink, the only way it can land in another package's
+  files. A trail they cannot read stops them, as it already stopped `unlink` and
+  `rollback`.
+- **The audit trail lives only under an absolute base (F-072, HIGH).** With HOME unset
+  or empty the trail fell back to `/tmp/.local/state`, and a relative
+  `XDG_STATE_HOME` or HOME put it under the cwd: directories another user can own,
+  whose planted entries drove `rollback`. A relative `XDG_STATE_HOME` is now ignored,
+  as the XDG spec says; with no absolute HOME either there is no trail, and every verb
+  that needs one refuses.
+
 ### Fixed
 
+- **A source that leads back to its own target is refused (F-069, HIGH).** The source
+  was only probed for presence. So the layout people migrate from, `pkg/bashrc ->
+  ~/.bashrc` with the row `bashrc -> .bashrc`, was an ordinary conflict, and `--force`
+  deleted the only copy and left a loop that `status` called OK. A source that holds
+  its target made a directory cycle the same way, and an absent target got a
+  self-loop at exit 0. `--force` does not override the refusal.
+- **`link --force` replaces a file in one step (F-068, HIGH).** It unlinked the file,
+  then made the symlink; if `symlink(2)` failed, the file was gone and nothing was
+  recorded. The new link is now made under a temporary name and renamed over the
+  target, so either the file or the link is there. The agnos arm keeps the old order:
+  its kernel cannot rename over a file (F-059).
+- **Concurrent adopts cannot destroy a file (F-071, HIGH).** adopt's checks ran with
+  nothing held, and its move was a plain `rename(2)`. Two adopts deriving one
+  package-side name both passed, and the second replaced the first one's file
+  (34 losses in 200 runs). adopt now holds the package lock from its manifest read to
+  its trail entry, and moves with `link(2)` then `unlink(2)`, which never replaces a
+  name. Its undo moves back the same way and says when it could not.
+- **Manifest reads are whole or refused (F-073, HIGH).** A failed `read(2)` was taken as
+  the end of the file, and a file that changed size while it was read was taken as
+  whole, so `adopt` and `fmt` committed a cut manifest and `sync --prune` acted on half
+  of one. Both are now refused: `the manifest changed while it was read; rerun`.
+- **A value with no closing quote is an error (F-074).** It was read to the end of the
+  header, so a manifest cut mid-row parsed with a truncated target. No manifest
+  ADR 0001 describes has one.
+- **`link` records the hash of the manifest it applied (F-075).** It re-read the file
+  to hash it, so the trail's hash could describe rows other than the ones it linked.
 - **The test suites no longer leave their scratch directories in `/tmp` (F-064).**
   Through 1.7.0 neither `tests/hapi.tcyr` nor `tests/agnos.tcyr` removed anything it
   made, so each run left about 150 directories, around 2,600 inodes. `/tmp` is a tmpfs

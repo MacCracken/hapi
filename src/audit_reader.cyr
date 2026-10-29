@@ -33,6 +33,8 @@ enum HapiAuditReadError {
     HapiArOpenFailed = 1;
     HapiArReadFailed = 2;
     HapiArCorrupt = 3;
+    HapiArNoLocation = 4;
+    HapiArShrunk = 5;
 }
 
 # 1-based line number of the corrupt entry, for the caller's message.
@@ -69,6 +71,9 @@ fn hapi_ar_err_msg(code): i64 {
     if (code == HapiArOpenFailed) { return "audit trail exists but could not be opened"; }
     if (code == HapiArReadFailed) { return "audit trail could not be read"; }
     if (code == HapiArCorrupt)    { return "audit trail has a malformed entry"; }
+    if (code == HapiArNoLocation) {
+        return "no audit-trail location: $XDG_STATE_HOME and $HOME are unset or not absolute";
+    }
     return "unknown audit-trail read error";
 }
 
@@ -329,11 +334,25 @@ fn audit_read_r(path): Result {
     if (rerr == 1) { return Err(HapiArReadFailed); }
     if (total > size) { return Err(HapiArReadFailed); }   # grew mid-read
     if (total == 0) { return Ok(entries); }
+    if (_har_parse_lines(buf, total, 0, entries) < 0) { return Err(HapiArCorrupt); }
+    return Ok(entries);
+}
 
-    # Walk line-by-line. A line terminated with `\n` must parse; a
-    # trailing line without one is the torn-write case and is dropped.
+# The end of the last complete line _har_parse_lines consumed, and how
+# many lines it had then counted.
+var _har_end = 0;
+var _har_lines = 0;
+fn audit_read_end(): i64 { return _har_end; }
+fn audit_read_lines(): i64 { return _har_lines; }
+
+# Parse buf[0..total) line by line into `entries`, numbering lines from
+# `lineno0` + 1. A line terminated with `\n` must parse; a trailing line
+# without one is the torn-write case and is dropped. Sets _har_end and
+# _har_lines. Returns 0, or -1 on a corrupt line (_har_corrupt_line set).
+fn _har_parse_lines(buf, total, lineno0, entries): i64 {
     var pos = 0;
-    var lineno = 0;
+    var lineno = lineno0;
+    _har_end = 0;
     while (pos < total) {
         var line_start = pos;
         var found = 0;
@@ -348,15 +367,64 @@ fn audit_read_r(path): Result {
                 var entry = _har_parse_line(buf + line_start, line_len);
                 if (entry == 0) {
                     _har_corrupt_line = lineno;
-                    return Err(HapiArCorrupt);
+                    return 0 - 1;
                 }
                 store64(entry + 104, lineno);
                 vec_push(entries, entry);
             }
             pos = pos + 1;
+            _har_end = pos;
         }
         # If no \n found, the trailing partial line falls off here.
     }
+    _har_lines = lineno;
+    return 0;
+}
+
+# The entries on the complete lines from byte `from` on, numbered from
+# `lineno0` + 1 (1.7.1). For a caller that keeps what it read, and reads
+# again as the trail grows: `link` during a no-arg sync. On Ok, _har_end
+# is the absolute offset past the last complete line, and _har_lines the
+# line count there. A trail now shorter than `from` is Err(HapiArShrunk):
+# it was replaced, and the caller starts again from 0.
+fn audit_read_from_r(path, from, lineno0): Result {
+    _har_corrupt_line = 0;
+    var entries = vec_new();
+    _har_end = from;
+    _har_lines = lineno0;
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) {
+        if (hapi_open_absent(path, fd) == 1) {
+            if (from > 0) { return Err(HapiArShrunk); }
+            return Ok(entries);
+        }
+        return Err(HapiArOpenFailed);
+    }
+    var size = xlseek(fd, 0, 2);
+    if (size < 0) { file_close(fd); return Err(HapiArReadFailed); }
+    if (size < from) { file_close(fd); return Err(HapiArShrunk); }
+    if (size == from) { file_close(fd); return Ok(entries); }
+    if (xlseek(fd, from, 0) < 0) { file_close(fd); return Err(HapiArReadFailed); }
+    var want = size - from;
+    var cap = want + 1;
+    var buf = alloc(cap);
+    var total = 0;
+    var rgo = 1;
+    var rerr = 0;
+    while (rgo == 1) {
+        var n = file_read(fd, buf + total, cap - total);
+        if (n < 0) { rerr = 1; rgo = 0; }
+        elif (n == 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= cap) { rgo = 0; }
+        }
+    }
+    file_close(fd);
+    if (rerr == 1) { return Err(HapiArReadFailed); }
+    if (total > want) { return Err(HapiArReadFailed); }
+    if (_har_parse_lines(buf, total, lineno0, entries) < 0) { return Err(HapiArCorrupt); }
+    _har_end = from + _har_end;
     return Ok(entries);
 }
 
@@ -371,9 +439,11 @@ fn audit_read(path): i64 {
 
 # Convenience: read the default trail (audit_trail_path()).
 fn audit_read_default(): i64 {
+    if (audit_trail_path() == 0) { return vec_new(); }
     return audit_read(audit_trail_path());
 }
 
 fn audit_read_default_r(): Result {
+    if (audit_trail_path() == 0) { return Err(HapiArNoLocation); }
     return audit_read_r(audit_trail_path());
 }

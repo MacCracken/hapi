@@ -36,6 +36,39 @@ fn hapi_rename(old, new): i64 {
     #endif
 }
 
+# rename(old -> new) that never replaces an existing `new` (F-071). A
+# plain rename(2) does, and adopt moved the user's file over whatever was
+# at the package-side name: a second adopt deriving the same name, or a
+# `git pull` landing a file there, lost one of them. Linux: link(2), then
+# unlink(2) — link fails with EEXIST atomically, and a crash between the
+# two leaves the file under both names, never neither. A filesystem with
+# no hard links (EPERM, EOPNOTSUPP) falls back to a probe and a rename,
+# which the caller's lock serializes against every other hapi. agnos: the
+# probe and a rename (a real kernel's rename refuses an existing name,
+# F-059; mirshi's does not). Returns 0, or <0: -17 when `new` exists.
+fn hapi_rename_noreplace(old, new): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var lb[8];
+    if (hapi_readlink(new, &lb, 8) > 0) { return 0 - 17; }      # a link, dangling or not
+    var st = alloc(STAT_BUFSZ);
+    if (sys_stat(new, strlen(new), st) >= 0) { return 0 - 17; }
+    return hapi_rename(old, new);
+    #else
+    var rc = sys_link(old, new);
+    if (rc == 0) {
+        if (hapi_unlink(old) < 0) {
+            hapi_unlink(new);
+            return 0 - 1;
+        }
+        return 0;
+    }
+    if (rc == 0 - 17 || rc == 0 - 18) { return rc; }     # EEXIST, EXDEV
+    var lb[8];
+    if (sys_readlink(new, &lb, 8) != 0 - 2) { return 0 - 17; }   # not ENOENT
+    return hapi_rename(old, new);
+    #endif
+}
+
 # fsync(fd). agnos has no per-fd fsync; SYS_SYNC (#12) flushes globally,
 # which still guarantees the just-written manifest/audit bytes reach disk
 # before the subsequent rename durability point. Linux keeps precise

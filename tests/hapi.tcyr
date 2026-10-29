@@ -5546,6 +5546,736 @@ fn test_cli_fmt() {
 }
 
 # ============================================================
+# 1.7.1 — the resolver (F-065, F-066)
+# ============================================================
+
+# `<d>/home` as the scope root and $HOME, `<d>/outside` beside it, and the
+# trail in `<d>`. A relative link out of the scope needs somewhere to go
+# that is not the shared /tmp.
+fn _r171_env(d): i64 {
+    var home = _fsl_path_join(d, "home");
+    hapi_mkdir(home, 0x1C0);
+    hapi_mkdir(_fsl_path_join(d, "outside"), 0x1C0);
+    link_set_scope_root(home);
+    audit_set_trail_path(_fsl_path_join(d, "audit.jsonl"));
+    cap_set_home(home);
+    return home;
+}
+
+fn _r171_clear(): i64 {
+    cap_set_home(0);
+    cap_set_allowlist(0);
+    _test_clear_env();
+    return 0;
+}
+
+fn _r171_cat(a, b): i64 {
+    var na = strlen(a);
+    var nb = strlen(b);
+    var out = alloc(na + nb + 1);
+    memcpy(out, a, na);
+    memcpy(out + na, b, nb);
+    store8(out + na + nb, 0);
+    return out;
+}
+
+# One `[[link]]` row, as manifest text.
+fn _r171_row(src, tgt): i64 {
+    return _r171_cat(_r171_cat(_r171_cat(_r171_cat("\n[[link]]\nsource = \"", src), "\"\ntarget = \""),
+      tgt), "\"\n");
+}
+
+fn _r171_hdr(name): i64 {
+    return _r171_cat(_r171_cat("[package]\nname = \"", name), "\"\nversion = \"1.0.0\"\n");
+}
+
+# F-065: _fsl_split began at byte 1, and the resolver splits a symlink's
+# own text with it, so every relative text lost its first byte.
+fn test_resolve_relative_link_texts() {
+    test_group("resolve: a relative symlink text is followed whole (F-065)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    hapi_mkdir(_fsl_path_join(home, "short"), 0x1C0);
+    fsl_mkdir_parents(_fsl_path_join(home, "a/b/x"));
+    hapi_symlink("short", _fsl_path_join(home, "r1"));
+    hapi_symlink("../outside", _fsl_path_join(home, "r2"));
+    hapi_symlink("a/b", _fsl_path_join(home, "r3"));
+    hapi_symlink("./short", _fsl_path_join(home, "r4"));
+    hapi_symlink("..", _fsl_path_join(home, "r5"));
+    hapi_symlink("c2", _fsl_path_join(home, "c1"));
+    hapi_symlink("../outside", _fsl_path_join(home, "c2"));
+    hapi_symlink(_fsl_path_join(d, "outside"), _fsl_path_join(home, "abs"));
+
+    var outside = _fsl_path_join(d, "outside");
+    _assert_cstr(fsl_resolve_path(_fsl_path_join(home, "r1")), _fsl_path_join(home, "short"),
+      "`short` resolves to home/short");
+    _assert_cstr(fsl_resolve_path(_fsl_path_join(home, "r2")), outside,
+      "`../outside` resolves beside home");
+    _assert_cstr(fsl_resolve_path(_fsl_path_join(home, "r3")), _fsl_path_join(home, "a/b"),
+      "`a/b` keeps both components");
+    _assert_cstr(fsl_resolve_path(_fsl_path_join(home, "r4")), _fsl_path_join(home, "short"),
+      "`./short` resolves to home/short");
+    _assert_cstr(fsl_resolve_path(_fsl_path_join(home, "r5")), d, "`..` is home's parent");
+    _assert_cstr(fsl_resolve_path(_fsl_path_join(home, "c1/x")), _fsl_path_join(outside, "x"),
+      "a chain of relative texts, then a name");
+    _assert_cstr(fsl_resolve_path(_fsl_path_join(home, "abs")), outside, "an absolute text, as before");
+
+    # The legacy resolver is 1.7.0's, byte for byte: it is how removal
+    # recognizes the texts that version wrote. It must stay wrong.
+    _assert_cstr(_fsl_resolve_path_legacy(_fsl_path_join(home, "r2")), _fsl_path_join(home, "outside"),
+      "the legacy resolver still drops the first byte");
+
+    assert_eq(cap_target_allowed(_fsl_path_join(home, "r2"), home), 0,
+      "a relative link out of home is outside the scope");
+    assert_eq(cap_target_allowed(_fsl_path_join(home, "r1"), home), 1,
+      "a relative link within home is inside it");
+    _r171_clear();
+    return 0;
+}
+
+fn _r171_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
+fn _assert_cstr(got, want, label): i64 {
+    if (got == 0 || want == 0) { assert(0, label); return 0; }
+    var n = strlen(want);
+    if (strlen(got) == n && memeq(got, want, n) == 1) { assert(1, label); return 0; }
+    assert(0, label);
+    _r171_eputs("    got:  "); _r171_eputs(got); _r171_eputs("\n    want: ");
+    _r171_eputs(want); _r171_eputs("\n");
+    return 0;
+}
+
+# F-065 end to end: link --force, adopt, --root and the allowlist each
+# escaped through a relative link that leaves home.
+fn test_relative_link_escape_refused() {
+    test_group("link / adopt / --root / allowlist: a relative link out of home is an escape (F-065)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var outside = _fsl_path_join(d, "outside");
+    var victim = _fsl_path_join(outside, "victim");
+    _test_write_file(victim, "precious");
+    hapi_symlink("../outside", _fsl_path_join(home, ".cfg"));
+
+    var pkg = _t111_pkg("\n[[link]]\nsource = \"f\"\ntarget = \".cfg/victim\"\n");
+    _test_write_file(_fsl_path_join(pkg, "f"), "pkgdata");
+    assert_eq(cmd_link(pkg, 1), 1, "link --force refuses the escape");
+    assert_eq(link_probe_kind(link_probe(victim)), HAPI_LP_FILE, "the file outside is untouched");
+    assert_eq(_test_file_size(victim), 8, "with every byte");
+
+    var conf = _fsl_path_join(outside, "app.conf");
+    _test_write_file(conf, "outside");
+    var apkg = _t111_pkg("");
+    assert_eq(cmd_adopt(_fsl_path_join(home, ".cfg/app.conf"), apkg), 1, "adopt refuses the escape");
+    assert_eq(link_probe_kind(link_probe(conf)), HAPI_LP_FILE, "the file stays where it was");
+
+    hapi_symlink("../outside", _fsl_path_join(home, "trap"));
+    var rt, rv = cap_check_root_r(_fsl_path_join(home, "trap"));
+    assert_eq(is_err_result(rt), 1, "--root through a relative link out of home is denied");
+
+    # An allowlist entry reached through a relative link grants where the
+    # link physically goes, and not a sibling of its own name.
+    hapi_mkdir(_fsl_path_join(d, "grants"), 0x1C0);
+    hapi_mkdir(_fsl_path_join(d, "granted"), 0x1C0);
+    hapi_mkdir(_fsl_path_join(d, "grants/granted"), 0x1C0);
+    hapi_symlink("../granted", _fsl_path_join(d, "grants/g"));
+    cap_set_allowlist(_fsl_path_join(d, "grants/g"));
+    assert_eq(cap_target_allowed(_fsl_path_join(d, "granted"), home), 1,
+      "the directory the entry names is granted");
+    assert_eq(cap_target_allowed(_fsl_path_join(d, "grants/granted"), home), 0,
+      "a directory it does not name is not");
+    _r171_clear();
+    return 0;
+}
+
+# F-046 under a RELATIVE symlinked parent: the text must be computed from
+# where `.config` really leads, or the link dangles while status says OK.
+fn test_relative_parent_link_text() {
+    test_group("link: the text under a relative symlinked parent resolves (F-065)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    fsl_mkdir_parents(_fsl_path_join(home, "dotfiles/config/x"));
+    hapi_symlink("dotfiles/config", _fsl_path_join(home, ".config"));
+    var pkg = _t111_pkg_at(_fsl_path_join(home, "dotfiles/nvim"),
+      "\n[[link]]\nsource = \"init.lua\"\ntarget = \".config/nvim/init.lua\"\n");
+    _test_write_file(_fsl_path_join(pkg, "init.lua"), "lua");
+
+    assert_eq(cmd_link(pkg, 0), 0, "link succeeds");
+    var tgt = _fsl_path_join(home, ".config/nvim/init.lua");
+    var probe = link_probe(tgt);
+    assert_eq(link_probe_kind(probe), HAPI_LP_SYMLINK, "the link is there");
+    _assert_cstr(link_probe_target(probe), "../../nvim/init.lua", "its text is from the physical parent");
+    assert_eq(_test_file_size(tgt), 3, "and the kernel reaches the source through it");
+    assert_eq(cmd_status_run(pkg, 0), 0, "status says OK");
+    assert_eq(cmd_link(pkg, 0), 0, "a re-run is up to date");
+    _r171_clear();
+    return 0;
+}
+
+# 1.1.1–1.7.0 wrote the text their resolver computed. After the fix those
+# links must stay hapi's to remove, as F-046 kept 1.1.0's lexical text
+# removable: unlink, rollback and prune accept the old text. status calls
+# it WRONG, and `link --force` rewrites it.
+fn _r171_plant_legacy(home, pkg): i64 {
+    var tgt = _fsl_path_join(home, ".config/nvim/init.lua");
+    var src = _fsl_path_join(pkg, "init.lua");
+    fsl_mkdir_parents(tgt);
+    assert_eq(hapi_symlink("../../../dotfiles/nvim/init.lua", tgt), 0, "a link with 1.7.0's text");
+    var at, av = audit_append_link_r("p", "1.0.0", "sha1c:00",
+      "init.lua", ".config/nvim/init.lua", src, tgt, 0);
+    assert_eq(is_ok(at), 1, "and 1.7.0's op:link entry");
+    return tgt;
+}
+
+fn test_legacy_text_links_stay_removable() {
+    test_group("unlink / rollback / prune: a link 1.1.1–1.7.0 wrote stays removable (F-065)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    fsl_mkdir_parents(_fsl_path_join(home, "dotfiles/config/x"));
+    hapi_symlink("dotfiles/config", _fsl_path_join(home, ".config"));
+    var pkg = _t111_pkg_at(_fsl_path_join(home, "dotfiles/nvim"),
+      "\n[[link]]\nsource = \"init.lua\"\ntarget = \".config/nvim/init.lua\"\n");
+    _test_write_file(_fsl_path_join(pkg, "init.lua"), "lua");
+
+    # The text 1.7.0 computed, pinned: the legacy resolver must reproduce it.
+    var tgt = _fsl_path_join(home, ".config/nvim/init.lua");
+    var lp = _fsl_resolve_path_legacy(_fsl_path_dirname(tgt));
+    _assert_cstr(fsl_compute_relative(lp, _fsl_path_join(pkg, "init.lua")),
+      "../../../dotfiles/nvim/init.lua", "the legacy resolver gives 1.7.0's text");
+
+    _r171_plant_legacy(home, pkg);
+    assert_eq(cmd_status_run(pkg, 0), 1, "status calls the old text WRONG");
+    assert_eq(cmd_unlink("p"), 0, "unlink removes it as hapi's own");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_ABSENT, "it is gone");
+
+    _r171_plant_legacy(home, pkg);
+    assert_eq(cmd_rollback(), 0, "rollback reverses it");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_ABSENT, "it is gone again");
+
+    # Its row leaves the manifest: prune takes it (--force passes the
+    # more-than-half limit, which one row of one trips).
+    _r171_plant_legacy(home, pkg);
+    var mf = _fsl_path_join(pkg, "hapi.cyml");
+    _test_write_file(mf, "[package]\nname = \"p\"\nversion = \"1.0.0\"\n");
+    assert_eq(cmd_sync_run(pkg, 1, 1), 0, "sync --prune removes it as hapi's own");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_ABSENT, "it is pruned");
+    _test_write_file(mf, _r171_cat(_r171_hdr("p"), _r171_row("init.lua", ".config/nvim/init.lua")));
+
+    _r171_plant_legacy(home, pkg);
+    assert_eq(cmd_link(pkg, 0), 1, "a plain link calls it a conflict");
+    assert_eq(cmd_link(pkg, 1), 0, "link --force rewrites it");
+    _assert_cstr(link_probe_target(link_probe(tgt)), "../../nvim/init.lua", "with today's text");
+    _r171_clear();
+    return 0;
+}
+
+# F-066: past 4096 resolved bytes readlink says ENAMETOOLONG, the probe
+# says ERROR, and the resolver kept the component as a name. The kernel
+# walks the short spelled path and follows the link there.
+fn test_unprobeable_component_refused() {
+    test_group("resolve: a component that cannot be probed is not a name (F-066)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var outside = _fsl_path_join(d, "outside");
+    var victim = _fsl_path_join(outside, "victim");
+    _test_write_file(victim, "precious");
+
+    # A chain of real directories whose physical path is 4093 bytes, so
+    # `<chain>/esc` (4097) cannot be probed by its resolved spelling.
+    var chain = home;
+    var seg = alloc(256);
+    var go = 1;
+    while (go == 1) {
+        var room = 4093 - strlen(chain) - 1;
+        if (room <= 0) { go = 0; continue; }
+        var w = 250;
+        if (room < 250 + 2) { w = room; }
+        memset(seg, 113, w);
+        store8(seg + w, 0);
+        chain = _fsl_path_join(chain, seg);
+        hapi_mkdir(chain, 0x1C0);
+    }
+    assert_eq(strlen(chain), 4093, "the chain is 4093 bytes");
+    assert_eq(hapi_symlink(chain, _fsl_path_join(home, ".cfg")), 0, "~/.cfg leads to it");
+    # Made through the short spelling, as the kernel walks it.
+    assert_eq(hapi_symlink(outside, _fsl_path_join(home, ".cfg/esc")), 0,
+      "<chain>/esc leads out of home");
+
+    assert_eq(cap_target_allowed(_fsl_path_join(home, ".cfg/esc"), home), 0,
+      "a link it cannot probe is not inside the scope");
+    var pkg = _t111_pkg("\n[[link]]\nsource = \"f\"\ntarget = \".cfg/esc/victim\"\n");
+    _test_write_file(_fsl_path_join(pkg, "f"), "pkgdata");
+    assert_eq(cmd_link(pkg, 1), 1, "link --force refuses");
+    assert_eq(_test_file_size(victim), 8, "the file outside is untouched");
+
+    # Its full spelling is too long for the cleanup's unlink.
+    hapi_unlink(_fsl_path_join(home, ".cfg/esc"));
+    _r171_clear();
+    return 0;
+}
+
+# ============================================================
+# 1.7.1 — rows compared where they are (F-067), --force replaces (F-068)
+# ============================================================
+
+# A package whose `escape` is a link out of the scope, a source `f`, and
+# the rows given.
+fn _r171_escape_pkg(d, rows): i64 {
+    var pkg = _t111_pkg(rows);
+    hapi_symlink(_fsl_path_join(d, "outside"), _fsl_path_join(pkg, "escape"));
+    _test_write_file(_fsl_path_join(pkg, "f"), "pkgdata");
+    return pkg;
+}
+
+fn test_nested_rows_by_place() {
+    test_group("link: a row beneath another row's target is refused however it is spelled (F-067)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var inner = _fsl_path_join(d, "outside/inner");
+
+    var p1 = _r171_escape_pkg(d, _r171_cat(_r171_row("escape", ".x"), _r171_row("f", "./.x/inner")));
+    assert_eq(cmd_link(p1, 0), 1, "`./.x/inner` beneath `.x` is refused");
+    var p2 = _r171_escape_pkg(d, _r171_cat(_r171_row("escape", ".x"), _r171_row("f", "/.x/inner")));
+    assert_eq(cmd_link(p2, 0), 1, "`/.x/inner` beneath `.x` is refused");
+    hapi_symlink(".x", _fsl_path_join(home, "alias"));
+    var p3 = _r171_escape_pkg(d, _r171_cat(_r171_row("escape", ".x"), _r171_row("f", "alias/inner")));
+    assert_eq(cmd_link(p3, 0), 1, "`alias/inner`, with alias -> .x, is refused");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".x"))), HAPI_LP_ABSENT, "nothing was linked");
+    assert_eq(link_probe_kind(link_probe(inner)), HAPI_LP_ABSENT, "nothing was written outside");
+
+    var p4 = _r171_escape_pkg(d, _r171_cat(_r171_row("escape", ".a"), _r171_row("f", "./.a")));
+    assert_eq(cmd_link(p4, 1), 1, "two spellings of one target are refused, --force or not");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".a"))), HAPI_LP_ABSENT,
+      "and neither was linked");
+
+    # The classification itself: one place, beneath, apart, and the
+    # as-spelled comparison when a side could not be resolved.
+    assert_eq(_hlnk_overlap("/h/.a", "/h/.a", "/h/./.a", "/h/.a"), 2, "one place, two spellings");
+    assert_eq(_hlnk_overlap("/h/al/i", "/h/.x/i", "/h/.x", "/h/.x"), 1, "beneath, through an alias");
+    assert_eq(_hlnk_overlap("/h/.xy", "/h/.xy", "/h/.x", "/h/.x"), 0, "a sibling with a longer name");
+    assert_eq(_hlnk_overlap("/h/.x/i", 0, "/h/.x", "/h/.x"), 1, "unresolved: compared as spelled");
+    assert_eq(_hlnk_overlap("/h/.x", 0, "/h/.x", 0), 0, "unresolved and identical: not beneath");
+    _r171_clear();
+    return 0;
+}
+
+# The plan cannot see this one: `.x` is the user's link to `old`, so
+# `alias/inner` is planned at old/inner. --force replaces `.x` first, and
+# the next row then leads out of the scope. The run stops before it.
+fn test_link_stops_when_a_row_moves() {
+    test_group("link --force: a row an earlier write moved is not written (F-067)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    hapi_mkdir(_fsl_path_join(home, "old"), 0x1C0);
+    hapi_symlink("old", _fsl_path_join(home, ".x"));
+    hapi_symlink(".x", _fsl_path_join(home, "alias"));
+    var pkg = _r171_escape_pkg(d, _r171_cat(_r171_row("escape", ".x"), _r171_row("f", "alias/inner")));
+
+    assert_eq(cmd_link(pkg, 1), 1, "the run stops");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "outside/inner"))), HAPI_LP_ABSENT,
+      "nothing was written outside the scope");
+    var tr_t, tr_v = audit_read_default_r();
+    assert_eq(vec_len(tr_v), 1, "the row before it is linked and recorded");
+    _r171_clear();
+    return 0;
+}
+
+# F-068: --force unlinked the file, then made the symlink. A link text
+# too long for symlink(2) removed the file and wrote nothing.
+fn test_force_failed_symlink_keeps_the_file() {
+    test_group("link --force: a symlink that cannot be made leaves the file (F-068)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    # A source whose relative text from the target is past 4095 bytes.
+    var pkg = _t111_pkg("");
+    var deep = pkg;
+    var seg = alloc(256);
+    var go = 1;
+    while (go == 1) {
+        var room = 4085 - strlen(deep) - 1;
+        if (room <= 0) { go = 0; continue; }
+        var w = 250;
+        if (room < 250 + 2) { w = room; }
+        memset(seg, 113, w);
+        store8(seg + w, 0);
+        deep = _fsl_path_join(deep, seg);
+        hapi_mkdir(deep, 0x1C0);
+    }
+    _test_write_file(_fsl_path_join(deep, "s"), "s");
+    var rel_src = alloc(4096);
+    var off = strlen(pkg) + 1;
+    memcpy(rel_src, _fsl_path_join(deep, "s") + off, strlen(deep) + 2 - off);
+    var rows = alloc(4300);
+    var r1 = "\n[[link]]\nsource = \"";
+    memcpy(rows, r1, strlen(r1));
+    var rp = strlen(r1);
+    memcpy(rows + rp, rel_src, strlen(rel_src)); rp = rp + strlen(rel_src);
+    var r2 = "\"\ntarget = \"a/b/c/d/e/f/g/h/.t\"\n";
+    memcpy(rows + rp, r2, strlen(r2)); rp = rp + strlen(r2);
+    store8(rows + rp, 0);
+    _t111_pkg_at(pkg, rows);
+
+    var tgt = _fsl_path_join(home, "a/b/c/d/e/f/g/h/.t");
+    fsl_mkdir_parents(tgt);
+    _test_write_file(tgt, "user");
+    assert(strlen(fsl_link_text(tgt, _fsl_path_join(deep, "s"))) > 4095, "the text is too long");
+    assert_eq(cmd_link(pkg, 1), 1, "link --force fails");
+    assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_FILE, "the user's file is still there");
+    assert_eq(_test_file_size(tgt), 4, "with every byte");
+    _r171_clear();
+    return 0;
+}
+
+# ============================================================
+# 1.7.1 — a source that is its target (F-069), another package (F-070)
+# ============================================================
+
+fn _r171_pkg_in(home, rows): i64 {
+    fsl_mkdir_parents(_fsl_path_join(home, "dotfiles/pkg/x"));
+    return _t111_pkg_at(_fsl_path_join(home, "dotfiles/pkg"), rows);
+}
+
+fn test_source_leading_to_its_target() {
+    test_group("link: a source that leads back to its own target is refused (F-069)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var rc = _fsl_path_join(home, ".bashrc");
+    _test_write_file(rc, "precious");
+
+    # (a) The reverse layout people migrate from, both shapes.
+    var pkg = _r171_pkg_in(home, "\n[[link]]\nsource = \"bashrc\"\ntarget = \".bashrc\"\n");
+    hapi_symlink("../../.bashrc", _fsl_path_join(pkg, "bashrc"));
+    assert_eq(cmd_link(pkg, 0), 1, "link refuses a relative reverse link");
+    assert_eq(cmd_link(pkg, 1), 1, "and --force does not override it");
+    hapi_unlink(_fsl_path_join(pkg, "bashrc"));
+    hapi_symlink(rc, _fsl_path_join(pkg, "bashrc"));
+    assert_eq(cmd_link(pkg, 1), 1, "an absolute reverse link is refused too");
+    assert_eq(_test_file_size(rc), 8, "the only copy is untouched");
+
+    # (b) A package directory link to $HOME, row source `home/.bashrc`.
+    _t111_pkg_at(pkg, "\n[[link]]\nsource = \"home/.bashrc\"\ntarget = \".bashrc\"\n");
+    hapi_symlink("../..", _fsl_path_join(pkg, "home"));
+    assert_eq(cmd_link(pkg, 1), 1, "a source through a link to $HOME is refused");
+    assert_eq(_test_file_size(rc), 8, "the only copy is untouched");
+
+    # (c) A source that holds its target: link would make a cycle.
+    hapi_mkdir(_fsl_path_join(home, ".config"), 0x1C0);
+    var app = _fsl_path_join(home, ".config/app");
+    _test_write_file(app, "v1");
+    _t111_pkg_at(pkg, "\n[[link]]\nsource = \"cfg\"\ntarget = \".config/app\"\n");
+    hapi_symlink("../../.config", _fsl_path_join(pkg, "cfg"));
+    assert_eq(cmd_link(pkg, 1), 1, "a source holding its target is refused");
+    assert_eq(_test_file_size(app), 2, "the file there is untouched");
+
+    # The target absent: a plain link planted a self-loop at exit 0.
+    _t111_pkg_at(pkg, "\n[[link]]\nsource = \"zz\"\ntarget = \".zz\"\n");
+    hapi_symlink("../../.zz", _fsl_path_join(pkg, "zz"));
+    assert_eq(cmd_link(pkg, 0), 1, "a source naming its absent target is refused");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, ".zz"))), HAPI_LP_ABSENT,
+      "no loop was planted");
+
+    # A source that passes through its absent target and leaves by `..`
+    # ends elsewhere, but the link would put itself on its own path.
+    _test_write_file(_fsl_path_join(home, "real"), "r");
+    _t111_pkg_at(pkg, "\n[[link]]\nsource = \"via\"\ntarget = \".t\"\n");
+    hapi_symlink("../../.t/../real", _fsl_path_join(pkg, "via"));
+    assert_eq(cmd_link(pkg, 0), 1, "a source passing through its target is refused");
+
+    # A source that cannot be followed to an end (a loop) is refused.
+    _t111_pkg_at(pkg, "\n[[link]]\nsource = \"loop\"\ntarget = \".lp\"\n");
+    hapi_symlink("loop", _fsl_path_join(pkg, "loop"));
+    assert_eq(cmd_link(pkg, 0), 1, "a looping source is refused");
+
+    # An ordinary source that is a link elsewhere in $HOME still links.
+    _t111_pkg_at(pkg, "\n[[link]]\nsource = \"ok\"\ntarget = \".ok\"\n");
+    hapi_symlink("../../real", _fsl_path_join(pkg, "ok"));
+    assert_eq(cmd_link(pkg, 0), 0, "a source linking elsewhere is fine");
+    _r171_clear();
+    return 0;
+}
+
+# Package nvim links a directory; package over has a row inside it.
+fn _r171_two_pkgs(home): i64 {
+    fsl_mkdir_parents(_fsl_path_join(home, "dot/nvim/nvim/x"));
+    fsl_mkdir_parents(_fsl_path_join(home, ".config/x"));
+    var a = _t111_pkg_at(_fsl_path_join(home, "dot/nvim"),
+      "\n[[link]]\nsource = \"nvim\"\ntarget = \".config/nvim\"\n");
+    _test_write_file(_fsl_path_join(a, "nvim/init.lua"), "only copy");
+    return a;
+}
+
+fn test_target_in_another_package() {
+    test_group("link / adopt: another package's source is not this package's target (F-070)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var a = _r171_two_pkgs(home);
+    var orig = _fsl_path_join(a, "nvim/init.lua");
+    # The manifest names the package; give the second one its own name.
+    var b = _fsl_path_join(home, "dot/over");
+    hapi_mkdir(b, 0x1C0);
+    _test_write_file(_fsl_path_join(b, "hapi.cyml"),
+      _r171_cat(_r171_hdr("over"), _r171_row("init.lua", ".config/nvim/init.lua")));
+    _test_write_file(_fsl_path_join(b, "init.lua"), "override");
+
+    assert_eq(cmd_link(a, 0), 0, "package nvim links its directory");
+    assert_eq(cmd_link(b, 0), 1, "package over is refused");
+    assert_eq(cmd_link(b, 1), 1, "and --force does not override it");
+    assert_eq(link_probe_kind(link_probe(orig)), HAPI_LP_FILE, "nvim's file is still a file");
+    assert_eq(_test_file_size(orig), 9, "with every byte");
+    assert_eq(cmd_status_run(a, 0), 0, "and nvim is still OK");
+
+    var c = _fsl_path_join(home, "dot/c");
+    hapi_mkdir(c, 0x1C0);
+    _test_write_file(_fsl_path_join(c, "hapi.cyml"), "[package]\nname = \"c\"\nversion = \"1.0.0\"\n");
+    assert_eq(cmd_adopt(_fsl_path_join(home, ".config/nvim/init.lua"), c), 1,
+      "adopt into another package refuses it");
+    assert_eq(_test_file_size(orig), 9, "the file stays in nvim");
+
+    # Unlinked, nvim's files are still nvim's: a user's own link into
+    # them does not make them over's.
+    assert_eq(cmd_unlink("p"), 0, "nvim (named p) is unlinked");
+    hapi_symlink("../dot/nvim/nvim", _fsl_path_join(home, ".config/nvim"));
+    assert_eq(cmd_link(b, 1), 1, "over is still refused, through the user's link");
+    assert_eq(_test_file_size(orig), 9, "nvim's file is untouched");
+    hapi_unlink(_fsl_path_join(home, ".config/nvim"));
+    assert_eq(cmd_link(b, 0), 0, "with no link into nvim, over links");
+
+    # An adopted file is the package's only copy: a row reaching it
+    # through a user's link into that package is refused too.
+    var e = _fsl_path_join(home, "dot/e");
+    hapi_mkdir(e, 0x1C0);
+    _test_write_file(_fsl_path_join(e, "hapi.cyml"), "[package]\nname = \"e\"\nversion = \"1.0.0\"\n");
+    _test_write_file(_fsl_path_join(home, ".conf"), "adopted");
+    assert_eq(cmd_adopt(_fsl_path_join(home, ".conf"), e), 0, "package e adopts ~/.conf");
+    hapi_symlink("dot/e", _fsl_path_join(home, "edir"));
+    var f = _fsl_path_join(home, "dot/f");
+    hapi_mkdir(f, 0x1C0);
+    _test_write_file(_fsl_path_join(f, "hapi.cyml"),
+      "[package]\nname = \"f\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"conf\"\ntarget = \"edir/conf\"\n");
+    _test_write_file(_fsl_path_join(f, "conf"), "other");
+    assert_eq(cmd_link(f, 1), 1, "a row into e's adopted file is refused");
+    assert_eq(_test_file_size(_fsl_path_join(e, "conf")), 7, "e's only copy is untouched");
+
+    # A trail hapi cannot read cannot say whose files these are.
+    var tr = _fsl_path_join(d, "audit.jsonl");
+    var fd = file_open(tr, O_WRONLY | O_APPEND, 0);
+    var junk = "NOT JSON\n{\"op\":\"checkpoint\"}\n";
+    file_write(fd, junk, strlen(junk));
+    file_close(fd);
+    # A row reached through a symlink (the user's `ln -> realdir`) is the
+    # kind the trail is read for.
+    hapi_mkdir(_fsl_path_join(home, "realdir"), 0x1C0);
+    hapi_symlink("realdir", _fsl_path_join(home, "ln"));
+    var g = _fsl_path_join(home, "dot/g");
+    hapi_mkdir(g, 0x1C0);
+    _test_write_file(_fsl_path_join(g, "hapi.cyml"), _r171_cat(_r171_hdr("g"), _r171_row("gf", "ln/gnew")));
+    _test_write_file(_fsl_path_join(g, "gf"), "g");
+    assert_eq(cmd_link(g, 0), 1, "link refuses when the trail cannot be read");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(home, "realdir/gnew"))), HAPI_LP_ABSENT,
+      "and links nothing");
+
+    # The cheap test before any source is resolved.
+    assert_eq(_hlnk_has_component("/h/dot/nvim/x", "nvim"), 1, "a component in the middle");
+    assert_eq(_hlnk_has_component("/h/dot/nvim", "nvim"), 1, "the last component");
+    assert_eq(_hlnk_has_component("/h/dot/nvimx/y", "nvim"), 0, "not a prefix of a longer name");
+    assert_eq(_hlnk_has_component("/h/dot/xnvim", "nvim"), 0, "not a suffix of one");
+    _r171_clear();
+    return 0;
+}
+
+# The package sources are kept for the process and read again only from
+# where the last read stopped. A trail now shorter than that, or one set
+# again, starts over.
+fn _r171_append_src(d, name): i64 {
+    var src = _fsl_path_join(d, name);
+    var t, v = audit_append_link_r("p", "1.0.0", "sha1c:00", name, name, src, _fsl_path_join(d, "t"), 0);
+    return is_ok(t);
+}
+
+fn test_package_sources_follow_the_trail() {
+    test_group("link: the package sources follow the trail as it grows or is replaced (F-070)");
+
+    var d = _test_scratch_dir();
+    var tr = _fsl_path_join(d, "audit.jsonl");
+    audit_set_trail_path(tr);
+    _r171_append_src(d, "s1");
+    _r171_append_src(d, "s2");
+    var a = hlnk_package_sources();
+    assert(a != 0, "the trail is read");
+    if (a != 0) { assert_eq(vec_len(a), 2, "two sources"); }
+    _r171_append_src(d, "s3");
+    var b = hlnk_package_sources();
+    if (b != 0) { assert_eq(vec_len(b), 3, "a third, read from where the last read stopped"); }
+
+    # Replaced by a shorter trail: what was read no longer applies.
+    _test_write_file(tr, "");
+    _r171_append_src(d, "s9");
+    var c = hlnk_package_sources();
+    assert(c != 0, "a shorter trail is read again from the start");
+    if (c != 0) { assert_eq(vec_len(c), 1, "and holds only its own source"); }
+
+    # Replaced by a longer one, and set again: also from the start.
+    _test_write_file(tr, "");
+    var k = 0;
+    while (k < 4) {
+        _r171_append_src(d, _r171_cat("n", _r171_cat("x", "abcdefghij" + k)));
+        k = k + 1;
+    }
+    audit_set_trail_path(tr);
+    var e = hlnk_package_sources();
+    assert(e != 0, "a trail set again is read from the start");
+    if (e != 0) { assert_eq(vec_len(e), 4, "and holds its four sources"); }
+    _test_clear_env();
+    return 0;
+}
+
+# One no-arg sync: package aa links a directory, then package bb's row
+# would be written inside it.
+fn test_sync_across_packages() {
+    test_group("sync: one package's directory link does not take another's row (F-070)");
+
+    var d = _test_scratch_dir();
+    var home = _r171_env(d);
+    var root = _fsl_path_join(home, "dots");
+    fsl_mkdir_parents(_fsl_path_join(root, "aa/dir/x"));
+    _test_write_file(_fsl_path_join(root, "aa/hapi.cyml"),
+      "[package]\nname = \"aa\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"dir\"\ntarget = \".cfg\"\n");
+    hapi_mkdir(_fsl_path_join(root, "bb"), 0x1C0);
+    _test_write_file(_fsl_path_join(root, "bb/hapi.cyml"),
+      "[package]\nname = \"bb\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"f\"\ntarget = \".cfg/f\"\n");
+    _test_write_file(_fsl_path_join(root, "bb/f"), "f");
+    sync_set_package_roots(root);
+
+    assert_eq(cmd_sync(0), 1, "the sync fails for bb");
+    assert_eq(link_probe_kind(link_probe(_fsl_path_join(root, "aa/dir/f"))), HAPI_LP_ABSENT,
+      "nothing was written into aa's files");
+    sync_set_package_roots(0);
+    _r171_clear();
+    return 0;
+}
+
+# F-071: adopt's move never replaces the package-side name. A file, a
+# link or a dangling link already there refuses it; an absent name takes
+# it, and the old name is gone.
+fn test_rename_noreplace() {
+    test_group("adopt's move never replaces what is at the package-side name (F-071)");
+
+    var d = _test_scratch_dir();
+    var a = _fsl_path_join(d, "a");
+    var b = _fsl_path_join(d, "b");
+    _test_write_file(a, "AAA");
+    _test_write_file(b, "BB");
+    assert_eq(hapi_rename_noreplace(a, b), 0 - 17, "an existing file refuses the move");
+    assert_eq(link_probe_kind(link_probe(a)), HAPI_LP_FILE, "the file stays where it was");
+    assert_eq(link_probe_kind(link_probe(b)), HAPI_LP_FILE, "and so does the one in the way");
+    var dl = _fsl_path_join(d, "dl");
+    hapi_symlink("nowhere", dl);
+    assert_eq(hapi_rename_noreplace(a, dl), 0 - 17, "a dangling link refuses it too");
+    var c = _fsl_path_join(d, "c");
+    assert_eq(hapi_rename_noreplace(a, c), 0, "an absent name takes it");
+    assert_eq(link_probe_kind(link_probe(a)), HAPI_LP_ABSENT, "the old name is gone");
+    assert_eq(link_probe_kind(link_probe(c)), HAPI_LP_FILE, "the new one holds the file");
+    return 0;
+}
+
+# F-072: only an absolute base names the trail. An unset or empty HOME
+# fell back to /tmp/.local/state, and a relative XDG_STATE_HOME or HOME
+# was used under whatever the cwd was.
+fn test_trail_path_needs_an_absolute_base() {
+    test_group("audit: the trail lives only under an absolute base (F-072)");
+
+    _assert_cstr(audit_path_from("/x/state", "/h"), "/x/state/hapi/audit.jsonl", "an absolute XDG_STATE_HOME");
+    _assert_cstr(audit_path_from(0, "/h"), "/h/.local/state/hapi/audit.jsonl", "unset: under HOME");
+    _assert_cstr(audit_path_from("", "/h"), "/h/.local/state/hapi/audit.jsonl", "empty: under HOME");
+    _assert_cstr(audit_path_from("rel/state", "/h"), "/h/.local/state/hapi/audit.jsonl",
+      "a relative XDG_STATE_HOME is ignored, as the spec says");
+    assert_eq(audit_path_from(0, 0), 0, "no HOME: no trail, not /tmp");
+    assert_eq(audit_path_from(0, ""), 0, "an empty HOME: no trail");
+    assert_eq(audit_path_from(0, "rel"), 0, "a relative HOME: no trail");
+    assert_eq(audit_path_from("rel", "rel"), 0, "both relative: no trail");
+    return 0;
+}
+
+# F-074: a value the header ends inside was read to the end, so a
+# manifest cut mid-row parsed with a truncated target.
+fn test_unterminated_value_refused() {
+    test_group("manifest: a value with no closing quote is an error (F-074)");
+
+    _expect_err("cut inside the last value",
+      "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"a\"\ntarget = \".ab",
+      HapiMfUnterminated);
+    _expect_err("an escaped quote is not a closing one",
+      "[package]\nname = \"p\"\nversion = \"1.0.0\\\"\n", HapiMfUnterminated);
+
+    # Every prefix of a manifest either fails to parse or holds only
+    # whole rows of it: a cut can drop a row, never shorten one.
+    var full = _r171_cat(_r171_cat(_r171_hdr("p"), _r171_row("alpha", ".alpha-target")),
+      _r171_row("beta", ".beta-target"));
+    var fl = strlen(full);
+    var bad = 0;
+    var n = 1;
+    while (n <= fl) {
+        var t, v = hapi_mf_parse_header_r(full, n);
+        if (is_ok(t) == 1) {
+            var links = hapi_mf_links(v);
+            var k = 0;
+            while (k < vec_len(links)) {
+                var l = vec_get(links, k);
+                var src = _fsl_str_to_cstr(hapi_link_source(l));
+                var tgt = _fsl_str_to_cstr(hapi_link_target(l));
+                var whole = 0;
+                if (_test_cstr_eq(src, "alpha") == 1 && _test_cstr_eq(tgt, ".alpha-target") == 1) { whole = 1; }
+                if (_test_cstr_eq(src, "beta") == 1 && _test_cstr_eq(tgt, ".beta-target") == 1) { whole = 1; }
+                if (whole == 0) { bad = bad + 1; }
+                k = k + 1;
+            }
+        }
+        n = n + 1;
+    }
+    assert_eq(bad, 0, "no prefix yields a shortened row");
+    var gt, gv = hapi_mf_parse_header_r(full, fl);
+    assert_eq(is_ok(gt), 1, "and after all those, a whole manifest still parses");
+    return 0;
+}
+
+# F-073: a failed read was taken as the end of the file, and a file that
+# changed size while it was read was taken as whole.
+fn test_manifest_read_is_whole() {
+    test_group("manifest: a read that fails or comes up short is refused (F-073)");
+
+    var d = _test_scratch_dir();
+    var len = 0;
+    assert_eq(manifest_read(d, &len), 0, "a read that fails (a directory) is not an empty file");
+    var mf = _fsl_path_join(d, "hapi.cyml");
+    hapi_mkdir(mf, 0x1C0);
+    var t, v = hapi_mf_parse_file_r(mf);
+    assert_eq(is_err_result(t), 1, "a manifest that cannot be read is an error");
+    assert_eq(v, HapiMfIoErr, "reported as could-not-read");
+
+    # sysfs reports 4096 bytes and holds fewer: the size it began with is
+    # not what came back, exactly the shape of a file truncated mid-read.
+    var sys = "/sys/devices/system/cpu/online";
+    if (link_probe_kind(link_probe(sys)) == HAPI_LP_FILE) {
+        assert_eq(manifest_read(sys, &len), 0, "a read shorter than the file's size is refused");
+        assert_eq(manifest_read_was_torn(), 1, "as a changed file, not an unreadable one");
+        var st, sv = hapi_mf_parse_file_r(sys);
+        assert_eq(sv, HapiMfChanged, "and the parse says to rerun");
+    } else {
+        assert(1, "no sysfs here; the short read is not constructed");
+    }
+    return 0;
+}
+
+# ============================================================
 # 1.7.1 — the run removes its scratch directories
 # ============================================================
 
@@ -5775,6 +6505,22 @@ fn main() {
     test_fmt_refusals();
     test_fmt_crlf_and_dry_run();
     test_cli_fmt();
+    test_resolve_relative_link_texts();
+    test_relative_link_escape_refused();
+    test_relative_parent_link_text();
+    test_legacy_text_links_stay_removable();
+    test_unprobeable_component_refused();
+    test_nested_rows_by_place();
+    test_link_stops_when_a_row_moves();
+    test_force_failed_symlink_keeps_the_file();
+    test_source_leading_to_its_target();
+    test_target_in_another_package();
+    test_sync_across_packages();
+    test_package_sources_follow_the_trail();
+    test_rename_noreplace();
+    test_trail_path_needs_an_absolute_base();
+    test_unterminated_value_refused();
+    test_manifest_read_is_whole();
     test_scratch_rmtree_never_follows();
     test_scratch_cleanup();         # last: it removes every scratch directory
     return assert_summary();

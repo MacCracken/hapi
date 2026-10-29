@@ -33,19 +33,29 @@ enum HapiAuditError {
 
 # Default audit-trail path under XDG_STATE_HOME (or
 # $HOME/.local/state when unset). Returns a heap-allocated
-# null-terminated cstring. May be overridden by tests via
-# `audit_set_trail_path()` — that path takes precedence.
+# null-terminated cstring, or 0 when neither gives an absolute base.
+# May be overridden by tests via `audit_set_trail_path()` — that path
+# takes precedence.
 fn _audit_default_path(): i64 {
-    var xdg = getenv("XDG_STATE_HOME");
+    return audit_path_from(getenv("XDG_STATE_HOME"), getenv("HOME"));
+}
+
+# The trail path for these two variables (F-072). Only an absolute base
+# counts, as the XDG Base Directory spec requires of XDG_STATE_HOME and
+# as a home directory always is. Through 1.7.0 an unset or empty HOME
+# fell back to /tmp/.local/state, and a relative XDG_STATE_HOME or HOME
+# was used as given, under whatever the cwd was. Either can be a
+# directory another user owns: their planted entries drove rollback,
+# and from another cwd unlink said the trail was empty. A relative
+# XDG_STATE_HOME is ignored, as the spec says; with no absolute HOME
+# either, there is no trail, and every verb that needs one refuses.
+fn audit_path_from(xdg, home): i64 {
     var base = 0;
-    if (xdg != 0 && strlen(xdg) > 0) {
+    if (xdg != 0 && strlen(xdg) > 0 && load8(xdg) == 47) {
         base = xdg;
     } else {
-        var home = getenv("HOME");
-        if (home == 0 || strlen(home) == 0) {
-            # Last-ditch fallback. Better than crashing.
-            home = "/tmp";
-        }
+        if (home == 0 || strlen(home) == 0) { return 0; }
+        if (load8(home) != 47) { return 0; }
         var hlen = strlen(home);
         var suffix = "/.local/state";
         var slen = 13;
@@ -72,12 +82,25 @@ var _audit_override_path = 0;
 
 fn audit_set_trail_path(path): i64 {
     _audit_override_path = path;
+    _audit_path_gen = _audit_path_gen + 1;
     return 0;
 }
+
+# Bumped by every audit_set_trail_path: a reader that keeps what it read
+# (hlnk_package_sources) starts again when it changes.
+var _audit_path_gen = 0;
+fn audit_path_gen(): i64 { return _audit_path_gen; }
 
 fn audit_trail_path(): i64 {
     if (_audit_override_path != 0) { return _audit_override_path; }
     return _audit_default_path();
+}
+
+# audit_trail_path() for a message: the path, or why there is none.
+fn audit_trail_path_shown(): i64 {
+    var p = audit_trail_path();
+    if (p == 0) { return "(no trail location: $XDG_STATE_HOME and $HOME are unset or not absolute)"; }
+    return p;
 }
 
 # Recursively mkdir the parent of `file_path`. Treats EEXIST
@@ -131,6 +154,7 @@ fn _audit_mkdir_parents(file_path): i64 {
 # success, Err(...) shape encoded as a negative value otherwise.
 fn audit_ensure_dir(): i64 {
     var path = audit_trail_path();
+    if (path == 0) { return 0 - 1; }
     return _audit_mkdir_parents(path);
 }
 
@@ -649,7 +673,13 @@ fn audit_append_marker_r(label, from): Result {
 fn audit_manifest_hash(path): i64 {
     var mr_t, mr_v = hapi_mf_parse_file_r(path);
     if (is_err_result(mr_t) == 1) { return 0; }
-    var m = mr_v;
+    return audit_manifest_hash_of(mr_v);
+}
+
+# The `sha1c:` hash of a manifest already parsed (F-075): link hashes the
+# rows it applied, not a second, independent read of the file, which
+# another writer could have changed in between.
+fn audit_manifest_hash_of(m): i64 {
 
     # Size the buffer from the parsed manifest rather than a fixed
     # 64 KB. `hapi_mf_canonical_size` over-estimates and the

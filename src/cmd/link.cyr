@@ -28,6 +28,8 @@ include "src/cap.cyr"
 include "src/dry_run.cyr"
 include "src/absolute.cyr"
 include "src/backup.cyr"
+include "src/audit_reader.cyr"
+include "lib/hashmap.cyr"     # hlnk_package_sources
 
 enum HapiLinkAction {
     LINK_ACT_CREATE = 0;
@@ -40,6 +42,9 @@ enum HapiLinkAction {
     LINK_ACT_NO_SOURCE = 7;
     LINK_ACT_INTO_PACKAGE = 8;
     LINK_ACT_NESTED = 9;
+    LINK_ACT_SAME_TARGET = 10;
+    LINK_ACT_SOURCE_LOOP = 11;
+    LINK_ACT_OTHER_PACKAGE = 12;
 }
 
 # Test/CI override for the scope root. When set, takes
@@ -67,14 +72,163 @@ fn _hlnk_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
 #   +24  relative_target  (cstring — what we'd write into the symlink)
 #   +32  action           (HapiLinkAction)
 #   +40  existing_target  (cstring — only set when action == CONFLICT_SYMLINK)
+# Every package source the trail records (F-070): a vec of 32-byte
+# {pkg, source, place, resolved} records, one per source, or 0 when the
+# trail cannot be read. `place`, where the source physically sits, is
+# resolved only when hlnk_owner_at needs it. Every link and adopt counts, unlinked or not: a
+# package's files are its own whether or not hapi's link to them is
+# still there. The place is the source's parent resolved, plus its name
+# — a package reached through a symlinked directory is found where it
+# really is, and a source that is itself a symlink protects only that
+# link. The caller's own package is refused before this, as F-045's
+# into-package case.
+#
+# A no-arg sync plans every package against a trail that grows as it
+# goes. Reading and resolving the whole trail again per package made a
+# cold 100-package sync 5.8 times slower, so the list is kept for the
+# process and only the lines appended since are read. It starts again
+# for another trail path, and for one now shorter than what was read.
+var _hlnk_src_gen = 0 - 1;
+var _hlnk_src_path = 0;
+var _hlnk_src_end = 0;
+var _hlnk_src_lines = 0;
+var _hlnk_src_list = 0;
+var _hlnk_src_seen = 0;
+
+fn _hlnk_sources_reset(path): i64 {
+    _hlnk_src_gen = audit_path_gen();
+    _hlnk_src_path = path;
+    _hlnk_src_end = 0;
+    _hlnk_src_lines = 0;
+    _hlnk_src_list = vec_new();
+    _hlnk_src_seen = map_new();
+    return 0;
+}
+
+fn hlnk_package_sources(): i64 {
+    var path = audit_trail_path();
+    if (path == 0) { return 0; }
+    if (_hlnk_src_list == 0 || _hlnk_src_gen != audit_path_gen()
+        || _hlnk_cstr_eq(_hlnk_src_path, path) == 0) {
+        _hlnk_sources_reset(path);
+    }
+    var tr_t, tr_v = audit_read_from_r(path, _hlnk_src_end, _hlnk_src_lines);
+    if (is_err_result(tr_t) == 1 && tr_v == HapiArShrunk) {
+        _hlnk_sources_reset(path);
+        tr_t, tr_v = audit_read_from_r(path, 0, 0);
+    }
+    if (is_err_result(tr_t) == 1) { return 0; }
+    _hlnk_src_end = audit_read_end();
+    _hlnk_src_lines = audit_read_lines();
+    var i = 0;
+    while (i < vec_len(tr_v)) {
+        var e = vec_get(tr_v, i);
+        var op = hae_op(e);
+        var src = hae_abs_source(e);
+        if (src != 0 && hae_pkg(e) != 0
+            && (_hlnk_cstr_eq(op, "link") == 1 || _hlnk_cstr_eq(op, "adopt") == 1)) {
+            if (map_has(_hlnk_src_seen, src) == 0) {
+                map_set(_hlnk_src_seen, src, 1);
+                var rec = alloc(32);
+                store64(rec, hae_pkg(e));
+                store64(rec + 8, src);
+                store64(rec + 16, 0);
+                store64(rec + 24, 0);
+                vec_push(_hlnk_src_list, rec);
+            }
+        }
+        i = i + 1;
+    }
+    return _hlnk_src_list;
+}
+
+# The package whose source holds `phys`, or 0. A source's place ends in
+# the source's own name, so it can hold `phys` only if that name is one
+# of `phys`'s components: the cheap test comes first, and a source is
+# resolved only when it passes. Resolving every source per process made
+# each cold `sync <pkg>` several milliseconds slower.
+fn hlnk_owner_at(sources, phys): i64 {
+    if (sources == 0 || phys == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(sources)) {
+        var rec = vec_get(sources, i);
+        if (_hlnk_has_component(phys, _fsl_path_basename(load64(rec + 8))) == 1) {
+            if (load64(rec + 24) == 0) {
+                store64(rec + 16, fsl_physical_target(load64(rec + 8)));
+                store64(rec + 24, 1);
+            }
+            var place = load64(rec + 16);
+            if (place != 0) {
+                if (_fsl_within(phys, place) == 1) { return load64(rec); }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when `name` is one of the `/`-separated components of `path`.
+fn _hlnk_has_component(path, name): i64 {
+    if (path == 0 || name == 0) { return 0; }
+    var pn = strlen(path);
+    var nn = strlen(name);
+    if (nn == 0) { return 0; }
+    var i = 0;
+    while (i + nn <= pn) {
+        if ((i == 0 || load8(path + i - 1) == 47)
+            && (i + nn == pn || load8(path + i + nn) == 47)
+            && memeq(path + i, name, nn) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Print the refusal header and one line per row whose action is `kind`.
+# Returns 1 when any row was printed, else 0.
+fn _hlnk_refuse_kind(m, plans, kind, why): i64 {
+    var any = 0;
+    var i = 0;
+    while (i < vec_len(plans)) {
+        var pl = vec_get(plans, i);
+        if (load64(pl + 32) == kind) {
+            if (any == 0) {
+                _hlnk_eputs("hapi: refusing to link `");
+                var nm = hapi_mf_name(m);
+                eprint(str_data(nm), str_len(nm));
+                _hlnk_eputs(why);
+            }
+            _hlnk_print_conflict(pl);
+            any = 1;
+        }
+        i = i + 1;
+    }
+    return any;
+}
+
+# How row A's target relates to row B's (F-067), given as spelled (`at`,
+# `bt`) and where each physically sits (`ap`, `bp`): 2 when they are one
+# place, 1 when A lies beneath B, else 0. A row whose place could not be
+# resolved (0) is refused as an escape anyway; it is compared as spelled,
+# as through 1.7.0.
+fn _hlnk_overlap(at, ap, bt, bp): i64 {
+    if (ap != 0 && bp != 0) {
+        if (_hlnk_cstr_eq(ap, bp) == 1) { return 2; }
+        if (_fsl_within(ap, bp) == 1) { return 1; }
+        return 0;
+    }
+    if (_fsl_within(at, bt) == 1 && _hlnk_cstr_eq(at, bt) == 0) { return 1; }
+    return 0;
+}
+
 fn _hlnk_plan_new(): i64 {
-    var p = alloc(48);
+    var p = alloc(56);
     store64(p, 0);
     store64(p + 8, 0);
     store64(p + 16, 0);
     store64(p + 24, 0);
     store64(p + 32, 0);
     store64(p + 40, 0);
+    store64(p + 48, 0);      # where the target physically sits, at plan time
     return p;
 }
 
@@ -126,6 +280,7 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     store64(plan + 8, abs_src);
     store64(plan + 16, abs_tgt);
     store64(plan + 24, text);
+    store64(plan + 48, fsl_physical_target(abs_tgt));
 
     # Does the target's parent PHYSICALLY sit inside the scope root?
     # An ordinary convenience symlink — `~/.config -> /mnt/other/etc` —
@@ -158,6 +313,14 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     # which would call that file an ordinary conflict.
     if (fsl_lands_in(abs_tgt, pkg_dir_abs) == 1) {
         store64(plan + 32, LINK_ACT_INTO_PACKAGE);
+        return plan;
+    }
+
+    # A source that leads back to its own target would make the link
+    # point at itself, and `--force` would delete the only copy (F-069).
+    if (fsl_source_reaches(abs_src, load64(plan + 48)) == 1) {
+        store64(plan + 32, LINK_ACT_SOURCE_LOOP);
+        store64(plan + 40, fsl_resolve_path(abs_src));
         return plan;
     }
 
@@ -217,6 +380,28 @@ fn _hlnk_print_conflict(plan): i64 {
         _hlnk_eputs("(beneath another row's target: ");
         if (outer != 0) { eprint(outer, strlen(outer)); }
         _hlnk_eputs(")");
+    } elif (action == LINK_ACT_SOURCE_LOOP) {
+        var ends = load64(plan + 40);
+        if (ends == 0) {
+            _hlnk_eputs("(the source cannot be followed to an end)");
+        } else {
+            _hlnk_eputs("(the source leads back to the target: ");
+            eprint(ends, strlen(ends));
+            _hlnk_eputs(")");
+        }
+    } elif (action == LINK_ACT_OTHER_PACKAGE) {
+        var owner = load64(plan + 40);
+        _hlnk_eputs("(resolves into package `");
+        if (owner != 0) { eprint(owner, strlen(owner)); }
+        _hlnk_eputs("`'s source: ");
+        var ph = load64(plan + 48);
+        if (ph != 0) { eprint(ph, strlen(ph)); }
+        _hlnk_eputs(")");
+    } elif (action == LINK_ACT_SAME_TARGET) {
+        var other = load64(plan + 40);
+        _hlnk_eputs("(the same place as another row's target: ");
+        if (other != 0) { eprint(other, strlen(other)); }
+        _hlnk_eputs(")");
     } elif (action == LINK_ACT_INTO_PACKAGE) {
         var phys = fsl_physical_target(abs_tgt);
         _hlnk_eputs("(resolves into the package");
@@ -271,7 +456,7 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
     }
     var m = mr_v;
 
-    var manifest_hash = audit_manifest_hash(manifest_path);
+    var manifest_hash = audit_manifest_hash_of(m);   # the rows it applies (F-075)
     if (manifest_hash == 0) {
         _hlnk_eputs("hapi: could not hash manifest at ");
         eprint(manifest_path, strlen(manifest_path));
@@ -294,10 +479,44 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
     var noop_count = 0;
     var create_count = 0;
 
+    # A target that physically lands in ANOTHER package's live source is
+    # that package's file (F-070). F-045 asked the question of this
+    # package only: with package A's `.config/nvim -> A/nvim`, package
+    # B's row `.config/nvim/init.lua` is A's only copy of init.lua, which
+    # `link --force B` deleted while `status A` still said OK. The trail
+    # says where every package's sources are; it is read once, and only
+    # when a row reached through a symlink would write.
+    var others = 0;
     var i = 0;
     while (i < nlinks) {
         var p = _hlnk_plan_one(vec_get(links, i), pkg_dir_abs, scope_root_abs);
         vec_push(plans, p);
+        var pa = load64(p + 32);
+        # Only a target reached through a symlink can land in another
+        # package's files: with none in its chain, its physical place is
+        # its own spelling, which the user chose. So the trail is read
+        # only for such a row.
+        var ph = load64(p + 48);
+        var through_link = 0;
+        if (ph != 0) {
+            if (_hlnk_cstr_eq(ph, fsl_lexical_normalize(load64(p + 16))) == 0) { through_link = 1; }
+        }
+        if (through_link == 1 && (pa == LINK_ACT_CREATE || pa == LINK_ACT_CONFLICT_SYMLINK
+            || pa == LINK_ACT_CONFLICT_FILE || pa == LINK_ACT_CONFLICT_DIR)) {
+            if (others == 0) {
+                others = hlnk_package_sources();
+                if (others == 0) {
+                    _hlnk_eputs("hapi: the audit trail could not be read, so hapi cannot tell\n");
+                    _hlnk_eputs("  whether a target is another package's file; nothing was changed\n");
+                    return Err(1);
+                }
+            }
+            var owner = hlnk_owner_at(others, load64(p + 48));
+            if (owner != 0) {
+                store64(p + 32, LINK_ACT_OTHER_PACKAGE);
+                store64(p + 40, owner);
+            }
+        }
         var act = load64(p + 32);
         if (act == LINK_ACT_CREATE) { create_count = create_count + 1; }
         elif (act == LINK_ACT_NOOP) { noop_count = noop_count + 1; }
@@ -370,6 +589,14 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
     # a package symlink `escape -> /outside` behind `.x`, and `.x/inner`
     # landed in /outside, exit 0. Even without an escape the inner row
     # writes into the package through hapi's own link. No layout needs it.
+    #
+    # Rows are compared where they are, not as spelled (F-067). Through
+    # 1.7.0 the raw strings were compared, so `./.x/inner`, `/.x/inner`
+    # and a user's `alias -> .x` with a row `alias/inner` all passed, and
+    # the inner row was written through the outer row's new link. Two
+    # rows that name one place the same way passed the parser's duplicate
+    # check by spelling too, and the second replaced the first. Each row
+    # is compared at its physical location (the planner's +48).
     var nested = 0;
     var ka = 0;
     while (ka < nlinks) {
@@ -378,8 +605,12 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
         while (kb < nlinks) {
             if (kb != ka) {
                 var plb = vec_get(plans, kb);
-                if (_fsl_within(load64(pla + 16), load64(plb + 16)) == 1
-                    && _hlnk_cstr_eq(load64(pla + 16), load64(plb + 16)) == 0) {
+                var ov = _hlnk_overlap(load64(pla + 16), load64(pla + 48),
+                  load64(plb + 16), load64(plb + 48));
+                if (ov == 2) {
+                    store64(pla + 32, LINK_ACT_SAME_TARGET);
+                    store64(pla + 40, load64(plb + 16));
+                } elif (ov == 1 && load64(pla + 32) != LINK_ACT_SAME_TARGET) {
                     store64(pla + 32, LINK_ACT_NESTED);
                     store64(pla + 40, load64(plb + 16));
                 }
@@ -387,6 +618,27 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
             kb = kb + 1;
         }
         ka = ka + 1;
+    }
+    var same = 0;
+    var ks = 0;
+    while (ks < nlinks) {
+        var pls = vec_get(plans, ks);
+        if (load64(pls + 32) == LINK_ACT_SAME_TARGET) {
+            if (same == 0) {
+                _hlnk_eputs("hapi: refusing to link `");
+                var pkg_ns = hapi_mf_name(m);
+                eprint(str_data(pkg_ns), str_len(pkg_ns));
+                _hlnk_eputs("` — two rows name the same target:\n");
+            }
+            _hlnk_print_conflict(pls);
+            same = 1;
+        }
+        ks = ks + 1;
+    }
+    if (same == 1) {
+        _hlnk_eputs("  the second link would replace the first. --force does NOT\n");
+        _hlnk_eputs("  override this.\n");
+        return Err(1);
     }
     var kn = 0;
     while (kn < nlinks) {
@@ -435,6 +687,22 @@ fn _hlnk_plan_run(pkg_arg, force): Result {
         _hlnk_eputs("  possibly the row's own source. --force does NOT override\n");
         _hlnk_eputs("  this. Point the target elsewhere, or remove the symlinked\n");
         _hlnk_eputs("  parent if the package is meant to be reached directly.\n");
+        return Err(1);
+    }
+
+    if (_hlnk_refuse_kind(m, plans, LINK_ACT_OTHER_PACKAGE,
+          "` — a target resolves into another package's source:\n") == 1) {
+        _hlnk_eputs("  a link that package made leads this target into its files.\n");
+        _hlnk_eputs("  --force does NOT override this. Change the file through that\n");
+        _hlnk_eputs("  package, or point the target elsewhere.\n");
+        return Err(1);
+    }
+    if (_hlnk_refuse_kind(m, plans, LINK_ACT_SOURCE_LOOP,
+          "` — a row's source leads back to its own target:\n") == 1) {
+        _hlnk_eputs("  the link would point at itself, and the file there is what\n");
+        _hlnk_eputs("  the source shows. --force does NOT override this. Put the file\n");
+        _hlnk_eputs("  itself in the package (`hapi adopt` moves it there), or fix\n");
+        _hlnk_eputs("  the source.\n");
         return Err(1);
     }
 
@@ -528,7 +796,7 @@ fn hlnk_preflight(what): i64 {
         _hlnk_eputs("hapi: audit trail is not writable; refusing to ");
         _hlnk_eputs(what);
         _hlnk_eputs("\n  ");
-        _hlnk_eputs(audit_trail_path());
+        _hlnk_eputs(audit_trail_path_shown());
         _hlnk_eputs("\n  every hapi write must be auditable; nothing was changed\n");
         return 1;
     }
@@ -537,6 +805,27 @@ fn hlnk_preflight(what): i64 {
 
 # Write a planned run: each create (and, with --force, each replaced
 # conflict), one audit entry per link, then the summary line.
+# Replace what is at `abs_tgt` with a symlink to `text`, in one step: the
+# link is made under a temporary name beside it, then renamed over it.
+# Either the old file is still there, untouched, or the new link is. The
+# temporary name is never one hapi did not create: an existing one fails
+# the symlink, and is left alone. Returns 0, or <0 with the old file kept.
+fn _hlnk_replace(text, abs_tgt): i64 {
+    var buf[32];
+    var pre = ".hapi-new-";
+    var p = strlen(pre);
+    memcpy(&buf, pre, p);
+    p = p + fmt_int_buf(sys_getpid(), &buf + p);
+    store8(&buf + p, 0);
+    var tmp = _fsl_path_join(_fsl_path_dirname(abs_tgt), &buf);
+    if (hapi_symlink(text, tmp) < 0) { return 0 - 1; }
+    if (hapi_rename(tmp, abs_tgt) < 0) {
+        hapi_unlink(tmp);
+        return 0 - 1;
+    }
+    return 0;
+}
+
 fn _hlnk_execute(run, force): i64 {
     var m = load64(run);
     var plans = load64(run + 32);
@@ -556,9 +845,34 @@ fn _hlnk_execute(run, force): i64 {
         var rel = load64(pl + 24);
 
         var should_create = 0;
+        var replace = 0;
         var backup_path = 0;
         if (act == LINK_ACT_CREATE) { should_create = 1; }
-        if (force == 1 && (act == LINK_ACT_CONFLICT_SYMLINK || act == LINK_ACT_CONFLICT_FILE)) {
+        var forced = 0;
+        if (force == 1 && (act == LINK_ACT_CONFLICT_SYMLINK || act == LINK_ACT_CONFLICT_FILE)) { forced = 1; }
+
+        # The place a row was planned for must still be the place it
+        # writes (F-067). The plan was made before any write; a link this
+        # run made since can change where a later row's path leads — a
+        # user's `alias -> .x` that a --force row replaced makes the row
+        # `alias/inner` land wherever the new `.x` points. So once
+        # anything is written, each row's physical location is checked
+        # again, and the run stops before a row that moved.
+        if ((should_create == 1 || forced == 1) && written > 0 && hapi_dry_run() == 0) {
+            var was = load64(pl + 48);
+            var now = fsl_physical_target(abs_tgt);
+            if (was == 0 || now == 0 || _hlnk_cstr_eq(was, now) == 0) {
+                _hlnk_eputs("hapi: stopped before ");
+                eprint(abs_tgt, strlen(abs_tgt));
+                _hlnk_eputs(": a link this run made changed where it leads\n");
+                if (was != 0) { _hlnk_eputs("  planned at "); eprint(was, strlen(was)); _hlnk_eputs("\n"); }
+                if (now != 0) { _hlnk_eputs("  now at     "); eprint(now, strlen(now)); _hlnk_eputs("\n"); }
+                _hlnk_eputs("  the rows before it were linked and recorded; nothing else changed\n");
+                return 1;
+            }
+        }
+
+        if (forced == 1) {
             # --backup-to: snapshot the existing regular file
             # before we destroy it. Only meaningful for FILE
             # conflicts — symlinks point at content elsewhere,
@@ -578,6 +892,10 @@ fn _hlnk_execute(run, force): i64 {
                     }
                 }
             }
+            #ifdef CYRIUS_TARGET_AGNOS
+            # A real agnos kernel cannot rename over an existing file
+            # (F-059), so the agnos arm keeps 1.7.0's order: remove, then
+            # create.
             if (hapi_dry_run() == 0) {
                 var urc = hapi_unlink(abs_tgt);
                 if (urc < 0) {
@@ -587,6 +905,12 @@ fn _hlnk_execute(run, force): i64 {
                     return 1;
                 }
             }
+            #else
+            # The new link replaces the old file in one rename (F-068).
+            # Through 1.7.0 the file was unlinked first: if symlink(2)
+            # then failed, the user's file was gone and nothing recorded.
+            replace = 1;
+            #endif
             should_create = 1;
         }
 
@@ -605,7 +929,18 @@ fn _hlnk_execute(run, force): i64 {
                 written = written + 1;
             } else {
                 var made = 0;
-                var crc = link_create_r(rel, abs_tgt, &made);
+                var crc = 0;
+                if (replace == 1) {
+                    crc = _hlnk_replace(rel, abs_tgt);
+                    if (crc < 0) {
+                        _hlnk_eputs("hapi: could not replace ");
+                        eprint(abs_tgt, strlen(abs_tgt));
+                        _hlnk_eputs(" (--force); it was left as it was\n");
+                        return 1;
+                    }
+                } else {
+                    crc = link_create_r(rel, abs_tgt, &made);
+                }
                 if (crc < 0) {
                     _hlnk_eputs("hapi: symlink failed at ");
                     eprint(abs_tgt, strlen(abs_tgt));

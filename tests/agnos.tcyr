@@ -484,7 +484,7 @@ fn test_absolute_round_trip() {
 
 # 1.7.0: fmt rewrites through the writer's lock, read and atomic rename,
 # whose agnos arms the manifest round trip above also runs. A real kernel
-# cannot yet rename over an existing file (F-059), which fmt shares with
+# cannot rename over an existing file (F-059; issues/2026-10-28-adopt-on-agnos-kernel.md), which fmt shares with
 # adopt; mirshi can.
 fn test_fmt_round_trip() {
     test_group("fmt: format a manifest and keep its body, with absolute paths");
@@ -497,6 +497,30 @@ fn test_fmt_round_trip() {
     assert_eq(_ta_holds(mp, "[package]\nname = \"agnos-fmt\"\nversion = \"1\"\n\n---\nbody\n"), 1,
       "the canonical header, then the body as it was");
     assert_eq(cmd_fmt_run(d, 1, 0), 0, "fmt --check: formatted");
+    return 0;
+}
+
+# F-071: adopt's move never replaces the package-side name. A file, a
+# link or a dangling link already there refuses it; an absent name takes
+# it, and the old name is gone.
+fn test_rename_noreplace() {
+    test_group("adopt's move never replaces what is at the package-side name (F-071)");
+
+    var d = _ta_scratch();
+    var a = _fsl_path_join(d, "a");
+    var b = _fsl_path_join(d, "b");
+    _ta_write(a, "AAA");
+    _ta_write(b, "BB");
+    assert_eq(hapi_rename_noreplace(a, b), 0 - 17, "an existing file refuses the move");
+    assert_eq(link_probe_kind(link_probe(a)), HAPI_LP_FILE, "the file stays where it was");
+    assert_eq(link_probe_kind(link_probe(b)), HAPI_LP_FILE, "and so does the one in the way");
+    var dl = _fsl_path_join(d, "dl");
+    hapi_symlink("nowhere", dl);
+    assert_eq(hapi_rename_noreplace(a, dl), 0 - 17, "a dangling link refuses it too");
+    var c = _fsl_path_join(d, "c");
+    assert_eq(hapi_rename_noreplace(a, c), 0, "an absent name takes it");
+    assert_eq(link_probe_kind(link_probe(a)), HAPI_LP_ABSENT, "the old name is gone");
+    assert_eq(link_probe_kind(link_probe(c)), HAPI_LP_FILE, "the new one holds the file");
     return 0;
 }
 
@@ -533,6 +557,7 @@ fn main(): i64 {
     test_rollback_steps_and_to();
     test_absolute_round_trip();
     test_fmt_round_trip();
+    test_rename_noreplace();
     test_scratch_cleanup();         # last: it removes every scratch directory
     return assert_summary();
 }
