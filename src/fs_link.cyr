@@ -478,13 +478,54 @@ fn fsl_link_text(abs_target, abs_source): i64 {
     return fsl_compute_relative(rp, abs_source);
 }
 
+# The absolute text (1.6.0, `--absolute`; ADR 0003 addendum): the source's
+# path as spelled, lexically normalized and never resolved — the same
+# choice the relative text makes for its source half, so a package
+# reached through a symlink keeps that indirection.
+fn fsl_absolute_text(abs_source): i64 {
+    return fsl_lexical_normalize(abs_source);
+}
+
+# The text a link hapi creates gets: the absolute text when `absolute` is
+# 1, else the relative one. 0 for an absolute text of a source that is not
+# an absolute path — `link` and `adopt` cannot produce one, but rollback
+# reads `abs_source` from a trail that can be edited, and would write
+# that relative path as the "absolute" text. Its callers skip on 0.
+fn fsl_link_text_shaped(abs_target, abs_source, absolute): i64 {
+    if (absolute == 1) {
+        if (abs_source == 0 || load8(abs_source) != 47) { return 0; }
+        return fsl_absolute_text(abs_source);
+    }
+    return fsl_link_text(abs_target, abs_source);
+}
+
+# 1 when `text` is the absolute text for `abs_source`. A relative text is
+# ruled out on its first byte, before anything is normalized.
+fn fsl_is_absolute_text(text, abs_source): i64 {
+    if (text == 0 || abs_source == 0) { return 0; }
+    if (load8(text) != 47) { return 0; }
+    var want = fsl_absolute_text(abs_source);
+    var n = strlen(text);
+    if (strlen(want) != n) { return 0; }
+    return memeq(text, want, n);
+}
+
+# The trail's `shape` for a link whose text hapi accepted as its own:
+# "absolute" for an absolute text, 0 (no field) for a relative one.
+fn fsl_shape_of(text): i64 {
+    if (text != 0 && load8(text) == 47) { return "absolute"; }
+    return 0;
+}
+
 # 1 when the symlink text `text` at `abs_target` is one hapi wrote for
-# `abs_source`: today's text, or the lexical-parent text hapi 1.1.0 and
-# earlier wrote. Removal (unlink, rollback) accepts both, so a link an
-# older hapi planted under a symlinked parent stays removable — "we only
-# remove what we created". Creation and `status` use fsl_link_text alone.
+# `abs_source`: today's text, the absolute text (1.6.0), or the
+# lexical-parent text hapi 1.1.0 and earlier wrote. Removal (unlink,
+# rollback) accepts all three, so a link an older hapi planted under a
+# symlinked parent stays removable — "we only remove what we created".
+# Creation and `status` accept today's relative text and the absolute one.
 fn fsl_link_text_matches(text, abs_target, abs_source): i64 {
     if (text == 0) { return 0; }
+    if (fsl_is_absolute_text(text, abs_source) == 1) { return 1; }
     var tn = strlen(text);
     var now = fsl_link_text(abs_target, abs_source);
     if (now != 0) {

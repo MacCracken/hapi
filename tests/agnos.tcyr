@@ -446,6 +446,38 @@ fn test_rollback_steps_and_to() {
     return 0;
 }
 
+# 1.6.0: an absolute link through the shims — symlink, readlink and the
+# rollback that re-creates it from the entry's `shape`.
+fn test_absolute_round_trip() {
+    test_group("--absolute: link, unlink and rollback an absolute link, with the scope at /");
+
+    var d = _ta_scratch();
+    var pkg = _fsl_path_join(d, "pa");
+    hapi_mkdir(pkg, 0x1C0);
+    _ta_sync_manifest(pkg, "agnos-abs", d, "a");
+    var tgt = _fsl_path_join(d, "a");
+    var src = _fsl_path_join(pkg, "a");
+    link_set_scope_root("/");
+    audit_set_trail_path(_fsl_path_join(d, "audit.jsonl"));
+
+    hapi_set_absolute(1);
+    assert_eq(cmd_link(pkg, 0), 0, "link --absolute");
+    hapi_set_absolute(0);
+    var probe = link_probe(tgt);
+    assert(link_probe_kind(probe) == HAPI_LP_SYMLINK
+      && _har_cstr_eq(link_probe_target(probe), src) == 1, "the link text is the absolute source");
+    assert_eq(_ta_holds(tgt, "a"), 1, "...and it resolves");
+    assert_eq(cmd_checkpoint(), 0, "checkpoint");
+    assert_eq(cmd_unlink("agnos-abs"), 0, "unlink removes it");
+    assert_eq(cmd_rollback(), 0, "rollback the unlink");
+    probe = link_probe(tgt);
+    assert(link_probe_kind(probe) == HAPI_LP_SYMLINK
+      && _har_cstr_eq(link_probe_target(probe), src) == 1, "the link comes back absolute");
+    link_set_scope_root(0);
+    audit_set_trail_path(0);
+    return 0;
+}
+
 fn main(): i64 {
     test_nofollow_open();
     test_exclusive_create();
@@ -458,6 +490,7 @@ fn main(): i64 {
     test_sync_scan_and_prune();
     test_made_dirs_round_trip();
     test_rollback_steps_and_to();
+    test_absolute_round_trip();
     return assert_summary();
 }
 

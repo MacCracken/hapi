@@ -251,7 +251,7 @@ fn audit_entry_size(pkg, pkg_version, manifest_hash,
 # otherwise the entry shape is identical to the v0.7.0 format.
 fn _audit_format_link_op(out, cap, op, pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target,
-  backup_path, created_dir): i64 {
+  backup_path, created_dir, shape): i64 {
     var pos = 0;
     _audit_ovf = 0;
     var ts = iso8601_now();
@@ -284,6 +284,12 @@ fn _audit_format_link_op(out, cap, op, pkg, pkg_version, manifest_hash,
         _audit_emit_comma(out, &pos, cap);
         _audit_emit_field(out, &pos, cap, "created_dir", created_dir);
     }
+    # 1.6.0 (ADR 0002 addendum): "absolute" when the entry's link text is
+    # absolute (`--absolute`); no field for the relative default.
+    if (shape != 0 && strlen(shape) > 0) {
+        _audit_emit_comma(out, &pos, cap);
+        _audit_emit_field(out, &pos, cap, "shape", shape);
+    }
     _audit_put8(out, &pos, cap, 125);         # }
     _audit_put8(out, &pos, cap, 10);          # \n
     if (_audit_ovf == 1) { return 0 - 1; }
@@ -298,7 +304,7 @@ fn audit_format_link(out, cap, pkg, pkg_version, manifest_hash,
   backup_path): i64 {
     return _audit_format_link_op(out, cap, "link",
       pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, backup_path, 0);
+      source, target, abs_source, abs_target, backup_path, 0, 0);
 }
 
 # A link entry carrying `created_dir` (1.4.0): the outermost directory the
@@ -309,7 +315,17 @@ fn audit_format_link_created(out, cap, pkg, pkg_version, manifest_hash,
   backup_path, created_dir): i64 {
     return _audit_format_link_op(out, cap, "link",
       pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, backup_path, created_dir);
+      source, target, abs_source, abs_target, backup_path, created_dir, 0);
+}
+
+# A link entry with every additive field: `created_dir` (1.4.0) and
+# `shape` (1.6.0; "absolute", or 0 for the relative default).
+fn audit_format_link_full(out, cap, pkg, pkg_version, manifest_hash,
+  source, target, abs_source, abs_target,
+  backup_path, created_dir, shape): i64 {
+    return _audit_format_link_op(out, cap, "link",
+      pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, backup_path, created_dir, shape);
 }
 
 # Compose an unlink entry. Same shape as link with op="unlink".
@@ -319,7 +335,7 @@ fn audit_format_unlink(out, cap, pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target): i64 {
     return _audit_format_link_op(out, cap, "unlink",
       pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, 0, 0);
+      source, target, abs_source, abs_target, 0, 0, 0);
 }
 
 # Compose an adopt entry. Same shape as link with op="adopt".
@@ -330,7 +346,7 @@ fn audit_format_adopt(out, cap, pkg, pkg_version, manifest_hash,
   backup_path): i64 {
     return _audit_format_link_op(out, cap, "adopt",
       pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, backup_path, 0);
+      source, target, abs_source, abs_target, backup_path, 0, 0);
 }
 
 # Compose an unadopt entry — the rollback-reverse of adopt.
@@ -340,7 +356,7 @@ fn audit_format_unadopt(out, cap, pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target): i64 {
     return _audit_format_link_op(out, cap, "unadopt",
       pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target, 0, 0);
+      source, target, abs_source, abs_target, 0, 0, 0);
 }
 
 # Compose a rollback-marker entry. Minimal fields — just `ts`
@@ -533,46 +549,77 @@ fn audit_append_link_r(pkg, pkg_version, manifest_hash,
 fn audit_append_link_created_r(pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target,
   backup_path, created_dir): Result {
+    return audit_append_link_full_r(pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, backup_path, created_dir, 0);
+}
+
+# Every additive field: `created_dir` (1.4.0) and `shape` (1.6.0).
+fn audit_append_link_full_r(pkg, pkg_version, manifest_hash,
+  source, target, abs_source, abs_target,
+  backup_path, created_dir, shape): Result {
     var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target,
-      backup_path) + 32 + 6 * _audit_vlen(created_dir);
+      backup_path) + 64 + 6 * _audit_vlen(created_dir);
     var buf = alloc(cap);
-    var n = audit_format_link_created(buf, cap, pkg, pkg_version, manifest_hash,
+    var n = _audit_format_link_op(buf, cap, "link", pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target,
-      backup_path, created_dir);
+      backup_path, created_dir, shape);
     return _audit_append_bytes(buf, n);
 }
 
 fn audit_append_unlink_r(pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target): Result {
-    var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
+    return audit_append_unlink_shaped_r(pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target, 0);
+}
+
+# An unlink entry with `shape` (1.6.0): "absolute" when the link removed
+# had the absolute text, so that reversing it re-creates that shape.
+fn audit_append_unlink_shaped_r(pkg, pkg_version, manifest_hash,
+  source, target, abs_source, abs_target, shape): Result {
+    var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, 0) + 32;
     var buf = alloc(cap);
-    var n = audit_format_unlink(buf, cap, pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target);
+    var n = _audit_format_link_op(buf, cap, "unlink", pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, 0, 0, shape);
     return _audit_append_bytes(buf, n);
 }
 
 fn audit_append_adopt_r(pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target,
   backup_path): Result {
+    return audit_append_adopt_shaped_r(pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, backup_path, 0);
+}
+
+# An adopt entry with `shape` (1.6.0): "absolute" under `adopt --absolute`.
+fn audit_append_adopt_shaped_r(pkg, pkg_version, manifest_hash,
+  source, target, abs_source, abs_target,
+  backup_path, shape): Result {
     var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target,
-      backup_path);
+      backup_path) + 32;
     var buf = alloc(cap);
-    var n = audit_format_adopt(buf, cap, pkg, pkg_version, manifest_hash,
+    var n = _audit_format_link_op(buf, cap, "adopt", pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target,
-      backup_path);
+      backup_path, 0, shape);
     return _audit_append_bytes(buf, n);
 }
 
 fn audit_append_unadopt_r(pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target): Result {
-    var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
+    return audit_append_unadopt_shaped_r(pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target, 0);
+}
+
+# An unadopt entry with `shape` (1.6.0), as on unlink.
+fn audit_append_unadopt_shaped_r(pkg, pkg_version, manifest_hash,
+  source, target, abs_source, abs_target, shape): Result {
+    var cap = audit_entry_size(pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, 0) + 32;
     var buf = alloc(cap);
-    var n = audit_format_unadopt(buf, cap, pkg, pkg_version, manifest_hash,
-      source, target, abs_source, abs_target);
+    var n = _audit_format_link_op(buf, cap, "unadopt", pkg, pkg_version, manifest_hash,
+      source, target, abs_source, abs_target, 0, 0, shape);
     return _audit_append_bytes(buf, n);
 }
 

@@ -3543,6 +3543,7 @@ fn _cli_unexpected_arg(verb, arg): i64 {
 
 fn _cli_reset(scope): i64 {
     hapi_set_dry_run(0);
+    hapi_set_absolute(0);
     hapi_set_backup_dir(0);
     link_set_scope_root(scope);
     return 0;
@@ -4576,9 +4577,14 @@ fn _r15_live(scope, name): i64 {
     return 0;
 }
 
-fn _r15_last(audit_path): i64 {
+fn _r15_last(audit_path): i64 { return _ab_nth_last(audit_path, 1); }
+
+# The trail's `k`-th entry from the end (1 = the last), or an empty entry
+# when the trail is shorter, so a failing test reports instead of aborting.
+fn _ab_nth_last(audit_path, k): i64 {
     var t = audit_read(audit_path);
-    return vec_get(t, vec_len(t) - 1);
+    if (vec_len(t) < k) { return _hae_new(); }
+    return vec_get(t, vec_len(t) - k);
 }
 
 # 1 when the trail's last entry is a closing marker with this `from`.
@@ -4994,6 +5000,300 @@ fn test_cli_script_flags() {
     return 0;
 }
 
+# ------------------------------------------------------------
+# 1.6.0 — `--absolute`: absolute link targets (ADR 0003 addendum)
+# ------------------------------------------------------------
+
+# The text of the symlink at `path`, or 0.
+fn _ab_text(path): i64 {
+    var probe = link_probe(path);
+    if (link_probe_kind(probe) != HAPI_LP_SYMLINK) { return 0; }
+    return link_probe_target(probe);
+}
+
+# 1 when the trail's last line ends with `tail` — how a test pins a
+# field's bytes and its place in the line.
+fn _ab_last_line_ends(audit_path, tail): i64 {
+    var body = _cli_slurp(audit_path);
+    var n = strlen(body);
+    var t = strlen(tail);
+    if (n < t) { return 0; }
+    return memeq(body + n - t, tail, t);
+}
+
+fn test_absolute_text_helpers() {
+    test_group("--absolute: the absolute text and what counts as hapi's (1.6.0)");
+
+    assert_eq(_test_cstr_eq(fsl_absolute_text("/p/./a"), "/p/a"), 1, "the text is lexically normalized");
+    assert_eq(_test_cstr_eq(fsl_absolute_text("/p/q//a"), "/p/q/a"), 1, "...an empty segment dropped");
+    assert_eq(fsl_is_absolute_text("/p/a", "/p/./a"), 1, "the absolute text of the source is accepted");
+    assert_eq(fsl_is_absolute_text("/p/./a", "/p/./a"), 0, "...only in its normalized spelling");
+    assert_eq(fsl_is_absolute_text("/p/b", "/p/a"), 0, "another source's path is not");
+    assert_eq(fsl_is_absolute_text("/p/a", "/p/ab"), 0, "...nor a prefix of the source's path");
+    assert_eq(fsl_is_absolute_text("/p/a/", "/p/a"), 0, "...nor a trailing slash");
+    assert_eq(fsl_is_absolute_text("p/a", "/p/a"), 0, "a relative text is not");
+    assert_eq(fsl_is_absolute_text(0, "/p/a"), 0, "no text is not");
+    assert_eq(_test_cstr_eq(fsl_shape_of("/p/a"), "absolute"), 1, "an absolute text's shape is absolute");
+    assert_eq(fsl_shape_of("../p/a"), 0, "a relative one has none");
+    assert_eq(fsl_shape_of(0), 0, "...nor does no text");
+    assert_eq(fsl_link_text_matches("/p/a", "/h/.a", "/p/a"), 1, "removal accepts the absolute text");
+    assert_eq(_test_cstr_eq(fsl_link_text_shaped("/h/.a", "/p/a", 1), "/p/a"), 1, "shaped, absolute");
+    assert_eq(_test_cstr_eq(fsl_link_text_shaped("/h/.a", "/h/p/a", 0), "p/a"), 1, "shaped, relative");
+    return 0;
+}
+
+fn test_absolute_link() {
+    test_group("--absolute: link writes absolute targets and records the shape (1.6.0)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _cd_pkg(_test_scratch_dir(), "ab", "./a=.a b=d/e/.b");
+    var ta = _fsl_path_join(scope, ".a");
+    var tb = _fsl_path_join(scope, "d/e/.b");
+
+    hapi_set_absolute(1);
+    assert_eq(cmd_link(pkg, 0), 0, "link --absolute");
+    hapi_set_absolute(0);
+    assert_eq(_test_cstr_eq(_ab_text(ta), _fsl_path_join(pkg, "a")), 1,
+      "the text is the source's absolute path, normalized");
+    assert_eq(_test_cstr_eq(_ab_text(tb), _fsl_path_join(pkg, "b")), 1, "...for a nested target too");
+    assert_eq(_test_file_size(tb), 1, "...and the link resolves");
+    assert_eq(_test_cstr_eq(hae_shape(_cd_entry(audit_path, ta)), "absolute"), 1,
+      "the entry records shape absolute");
+    var tail = _cli_cat(_cli_cat("\"created_dir\":\"", _fsl_path_join(scope, "d")), "\",\"shape\":\"absolute\"}\n");
+    assert_eq(_ab_last_line_ends(audit_path, tail), 1, "...last, after created_dir");
+
+    var n = _sy_entries(audit_path);
+    assert_eq(cmd_link(pkg, 0), 0, "a plain link over the absolute links");
+    assert_eq(cmd_sync(pkg), 0, "a plain sync");
+    assert_eq(_sy_entries(audit_path), n, "...are both up to date, writing nothing");
+    assert_eq(cmd_status(pkg), 0, "status calls them OK, with no flag and no trail");
+
+    # The relative default writes no field at all.
+    var env2 = _test_fresh_env();
+    audit_path = load64(env2 + 8);
+    var rp = _cd_pkg(_test_scratch_dir(), "rl", "r=.r");
+    assert_eq(cmd_link(rp, 0), 0, "a plain link");
+    var body = _cli_slurp(audit_path);
+    assert_eq(_test_substr(body, strlen(body), "shape"), 0 - 1, "...writes no shape field");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_absolute_either_shape() {
+    test_group("--absolute: a link of either shape is hapi's, and only those (1.6.0)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _cd_pkg(_test_scratch_dir(), "es", "a=.a b=.b c=.c");
+    var ta = _fsl_path_join(scope, ".a");
+    var tb = _fsl_path_join(scope, ".b");
+    var tc = _fsl_path_join(scope, ".c");
+    assert_eq(cmd_link(pkg, 0), 0, "plain link: relative");
+    var n = _sy_entries(audit_path);
+    hapi_set_absolute(1);
+    assert_eq(cmd_link(pkg, 0), 0, "link --absolute over relative links");
+    hapi_set_absolute(0);
+    assert_eq(_sy_entries(audit_path), n, "...is up to date: the flag does not re-shape a link");
+    assert_eq(load8(_ab_text(ta)), 46, "...the relative text stays");
+
+    # A user swaps .a for the absolute text: still hapi's everywhere.
+    hapi_unlink(ta);
+    hapi_symlink(_fsl_path_join(pkg, "a"), ta);
+    # .b gets an absolute path that is not normalized: not hapi's text.
+    hapi_unlink(tb);
+    hapi_symlink(_cli_cat(pkg, "/./b"), tb);
+    # .c points at another file of the package, absolutely.
+    hapi_unlink(tc);
+    hapi_symlink(_fsl_path_join(pkg, "a"), tc);
+    assert_eq(cmd_status(pkg), 1, "status: drift on .b and .c");
+    assert_eq(cmd_link(pkg, 0), 1, "link refuses .b and .c as conflicts");
+    assert_eq(cmd_unlink("es"), 1, "unlink refuses .b and .c");
+    assert_eq(link_probe_kind(link_probe(ta)), HAPI_LP_ABSENT, "...and removes the absolute .a");
+    assert_eq(link_probe_kind(link_probe(tb)), HAPI_LP_SYMLINK, "...leaving the unnormalized .b");
+    assert_eq(link_probe_kind(link_probe(tc)), HAPI_LP_SYMLINK, "...and the other-source .c");
+    assert_eq(_test_cstr_eq(hae_shape(_r15_last(audit_path)), "absolute"), 1,
+      "the unlink entry records the shape it removed");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_absolute_rollback_and_prune() {
+    test_group("--absolute: rollback re-creates the shape removed, and takes no flag (1.6.0)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _cd_pkg(_test_scratch_dir(), "rb", "a=.a b=.b");
+    var ta = _fsl_path_join(scope, ".a");
+    var tb = _fsl_path_join(scope, ".b");
+    hapi_set_absolute(1);
+    cmd_link(pkg, 0);
+    hapi_set_absolute(0);
+    cmd_checkpoint();
+    assert_eq(cmd_unlink("rb"), 0, "unlink the absolute links");
+    hapi_set_absolute(0);
+    assert_eq(cmd_rollback(), 0, "rollback the unlink");
+    assert_eq(_test_cstr_eq(_ab_text(ta), _fsl_path_join(pkg, "a")), 1, "the link comes back absolute");
+    assert_eq(_test_cstr_eq(hae_shape(_cd_entry(audit_path, ta)), "absolute"), 1,
+      "...and its replayed entry says so");
+
+    # Rolling back the link itself removes the absolute link, and its
+    # unlink entry records the shape.
+    var env4 = _test_fresh_env();
+    var s4 = load64(env4);
+    var a4 = load64(env4 + 8);
+    var p4 = _cd_pkg(_test_scratch_dir(), "rl4", "x=.x");
+    hapi_set_absolute(1);
+    cmd_link(p4, 0);
+    hapi_set_absolute(0);
+    assert_eq(cmd_rollback(), 0, "rollback an absolute link");
+    assert_eq(_sy_kind(s4, ".x"), HAPI_LP_ABSENT, "...removes it");
+    var u4 = _ab_nth_last(a4, 2);
+    assert(_test_cstr_eq(hae_op(u4), "unlink") == 1 && _test_cstr_eq(hae_shape(u4), "absolute") == 1,
+      "...and its unlink entry records the shape");
+    _test_fresh_env();
+    link_set_scope_root(scope);
+    audit_set_trail_path(audit_path);
+
+    # A relative unlink comes back relative even when the flag is set:
+    # rollback follows the trail, never the run.
+    cmd_unlink("rb");
+    cmd_link(pkg, 0);                    # relative now
+    cmd_checkpoint();
+    cmd_unlink("rb");
+    hapi_set_absolute(1);
+    assert_eq(cmd_rollback(), 0, "rollback with --absolute set by a test");
+    hapi_set_absolute(0);
+    assert_eq(load8(_ab_text(tb)), 46, "the relative link comes back relative");
+    assert_eq(hae_shape(_cd_entry(audit_path, tb)), 0, "...with no shape on its entry");
+
+    # A `shape` hapi does not know is the relative default.
+    var env2 = _test_fresh_env();
+    scope = load64(env2);
+    audit_path = load64(env2 + 8);
+    var p2 = _cd_pkg(_test_scratch_dir(), "uk", "u=.u");
+    var tu = _fsl_path_join(scope, ".u");
+    cmd_link(p2, 0);
+    cmd_checkpoint();
+    hapi_unlink(tu);
+    var head = _cli_cat("{\"ts\":\"2026-10-28T00:00:00Z\",\"op\":\"unlink\",\"pkg\":\"uk\",",
+      "\"source\":\"u\",\"target\":\".u\",\"abs_source\":\"");
+    var line = _cli_cat(_cli_cat(_cli_cat(_cli_cat(head,
+      _fsl_path_join(p2, "u")), "\",\"abs_target\":\""), tu), "\",\"shape\":\"sideways\"}\n");
+    _r15_append_raw(audit_path, line);
+    assert_eq(cmd_rollback(), 0, "rollback of an unlink with an unknown shape");
+    assert_eq(load8(_ab_text(tu)), 46, "...re-creates the relative link");
+    # An absolute-shaped unlink whose abs_source is not absolute is skipped.
+    cmd_checkpoint();
+    hapi_unlink(tu);
+    var bad = _cli_cat(_cli_cat(_cli_cat(head, "u\",\"abs_target\":\""),
+      tu), "\",\"shape\":\"absolute\"}\n");
+    _r15_append_raw(audit_path, bad);
+    assert_eq(cmd_rollback(), 0, "rollback of an absolute unlink with a relative abs_source");
+    assert_eq(link_probe_kind(link_probe(tu)), HAPI_LP_ABSENT, "...creates nothing");
+    assert_eq(fsl_link_text_shaped("/h/.a", "p/a", 1), 0, "the shaped text refuses a relative source");
+
+    # Prune removes an absolute link and records it.
+    var env3 = _test_fresh_env();
+    scope = load64(env3);
+    audit_path = load64(env3 + 8);
+    var p3 = _sy_pkg(_test_scratch_dir(), "pr", "p1 p2 p3");
+    hapi_set_absolute(1);
+    assert_eq(cmd_sync(p3), 0, "sync --absolute");
+    _sy_pkg(p3, "pr", "p1 p2");
+    assert_eq(cmd_sync_run(p3, 1, 0), 0, "sync --absolute --prune");
+    hapi_set_absolute(0);
+    assert_eq(_sy_kind(scope, ".p3"), HAPI_LP_ABSENT, "...prunes the absolute link");
+    assert_eq(_test_cstr_eq(hae_shape(_r15_last(audit_path)), "absolute"), 1, "...recording its shape");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_absolute_adopt() {
+    test_group("--absolute: adopt links back absolutely, and rollback undoes it (1.6.0)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _test_make_package(0, 0);
+    var home_file = _fsl_path_join(scope, ".zshrc");
+    _test_write_file(home_file, "user content");
+    hapi_set_absolute(1);
+    assert_eq(cmd_adopt(".zshrc", pkg), 0, "adopt --absolute");
+    hapi_set_absolute(0);
+    var src = _fsl_path_join(pkg, "zshrc");
+    assert_eq(_test_cstr_eq(_ab_text(home_file), src), 1, "the link back is absolute");
+    assert_eq(_test_cstr_eq(hae_shape(_r15_last(audit_path)), "absolute"), 1, "...and the adopt entry says so");
+    assert_eq(cmd_rollback(), 0, "rollback the adopt");
+    assert_eq(link_probe_kind(link_probe(home_file)), HAPI_LP_FILE, "the file is back");
+    var un = _ab_nth_last(audit_path, 2);
+    assert(_test_cstr_eq(hae_op(un), "unadopt") == 1 && _test_cstr_eq(hae_shape(un), "absolute") == 1,
+      "the unadopt entry records the shape it removed");
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-046 cannot happen to an absolute link: its text does not depend on the
+# directory the link sits in.
+fn test_absolute_under_symlinked_parent() {
+    test_group("--absolute: a link under a symlinked parent resolves (1.6.0)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _t111_deep_config(scope);
+    var tgt = _fsl_path_join(scope, ".config/rc");
+    hapi_set_absolute(1);
+    assert_eq(cmd_link(pkg, 0), 0, "link --absolute");
+    hapi_set_absolute(0);
+    assert_eq(_test_file_size(tgt), 10, "the link resolves to the source");
+    assert_eq(cmd_status(pkg), 0, "status agrees");
+    assert_eq(cmd_unlink("p"), 0, "unlink removes it");
+    _test_clear_env();
+    return 0;
+}
+
+fn test_cli_absolute() {
+    test_group("cli: --absolute on link, adopt and sync only (1.6.0)");
+
+    var verbs = _cli_av("inspect link unlink adopt rollback checkpoint status list check sync");
+    var i = 0;
+    while (i < load64(verbs)) {
+        var v = load64(verbs + 8 + i * 8);
+        var takes = 0;
+        if (_test_cstr_eq(v, "link") == 1 || _test_cstr_eq(v, "adopt") == 1 || _test_cstr_eq(v, "sync") == 1) {
+            takes = 1;
+        }
+        _cli_flag_probe(v, "--absolute", 0, takes);
+        i = i + 1;
+    }
+    _cli_expect(_cli_av("hapi link pkg --absolute=1"), 2, "", _cli_unexpected_flag("link", "--absolute=1"),
+      "--absolute takes no value");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _cd_pkg(_test_scratch_dir(), "cl", "a=.a");
+    var av = _cli_av("hapi link --absolute");
+    _cli_add(av, pkg);
+    assert_eq(_cli_run(av), 0, "hapi link --absolute <pkg>");
+    var want = _cli_cat(_cli_cat(_cli_cat(_cli_cat("  + ", _fsl_path_join(scope, ".a")), " -> "),
+      _fsl_path_join(pkg, "a")), "\n");
+    assert(_cli_out_n > strlen(want) && memeq(_cli_out, want, strlen(want)) == 1, "...prints the absolute text");
+    assert_eq(_test_cstr_eq(_ab_text(_fsl_path_join(scope, ".a")), _fsl_path_join(pkg, "a")), 1,
+      "...and writes it");
+    _cli_reset(scope);
+    assert_eq(hapi_absolute(), 0, "the test reset clears the flag");
+
+    _test_clear_env();
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -5138,6 +5438,13 @@ fn main() {
     test_rollback_to_label();
     test_rollback_names_only_printable_fields();
     test_cli_script_flags();
+    test_absolute_text_helpers();
+    test_absolute_link();
+    test_absolute_either_shape();
+    test_absolute_rollback_and_prune();
+    test_absolute_adopt();
+    test_absolute_under_symlinked_parent();
+    test_cli_absolute();
     return assert_summary();
 }
 

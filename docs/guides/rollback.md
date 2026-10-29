@@ -76,6 +76,13 @@ removed after any later link that reused it. Reversing an `unlink`
 re-creates the link, making its directories again, and the replayed entry
 records them.
 
+## Link shape
+
+Reversing an `unlink` re-creates the link in the shape it had: relative,
+or absolute when the `op:unlink` entry says `"shape":"absolute"` (1.6.0).
+Rollback takes no `--absolute`; the trail decides. Reversing a link
+removes it in either shape, as [`unlink`](unlink.md) does.
+
 ## Going further back: `--to` and `--steps`
 
 The no-arg form is one undo: back to the last marker, after which a

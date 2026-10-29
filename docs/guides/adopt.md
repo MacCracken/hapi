@@ -8,10 +8,13 @@ already-existing dotfile and a fresh hapi package.
 ## Synopsis
 
 ```sh
-hapi adopt <file-in-scope-root> <package-dir>
+hapi adopt <file-in-scope-root> <package-dir> [--absolute]
 ```
 
-Both arguments are positional. Shape mirrors `mv(1)` (`mv src
+Both arguments are positional. `--absolute` (1.6.0) gives the link back
+the source's absolute path as its text instead of a relative one, as
+[`link --absolute`](link.md#absolute-targets----absolute) does; the entry
+records `"shape":"absolute"`. Shape mirrors `mv(1)` (`mv src
 dst`). The file argument resolves relative to the scope root
 (`$HOME` by default); the package argument resolves relative to
 cwd.
@@ -119,7 +122,8 @@ full semantics.
 `hapi rollback` over an `op:adopt` entry is a three-step
 conditional reversal:
 
-1. Remove the symlink (only if it still points where adopt put it)
+1. Remove the symlink (only if it still points at the adopted file,
+   relatively or absolutely)
 2. Move the file back to its original location
 3. Remove the matching `[[link]]` row from the manifest
 

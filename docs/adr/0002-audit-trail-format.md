@@ -112,6 +112,7 @@ window without `Breaking` every minor.
 | `created_dir` | string | 1.4.0 | absolute path of the **outermost directory this link's creation made**; every directory from it down to `abs_target`'s parent was made too. Present on `link` entries only, and only when the creation made a directory; written last. See the 1.4.0 addendum. |
 | `label`       | string | 1.5.0 | on a `rollback-marker` that `hapi checkpoint --label` wrote: the name `hapi rollback --to` finds it by. 1 to 64 of `A-Z a-z 0-9 . _ -`. See the 1.5.0 addendum. |
 | `from`        | string | 1.5.0 | on the `rollback-marker` that `hapi rollback` writes to close a run: the 1-based line of the first trail line the run covered, in decimal. See the 1.5.0 addendum. |
+| `shape`       | string | 1.6.0 | `"absolute"` on a `link` or `adopt` entry that wrote an absolute link text (`--absolute`), and on an `unlink` or `unadopt` entry that removed one. Absent for the relative default. See the 1.6.0 addendum. |
 
 ### Hash
 
@@ -374,3 +375,32 @@ entries; the closing marker's range stands for them. A hapi write that
 runs concurrently with a rollback can land inside that range and be
 stepped over by later walks (F-063, accepted). `unlink`, which reads no
 markers, still finds it.
+
+## Addendum — 2026-10-28 (1.6.0): `shape`
+
+**Additive: the line shape and the required-field set are unchanged.** An
+entry whose link text is absolute ends with `"shape":"absolute"`:
+
+```
+{"ts":"...","op":"link",...,"abs_target":"/home/u/.zshrc","shape":"absolute"}
+```
+
+It is written last, after `created_dir`. An entry with a relative text has
+no `shape`, so every relative entry is byte-identical to 1.5.0's.
+
+**Where it goes.** On `link` and `adopt` entries that wrote an absolute
+link, including the link a rollback re-creates, and on `unlink` and
+`unadopt` entries that removed one. The removal entries carry it so that
+reversing them (`rollback` of an unlink) re-creates the same shape. The
+design is ADR 0003's 1.6.0 addendum.
+
+**Reading it.** Only `"absolute"` means absolute. A missing `shape`, or one
+hapi does not know, is the relative default. Nothing but rollback's
+re-creation reads the field: every verb recognises a link of either shape
+by its text, not by the trail (ADR 0003, 1.6.0 addendum).
+
+**Compatibility.** Readers since 1.0 drop the unknown string field, so
+earlier versions read a 1.6.0 trail without error. They do not know the
+absolute text, so they treat an absolute link as not hapi's and leave it
+in place. That was checked against the released 1.1.1, 1.2.1, 1.3.0,
+1.4.0 and 1.5.0 binaries.

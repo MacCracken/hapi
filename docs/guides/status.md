@@ -16,12 +16,12 @@ hapi status <package-dir|hapi.cyml> [--quiet] [--root <path>]
    `*.cyml` path).
 2. Parses the manifest.
 3. For each `[[link]]` row: computes the expected absolute
-   target and relative symlink value, then probes the
+   target and symlink value, then probes the
    filesystem state at the target and classifies it.
 
 | classification | meaning                                                |
 |----------------|--------------------------------------------------------|
-| `OK`           | symlink points where `hapi link` would write           |
+| `OK`           | symlink points where `hapi link` would write, in either shape: relative, or absolute (`--absolute`, 1.6.0) |
 | `BROKEN`       | symlink text is right, but the **source is gone**      |
 | `MISSING`      | no file at the target                                  |
 | `WRONG`        | symlink points elsewhere                               |

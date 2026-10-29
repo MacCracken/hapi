@@ -5,7 +5,8 @@
 # summary. No audit writes, no filesystem mutation.
 #
 # Classifications:
-#   OK          — symlink points where hapi link would write
+#   OK          — symlink points where hapi link would write, in
+#                 either shape: relative, or absolute (1.6.0)
 #   BROKEN      — symlink text is right, but the source it names is
 #                 gone: the link dangles (F-022)
 #   MISSING     — target absent
@@ -127,7 +128,10 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
             status_lit = "MISSING";
         } elif (kind == HAPI_LP_SYMLINK) {
             var existing = link_probe_target(probe);
-            if (_hst_cstr_eq(existing, expected) == 1) {
+            # Either shape naming the source is OK (1.6.0): `--absolute`
+            # shapes only the links a run creates, and status reads no
+            # trail, so it needs no flag (F-006).
+            if (_hst_cstr_eq(existing, expected) == 1 || fsl_is_absolute_text(existing, abs_src) == 1) {
                 # Ownership is still proved by the byte-compare above,
                 # unchanged. This is an ADDITIONAL probe: a dangling link
                 # holds exactly the right target text, so the compare

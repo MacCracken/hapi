@@ -81,10 +81,10 @@ fn _hrb_reverse_link(entry): i64 {
     if (hapi_dry_run() == 1) { return 1; }
     var urc = hapi_unlink(abs_tgt);
     if (urc < 0) { return 0 - 1; }
-    var ar_t, ar_v = audit_append_unlink_r(
+    var ar_t, ar_v = audit_append_unlink_shaped_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         hae_source(entry), hae_target(entry),
-        hae_abs_source(entry), hae_abs_target(entry));
+        hae_abs_source(entry), hae_abs_target(entry), fsl_shape_of(link_probe_target(probe)));
     if (is_err_result(ar_t) == 1) {
         if (hapi_symlink(link_probe_target(probe), abs_tgt) < 0) { return 0 - 3; }
         return 0 - 2;
@@ -111,17 +111,19 @@ fn _hrb_reverse_unlink(entry): i64 {
     var probe = link_probe(abs_tgt);
     if (link_probe_kind(probe) != HAPI_LP_ABSENT) { return 0; }
 
-    var rel = fsl_link_text(abs_tgt, abs_src);
+    # In the shape the unlink removed (1.6.0): its entry says "absolute"
+    # for an absolute link. Never the run's --absolute; rollback takes none.
+    var rel = fsl_link_text_shaped(abs_tgt, abs_src, hae_absolute(entry));
     if (rel == 0) { return 0; }
 
     if (hapi_dry_run() == 1) { return 1; }
     var made = 0;
     var crc = link_create_r(rel, abs_tgt, &made);
     if (crc < 0) { return 0 - 1; }
-    var ar_t, ar_v = audit_append_link_created_r(
+    var ar_t, ar_v = audit_append_link_full_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         hae_source(entry), hae_target(entry),
-        hae_abs_source(entry), hae_abs_target(entry), 0, made);
+        hae_abs_source(entry), hae_abs_target(entry), 0, made, fsl_shape_of(rel));
     if (is_err_result(ar_t) == 1) {
         if (hapi_unlink(abs_tgt) < 0) { return 0 - 3; }
         if (made != 0) { fsl_rmdir_created(abs_tgt, made, 0); }
@@ -201,9 +203,9 @@ fn _hrb_reverse_adopt(entry): i64 {
         row_left = 1;
     }
 
-    var ar_t, ar_v = audit_append_unadopt_r(
+    var ar_t, ar_v = audit_append_unadopt_shaped_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
-        source, target, abs_src, abs_tgt);
+        source, target, abs_src, abs_tgt, fsl_shape_of(found));
     # Three steps are not taken back in one (F-061): the file is back at
     # the target and the row is out of the manifest, but the trail still
     # says adopted. Said exactly, rather than as an IO error.

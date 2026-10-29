@@ -6,7 +6,8 @@
 > Frozen: `hapi link` writes relative symlinks from the link's
 > parent directory to the source. A post-v1.0 `--absolute`
 > opt-in is reserved per the roadmap's *Out of scope* list but
-> the default shape is contractual.
+> the default shape is contractual. The opt-in shipped in 1.6.0;
+> see the 1.6.0 addendum.
 
 ## Context
 
@@ -159,3 +160,52 @@ portable links, which is this ADR's rationale. For every target without a
 symlinked parent the text is byte-identical to 1.1.0. `unlink` and
 `rollback` also accept the lexical text, so links an older hapi planted
 under a symlinked parent remain hapi's to remove.
+
+## Addendum — 2026-10-28 (1.6.0): the `--absolute` opt-in
+
+**The default stands: relative.** The opt-in this ADR reserved ships as a
+flag on the verbs that create links, `link`, `adopt` and `sync`, as
+*Alternatives considered* said it would: a CLI flag, not a manifest knob.
+
+**The absolute text is the source's path as spelled**: the `abs_source`
+the trail records, lexically normalized (`.` and empty segments dropped)
+and never resolved. That is the same choice the relative text makes for
+its source half (1.1.1 addendum), for the same reason: a package reached
+through a symlink keeps the indirection. The absolute text is also the
+one shape F-046 cannot reach, since it does not depend on the directory
+the link sits in.
+
+**Either shape is hapi's link, everywhere.** The shape is chosen when a
+link is created and never enforced afterwards. A symlink naming the row's
+source, by the relative text or the absolute one, is:
+
+- up to date for `link` and `sync`, so the flag does not re-shape an
+  existing link, and a plain `sync` leaves absolute links alone;
+- `OK` for `status`, which therefore needs no flag and reads no trail
+  (F-006 holds: `status` works with the trail gone);
+- removable by `unlink`, `sync --prune` and `rollback`.
+
+Only the exact bytes count: another file's path, or this one's spelled
+differently, is not hapi's.
+
+**What changed for existing links.** Before 1.6.0 an absolute symlink to a
+row's source was drift to `status`, a conflict to `link`, and not hapi's to
+`unlink`. If a user had swapped hapi's relative link for that absolute one,
+it is now hapi's in every verb. It names the same file, and hapi cannot
+tell it from one `link --absolute` wrote.
+
+**The trail records the shape** as `"shape":"absolute"` (ADR 0002, 1.6.0
+addendum). It goes on the entries that write an absolute link and on those
+that remove one, so `rollback` re-creates a removed link in the shape it
+had. Rollback takes no flag of its own.
+
+**Older versions** know only the relative text. Before 1.6.0, on an
+absolute link, `status` reports drift, `link` a conflict, and `unlink` and
+`rollback` refuse with exit 1. That is safe, since nothing is removed, but
+an absolute link can only be removed by 1.6.0 or later.
+
+**Weighed and not taken:** making the shape part of the link, with
+`status`, `link` and `sync` reading the trail to learn which shape to
+expect. A plain `sync` would then keep a package absolute without the
+flag. But `status` would depend on the trail, and after a trail loss it
+would call every absolute link wrong.

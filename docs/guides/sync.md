@@ -15,7 +15,10 @@ hapi sync [--prune [--force]]           # every package under HAPI_PACKAGE_ROOTS
 
 `--dry-run`, `--root <path>` and `--backup-to <dir>` are accepted as
 before (see *Overwriting existing files* for why `--backup-to` does
-nothing here).
+nothing here). Since 1.6.0 `--absolute` gives the links a sync creates
+absolute targets, as [`link --absolute`](link.md#absolute-targets----absolute)
+does; a link of either shape is up to date, so a plain `hapi sync` leaves
+absolute links alone.
 
 ## What it does
 

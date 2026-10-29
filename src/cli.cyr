@@ -29,6 +29,7 @@
 
 include "lib/cmdit.cyr"
 include "src/dry_run.cyr"
+include "src/absolute.cyr"
 include "src/cmd/inspect.cyr"
 include "src/cmd/link.cyr"
 include "src/cmd/unlink.cyr"
@@ -56,6 +57,7 @@ enum HapiFlag {
     HAPI_F_FORCE = 1; HAPI_F_STRICT = 2; HAPI_F_DRY_RUN = 4;
     HAPI_F_ROOT = 8; HAPI_F_BACKUP_TO = 16; HAPI_F_PRUNE = 32;
     HAPI_F_QUIET = 64; HAPI_F_STEPS = 128; HAPI_F_TO = 256; HAPI_F_LABEL = 512;
+    HAPI_F_ABSOLUTE = 1024;
 }
 
 # `hapi --version` prints `hapi <version>`. The number is
@@ -107,6 +109,9 @@ fn hapi_print_usage(): i64 {
     println("  --backup-to <dir>         snapshot existing file content to <dir> before");
     println("                            a destructive overwrite (link --force / adopt).");
     println("                            Audit entry gains `backup_path`.");
+    println("  --absolute                give the links this run creates absolute targets,");
+    println("                            not relative ones (link/adopt/sync); a link of");
+    println("                            either shape counts as hapi's");
     println("");
     println("options:");
     println("  --version, -v             print version and exit");
@@ -248,16 +253,19 @@ fn _hapi_cli_new(): i64 {
 }
 
 fn _hapi_verb_flags(v): i64 {
-    if (v == HAPI_V_LINK)       { return HAPI_F_FORCE | HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO; }
+    if (v == HAPI_V_LINK) {
+        return HAPI_F_FORCE | HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO | HAPI_F_ABSOLUTE;
+    }
     if (v == HAPI_V_UNLINK)     { return HAPI_F_DRY_RUN; }
-    if (v == HAPI_V_ADOPT)      { return HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO; }
+    if (v == HAPI_V_ADOPT)      { return HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO | HAPI_F_ABSOLUTE; }
     if (v == HAPI_V_ROLLBACK)   { return HAPI_F_DRY_RUN | HAPI_F_STEPS | HAPI_F_TO; }
     if (v == HAPI_V_CHECKPOINT) { return HAPI_F_DRY_RUN | HAPI_F_LABEL; }
     if (v == HAPI_V_STATUS)     { return HAPI_F_ROOT | HAPI_F_QUIET; }
     if (v == HAPI_V_LIST)       { return HAPI_F_ROOT; }
     if (v == HAPI_V_CHECK)      { return HAPI_F_STRICT; }
     if (v == HAPI_V_SYNC) {
-        return HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO | HAPI_F_PRUNE | HAPI_F_FORCE;
+        return HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO | HAPI_F_PRUNE | HAPI_F_FORCE
+          | HAPI_F_ABSOLUTE;
     }
     # inspect takes none, and still owes exit 2 for one, not the
     # exit 1 that means "bad manifest" (F-033).
@@ -350,6 +358,7 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     var f_dry    = _hapi_bool_flag(vh, set, HAPI_F_DRY_RUN, "dry-run", "print actions; no syscalls or audit writes");
     var f_prune  = _hapi_bool_flag(vh, set, HAPI_F_PRUNE, "prune", "also remove links whose row left the manifest");
     var f_quiet  = _hapi_bool_flag(vh, set, HAPI_F_QUIET, "quiet", "exit 0 on drift; 1 only on an error");
+    var f_abs    = _hapi_bool_flag(vh, set, HAPI_F_ABSOLUTE, "absolute", "give new links absolute targets");
     var f_root   = _hapi_value_flag(vh, set, HAPI_F_ROOT, "root", "path", "open a non-$HOME scope");
     var f_backup = _hapi_value_flag(vh, set, HAPI_F_BACKUP_TO, "backup-to", "dir",
       "snapshot a file before overwriting it");
@@ -395,6 +404,7 @@ fn _hapi_run_verb(h, argc, argv): i64 {
         i = i + 1;
     }
     if (cmdit_get_bool(vh, f_dry) == 1) { hapi_set_dry_run(1); }
+    if (cmdit_get_bool(vh, f_abs) == 1) { hapi_set_absolute(1); }
     var backup = cmdit_get_str(vh, f_backup);
     if (backup != 0) { hapi_set_backup_dir(backup); }
 

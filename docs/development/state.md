@@ -5,22 +5,26 @@
 
 ## Version
 
-**1.5.0** (2026-10-28) — script-facing flags, on the cyrius 6.7 line (pin
-`6.7.18`). `status --quiet` keeps the rows and exits 0 on drift, 1 only on
-an actual error. `checkpoint --label <label>` names a marker, and
-`rollback --to <label>` goes back to it; `rollback --steps N` undoes the N
-most recent checkpoint windows still in effect. Both step over every range
-an earlier rollback undid, which its closing marker now records as `from`
-([ADR 0007](../adr/0007-rollback-steps-and-to.md); ADR 0002, 1.5.0
-addendum). The no-arg `rollback` is unchanged, and 1.1.1 – 1.4.0 read a
-1.5.0 trail as before. Its P(-1) is the *1.5.0 addendum* of
-[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md): no defect;
-F-063 (a write concurrent with a rollback is stepped over) accepted. The
-manifest schema and the line shape are unchanged. Both suites pass on
+**1.6.0** (2026-10-28) — `--absolute`, on the cyrius 6.7 line (pin
+`6.7.18`). `link`, `adopt` and `sync` take `--absolute`, which gives the
+links a run creates the source's path, as spelled and normalized, as
+their text, instead of ADR 0003's relative default. A link of either shape
+naming its source is hapi's in every verb: up to date for `link` / `sync`,
+OK for `status` (which still reads no trail, F-006), removable by
+`unlink`, `sync --prune` and `rollback`. The trail records
+`"shape":"absolute"` on the entries that write or remove one, so
+`rollback` re-creates the shape it removed (ADR 0003 and ADR 0002, 1.6.0
+addenda). Earlier versions read a 1.6.0 trail, but leave an absolute link
+alone. Its P(-1) is the *1.6.0 addendum* of
+[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md): no defect.
+The manifest schema and the line shape are unchanged. Both suites pass on
 x86_64 and on aarch64 under qemu, and `tests/agnos.tcyr` also passes on
 agnos under mirshi.
 
-Before it, 1.4.0 recorded `created_dir` on `op:link`, so `unlink`,
+Before it, 1.5.0 added `status --quiet`, `checkpoint --label` and
+`rollback --to` / `--steps`, a multi-level undo
+([ADR 0007](../adr/0007-rollback-steps-and-to.md); F-063 accepted).
+1.4.0 recorded `created_dir` on `op:link`, so `unlink`,
 `sync --prune` and `rollback` remove the directories `link` made (F-062
 caught before release). 1.3.0 added `hapi sync` with no package (every package under
 `HAPI_PACKAGE_ROOTS`) and `sync --prune` ([ADR
@@ -91,7 +95,8 @@ is inert there) —
 opt-in pre-`--force` snapshot. Since 1.3.0 `sync` also takes `--prune`,
 and `--force` with it, which lifts prune's limit and nothing else. Since
 1.5.0 `status` takes `--quiet`, `checkpoint` `--label <label>`, and
-`rollback` `--steps N` or `--to <label>`.
+`rollback` `--steps N` or `--to <label>`. Since 1.6.0 `link`, `adopt` and
+`sync` take `--absolute`.
 
 ### Current command surface (frozen at v1.0)
 
@@ -117,7 +122,8 @@ with no package (every package under `HAPI_PACKAGE_ROOTS`; exit 2 when it
 is unset), and `sync --prune [--force]`. Since 1.5.0: `status --quiet`
 (drift exits 0; 1 only on an error), `checkpoint --label <label>`, and
 `rollback --steps N` / `--to <label>` (exit 1, nothing changed, for an
-unknown label or more steps than the trail holds). Nothing is accepted
+unknown label or more steps than the trail holds). Since 1.6.0:
+`--absolute` on `link` / `adopt` / `sync`. Nothing is accepted
 before the verb, and a leading `--help` / `--version` answers whatever
 follows it.
 
@@ -198,7 +204,10 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   relative / create with mkdir-parents) and the physical-path layer:
   `fsl_resolve_path` (every component followed, `..` popped against the
   resolved prefix), `fsl_link_text` (ADR 0003's text, from the parent
-  the link physically sits in), and `fsl_lands_in` (does a target
+  the link physically sits in), since 1.6.0 `fsl_absolute_text` /
+  `fsl_link_text_shaped` (the `--absolute` text) and
+  `fsl_is_absolute_text` (either shape is hapi's: `link`, `status` and
+  `fsl_link_text_matches` all accept it), and `fsl_lands_in` (does a target
   resolve into a given directory — the package guard). `link_probe`
   reads the link first, so a symlink is always SYMLINK, then splits
   file from directory. Since 1.4.0 `fsl_mkdir_parents_mode_r` /
@@ -292,7 +301,10 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   the rest implied. One string, written last; pre-1.4.0 readers drop it.
   On `rollback-marker` (1.5.0): `label`, from `checkpoint --label`, and
   `from`, the line a rollback's range began on, on the marker closing it.
-  The reader also records each entry's line (`hae_lineno`).
+  The reader also records each entry's line (`hae_lineno`). `shape`
+  (1.6.0): `"absolute"` on `link` / `adopt` entries that wrote an
+  absolute link text and `unlink` / `unadopt` entries that removed one;
+  absent for the relative default.
 - **Readers**: `unlink`, `rollback`, `list`, `status`, `sync`
   — every verb that consults the trail walks via
   `src/audit_reader.cyr`.
@@ -306,7 +318,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. **1,340 assertions across 142 test
+- `tests/hapi.tcyr` — primary suite. **1,444 assertions across 149 test
   groups.** Re-derive rather than recount by hand — these figures have
   rotted twice, and the per-tier breakdown below drifted 16 groups
   short before the 2026-08-26 sweep:
@@ -318,20 +330,21 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
     | sort | uniq -c | sort -rn                 # per-tier breakdown
   ```
 
-  Groups by tier (first word of the group name), as measured at 1.5.0:
-  rollback 13, cli 11, link 10, sync 10, cap 9, manifest 8,
-  manifest_write 8, check 8, backup 7, adopt 7, status 6, fs_link 6,
-  dry-run 6, canonical 5, audit_reader 5, audit 5, created_dir 4,
-  audit-repair 4, unlink 4, list 3, checkpoint 2, agnos_compat 1. The `cli` tier (1.2.0) runs `hapi_cli_run` with a
+  Groups by tier (first word of the group name), as measured at 1.6.0:
+  rollback 13, cli 12, link 10, sync 10, cap 9, manifest 8,
+  manifest_write 8, check 8, backup 7, adopt 7, `--absolute` 6, status 6,
+  fs_link 6, dry-run 6, canonical 5, audit_reader 5, audit 5,
+  created_dir 4, audit-repair 4, unlink 4, list 3, checkpoint 2,
+  agnos_compat 1. The `cli` tier (1.2.0) runs `hapi_cli_run` with a
   synthetic argv and its stdout / stderr captured through `dup2`, so the
   v1.0 messages are asserted byte for byte.
-- `tests/agnos.tcyr` — **77 assertions across 11 groups**, all
+- `tests/agnos.tcyr` — **84 assertions across 12 groups**, all
   target-neutral: the agnos-conditional paths (no-follow open,
   exclusive create, absent trail, trail and manifest round trips,
   backup copy, the fs shims, `link` / `status` / `unlink` with the
   scope at `/`, since 1.3.0 a package-root scan and a prune, and since
   1.4.0 a made-directory round trip, since 1.5.0 `rollback --to` and
-  `--steps`). `cyrius test` runs it on x86_64 and aarch64; the agnos
+  `--steps`, since 1.6.0 an absolute link's round trip). `cyrius test` runs it on x86_64 and aarch64; the agnos
   smoke builds it with `--agnos` and runs it under mirshi. Absolute
   paths only, no chmod, no environment — what an agnos run allows.
 
@@ -341,7 +354,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 beside it as shell harnesses. **CI runs both.**
 
 The suite itself also runs on aarch64 — `cyrius test --aarch64` under
-`qemu-aarch64` (1,340 / 1,340 and 77 / 77 at 1.5.0). **CI runs it** as of 1.0.12
+`qemu-aarch64` (1,444 / 1,444 and 84 / 84 at 1.6.0). **CI runs it** as of 1.0.12
 (`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
 qemu fails the step, it never skips). Before that the aarch64 step was
 compile-only, which is how the `O_NOFOLLOW` literal went unseen from
@@ -427,8 +440,9 @@ means downstream packagers (zugot recipes) and user manifests.
 The 2026-10-28 P(-1) pass is **closed** in 1.1.1. Its 1.2.0 addendum
 (the argument surface under cmdit) closed with F-060 fixed, its 1.3.0
 addendum (`sync`'s scan and prune) with F-061 fixed, its 1.4.0
-addendum (`created_dir`) with F-062 caught before release, and its 1.5.0
-addendum (the script-facing flags) with no defect and F-063 accepted.
+addendum (`created_dir`) with F-062 caught before release, its 1.5.0
+addendum (the script-facing flags) with no defect and F-063 accepted, and
+its 1.6.0 addendum (`--absolute`) with no defect.
 Every finding is fixed except two that are accepted: F-059, an agnos
 kernel gap
 ([`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)),
@@ -441,8 +455,7 @@ rename-over-existing (an agnos issue file). [`roadmap.md`](roadmap.md)
 
 Forward-looking work is **not** listed here — it lives in
 [`roadmap.md`](roadmap.md), which carries only work that has not
-shipped. **Next is 1.6.0, `--absolute`** (opt-in absolute symlink
-targets); 1.7.0 (`hapi fmt`) is planned there too, one theme per minor,
+shipped. **Next is 1.7.0, `hapi fmt`**, the last planned 1.x minor,
 with upstream-gated work
 listed apart. Open dogfood papercuts are in [`issues/`](issues/) (2
 open, 9 archived).

@@ -23,7 +23,10 @@ beyond the audit trail itself; the name is the lookup key.
 3. For each live entry, probes the on-disk target:
    - If it's a symlink pointing to the value `hapi link` would
      have written → `unlink(2)` it, append an `op:unlink`
-     audit entry.
+     audit entry. Either shape counts (1.6.0): the relative text,
+     or the source's absolute path, which `link --absolute` writes.
+     Removing an absolute one records `"shape":"absolute"`, so
+     `rollback` re-creates it absolute.
    - If the symlink points elsewhere, or there's a regular
      file / directory / nothing — **refuse for that entry,
      keep going with the rest**.

@@ -1,0 +1,15 @@
+# absolute.cyr — the process-wide `--absolute` flag (1.6.0).
+#
+# Set by the dispatcher (src/cli.cyr) when `link`, `adopt` or `sync` has
+# `--absolute`; read where those verbs pick the text of a link they
+# create (ADR 0003, 1.6.0 addendum). Never read by `rollback`: it
+# re-creates a link in the shape its trail entry recorded, whatever the
+# run's flags.
+#
+# Its own leaf for the reason src/dry_run.cyr is one: a command reads the
+# flag without including the command line.
+
+var _hapi_absolute = 0;
+
+fn hapi_set_absolute(v): i64 { _hapi_absolute = v; return 0; }
+fn hapi_absolute(): i64 { return _hapi_absolute; }

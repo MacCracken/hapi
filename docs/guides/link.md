@@ -7,8 +7,8 @@ changes (and no audit-trail growth).
 ## Synopsis
 
 ```sh
-hapi link <package-dir> [--force]
-hapi link <path-to-hapi.cyml> [--force]
+hapi link <package-dir> [--force] [--absolute]
+hapi link <path-to-hapi.cyml> [--force] [--absolute]
 ```
 
 ## What it does
@@ -24,7 +24,7 @@ For each `[[link]]` row in the manifest:
    see [`capability.md`](capability.md).
 3. Probe the target with `readlink(2)` to classify:
    - **absent** — create the symlink
-   - **symlink to the correct relative path** — no-op
+   - **symlink naming the source**, relative or (since 1.6.0) absolute — no-op
    - **symlink to a different path** — conflict
    - **regular file** — conflict
    - **directory** — conflict (never overrideable; see below)
@@ -37,6 +37,7 @@ Symlinks are written as **relative paths** from the link's
 parent directory to the source, per
 [ADR 0003](../adr/0003-symlink-target-shape.md) — so the
 dotfile repo stays portable across machines and clone paths.
+`--absolute` writes the source's absolute path instead (below).
 
 ## Example
 
@@ -111,6 +112,50 @@ location as a `backup_path` field on the audit entry. Symlink
 conflicts are skipped (no bytes to preserve). See
 [`backup-to.md`](backup-to.md) for the full semantics.
 
+## Absolute targets — `--absolute`
+
+Since 1.6.0, `--absolute` gives the links a run creates the source's
+absolute path as their text:
+
+```sh
+$ hapi link --absolute ~/Repos/dotfiles/zsh
+  + /home/user/.zshrc -> /home/user/Repos/dotfiles/zsh/zshrc
+linked 1 / 1 (0 already up-to-date)
+```
+
+Reach for it when the link may move and the package will not: a target
+under `--root /etc/...`, a directory you copy or bind-mount elsewhere, or a
+parent that is itself a symlink you re-point. A relative link breaks when
+it moves; an absolute one breaks when the package moves. Relative stays
+the default, for ADR 0003's reason: a dotfile repo cloned to another path
+keeps working.
+
+- **The text is the source's path as spelled**, normalized (`./` and `//`
+  dropped) and never resolved. A package reached through a symlink, such
+  as `~/Repos -> /mnt/data/repos`, keeps that indirection, as the relative
+  text does.
+- **Either shape is hapi's link.** A symlink naming the row's source,
+  relatively or absolutely, is up to date for `link` and `sync`, OK for
+  `status`, and removable by `unlink`, `sync --prune` and `rollback`. So
+  `--absolute` shapes only the links a run **creates**. Over existing
+  relative links it is a no-op, and a later plain `hapi sync` leaves
+  absolute links alone. To re-shape a package, unlink it and link it
+  again with or without the flag.
+- **The shape does not stick.** A run without the flag that has to
+  re-create a link (it was deleted) makes it relative. Pass `--absolute`
+  on every run that should create absolute links.
+- **Only the exact text counts.** An absolute path to another file, or to
+  this one spelled differently (`/home/user/Repos/dotfiles/zsh/./zshrc`),
+  is a conflict like any other.
+- `adopt` and `sync` take the flag too. `rollback` does not: it re-creates
+  a link in the shape its trail entry recorded.
+- The entry records it: `"shape":"absolute"` (ADR 0002, 1.6.0 addendum).
+
+**Older versions** do not know the absolute shape. A hapi before 1.6.0
+calls an absolute link drift in `status`, a conflict in `link`, and
+`unlink` and `rollback` leave it in place with exit 1. Nothing is lost,
+but remove absolute links with 1.6.0 or later.
+
 ## Audit trail
 
 Every link write appends one JSON-line entry to
@@ -151,6 +196,7 @@ the link is taken back, and since 1.4.0 so are the directories it made.
 |      | outside the scope root**                                         |
 | 2    | bad usage — missing argument, an unknown flag, an extra          |
 |      | positional, or a flag-shaped value after `--root`/`--backup-to`  |
+|      | (`--absolute` takes no value: `--absolute=1` is an unknown flag) |
 
 ## See also
 

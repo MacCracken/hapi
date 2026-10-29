@@ -26,6 +26,7 @@ include "src/audit.cyr"
 include "src/fs_link.cyr"
 include "src/cap.cyr"
 include "src/dry_run.cyr"
+include "src/absolute.cyr"
 include "src/backup.cyr"
 
 enum HapiLinkAction {
@@ -117,10 +118,14 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     var abs_tgt = _fsl_path_join(scope_root_abs, tgt_cstr);
     var tgt_parent = _fsl_path_dirname(abs_tgt);
     var rel = fsl_link_text(abs_tgt, abs_src);
+    # What this run writes: the relative text, or under --absolute (1.6.0)
+    # the absolute one. Either shape already on disk is up to date below.
+    var text = rel;
+    if (hapi_absolute() == 1) { text = fsl_absolute_text(abs_src); }
 
     store64(plan + 8, abs_src);
     store64(plan + 16, abs_tgt);
-    store64(plan + 24, rel);
+    store64(plan + 24, text);
 
     # Does the target's parent PHYSICALLY sit inside the scope root?
     # An ordinary convenience symlink — `~/.config -> /mnt/other/etc` —
@@ -163,7 +168,10 @@ fn _hlnk_plan_one(lnk, pkg_dir_abs, scope_root_abs): i64 {
     } elif (kind == HAPI_LP_SYMLINK) {
         var existing = link_probe_target(probe);
         store64(plan + 40, existing);
-        if (_hlnk_cstr_eq(existing, rel) == 1) {
+        # A link of either shape naming this source is hapi's, and
+        # current: the flag shapes only links a run creates (ADR 0003,
+        # 1.6.0 addendum). Re-shaping one is `unlink`, then `link`.
+        if (_hlnk_cstr_eq(existing, rel) == 1 || fsl_is_absolute_text(existing, abs_src) == 1) {
             store64(plan + 32, LINK_ACT_NOOP);
         } else {
             store64(plan + 32, LINK_ACT_CONFLICT_SYMLINK);
@@ -607,11 +615,11 @@ fn _hlnk_execute(run, force): i64 {
                 var lnk = load64(pl);
                 var src_cstr = _fsl_str_to_cstr(hapi_link_source(lnk));
                 var tgt_cstr = _fsl_str_to_cstr(hapi_link_target(lnk));
-                var ar_t, ar_v = audit_append_link_created_r(pkg_name_cstr, pkg_ver_cstr,
+                var ar_t, ar_v = audit_append_link_full_r(pkg_name_cstr, pkg_ver_cstr,
                   manifest_hash,
                   src_cstr, tgt_cstr,
                   abs_src, abs_tgt,
-                  backup_path, made);
+                  backup_path, made, fsl_shape_of(rel));
                 if (is_err_result(ar_t) == 1) {
                     # Undo exactly THIS link — never the earlier ones in
                     # the run. Those are in the trail and `unlink` /

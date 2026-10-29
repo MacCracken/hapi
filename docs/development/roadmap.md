@@ -9,18 +9,17 @@
 
 ## Status
 
-- **Shipped: 1.5.0** — script-facing flags: `status --quiet`,
-  `checkpoint --label`, and `rollback --to <label>` / `--steps N`, which
-  step over what an earlier rollback undid
-  ([ADR 0007](../adr/0007-rollback-steps-and-to.md); ADR 0002, 1.5.0
-  addendum). Its P(-1) is the *1.5.0 addendum* of
+- **Shipped: 1.6.0** — `--absolute` on `link`, `adopt` and `sync`:
+  absolute link targets on opt-in, with either shape counted as hapi's
+  link by every verb, and `"shape":"absolute"` in the trail (ADR 0003 and
+  ADR 0002, 1.6.0 addenda). Its P(-1) is the *1.6.0 addendum* of
   [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md). Before it,
-  1.4.0 recorded and removed the directories `link` made, 1.3.0 added
-  no-package `sync` and `--prune`, and 1.2.x moved argument parsing to
-  cmdit.
-- **Next: 1.6.0 — `--absolute`** (below).
-- **1.6.0 → 1.7.0** — the rest of v1.x's additive work, one theme per
-  minor. The command surface, ADR 0001's schema and ADR 0002's line
+  1.5.0 added the script-facing flags (`status --quiet`,
+  `checkpoint --label`, `rollback --to` / `--steps`), 1.4.0 recorded and
+  removed the directories `link` made, 1.3.0 added no-package `sync` and
+  `--prune`, and 1.2.x moved argument parsing to cmdit.
+- **Next: 1.7.0 — `hapi fmt`** (below), the last planned 1.x minor.
+- **1.7.0** — the rest of v1.x's additive work. The command surface, ADR 0001's schema and ADR 0002's line
   shape stay frozen throughout; everything here is additive.
 - **Gated** — work that waits on something outside hapi, scheduled when
   the gate opens.
@@ -34,9 +33,8 @@
   only: a `1.N.x` adds nothing.
 - **Order: dependency first, then dogfood pressure.** cmdit went first
   (1.2.0) because every later flag registers through it; sync's two
-  dogfood issues went next (1.3.0), then `created_dir` (1.4.0) and the
-  script-facing flags (1.5.0). The order of 1.6 – 1.7 is a proposal and
-  can be swapped when pressure changes.
+  dogfood issues went next (1.3.0), then `created_dir` (1.4.0), the
+  script-facing flags (1.5.0) and `--absolute` (1.6.0).
 - **Standing obligations, per release** (CLAUDE.md, not repeated in each
   section): a P(-1) re-run when the release touches a path argument, a
   syscall, the capability surface or the trail format (each section
@@ -45,15 +43,6 @@
   suites run on x86_64, aarch64 and agnos.
 
 ---
-
-## 1.6.0 — `--absolute`
-
-**P(-1): yes** (link text). Opt a run into absolute symlink targets instead of ADR 0003's
-relative default, which ADR 0003 reserved. Two helpers decide what hapi's own link looks like:
-`fsl_link_text` (what `link`, `adopt` and `status` write and expect) and `fsl_link_text_matches`
-(what `unlink` and `rollback` accept as theirs). Both must know about the absolute text. If only
-the first does, an absolute link becomes un-removable. The flag also has to be recorded somewhere —
-the trail, most likely — or a later `status` without it calls every absolute link wrong.
 
 ## 1.7.0 — `hapi fmt`
 

@@ -72,7 +72,7 @@ fn hapi_ar_err_msg(code): i64 {
     return "unknown audit-trail read error";
 }
 
-# HapiAuditEntry — 112 bytes.
+# HapiAuditEntry — 120 bytes.
 #   +0   op (cstring)
 #   +8   ts (cstring)
 #   +16  pkg (cstring or 0)
@@ -92,10 +92,12 @@ fn hapi_ar_err_msg(code): i64 {
 #        wrote: the line its range began on)
 #   +104 lineno (the entry's 1-based line in the trail; set by the
 #        reader, not a field of the line)
+#   +112 shape (cstring or 0; 1.6.0, "absolute" on an entry whose link
+#        text is absolute)
 fn _hae_new(): i64 {
-    var e = alloc(112);
+    var e = alloc(120);
     var i = 0;
-    while (i < 112) { store64(e + i, 0); i = i + 8; }
+    while (i < 120) { store64(e + i, 0); i = i + 8; }
     return e;
 }
 fn hae_op(e): i64 { return load64(e); }
@@ -112,6 +114,10 @@ fn hae_created_dir(e): i64 { return load64(e + 80); }
 fn hae_label(e): i64 { return load64(e + 88); }
 fn hae_from(e): i64 { return load64(e + 96); }
 fn hae_lineno(e): i64 { return load64(e + 104); }
+fn hae_shape(e): i64 { return load64(e + 112); }
+# 1 when the entry's link text is absolute (1.6.0). Any other `shape`,
+# and none, is the relative default.
+fn hae_absolute(e): i64 { return _har_cstr_eq(hae_shape(e), "absolute"); }
 
 fn _har_cstr_eq(a, b): i64 {
     if (a == 0 || b == 0) { return 0; }
@@ -235,6 +241,7 @@ fn _har_assign_field(entry, key, value): i64 {
     elif (_har_cstr_eq(key, "created_dir") == 1)  { store64(entry + 80, value); }
     elif (_har_cstr_eq(key, "label") == 1)        { store64(entry + 88, value); }
     elif (_har_cstr_eq(key, "from") == 1)         { store64(entry + 96, value); }
+    elif (_har_cstr_eq(key, "shape") == 1)        { store64(entry + 112, value); }
     # Unknown fields silently dropped — additive growth per ADR 0002.
     return 0;
 }

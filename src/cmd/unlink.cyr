@@ -114,8 +114,9 @@ fn _hul_live_entries_for(trail, pkg_cstr): i64 {
 }
 
 # Is `current` a symlink text `hapi link` wrote for this audit entry?
-# That is the proof of "this is the link we created" — today's text or
-# the lexical-parent text of 1.1.0 and earlier (fsl_link_text_matches).
+# That is the proof of "this is the link we created" — today's text, the
+# absolute text (1.6.0), or the lexical-parent text of 1.1.0 and earlier
+# (fsl_link_text_matches).
 fn _hul_is_ours(entry, current): i64 {
     var abs_tgt = hae_abs_target(entry);
     var abs_src = hae_abs_source(entry);
@@ -157,10 +158,12 @@ fn _hul_remove_one(entry): i64 {
     if (hapi_dry_run() == 1) { return 0; }
     var urc = hapi_unlink(abs_tgt);
     if (urc < 0) { return 0 - 1; }
-    var ar_t, ar_v = audit_append_unlink_r(
+    # The entry says which shape it removed (1.6.0), so reversing it
+    # re-creates the same one.
+    var ar_t, ar_v = audit_append_unlink_shaped_r(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         hae_source(entry), hae_target(entry),
-        hae_abs_source(entry), hae_abs_target(entry));
+        hae_abs_source(entry), hae_abs_target(entry), fsl_shape_of(current));
     if (is_err_result(ar_t) == 1) {
         # Put back exactly this link, with the text it had, as `link`'s
         # write path takes back exactly its own (F-018). Through 1.2.1 it

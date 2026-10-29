@@ -47,7 +47,7 @@ Third leg of the terminal-aesthetics set:
 
 ## Status
 
-**v1.5.0** — the v1.0 contract, frozen 2026-05-23, still holds:
+**v1.6.0** — the v1.0 contract, frozen 2026-05-23, still holds:
 command surface (ten verbs plus five global flags), `hapi.cyml`
 manifest schema (ADR 0001), and audit-trail format (ADR 0002) are all
 contractual. 1.2.0 is the first release to add surface, all of it
@@ -58,7 +58,9 @@ kept. 1.3.0 adds `hapi sync` with no package and `sync --prune`, the
 two dogfood issues on `sync`, and 1.4.0 has `unlink` / `rollback` remove
 the directories `link` made, recorded as proof in the trail. 1.5.0 adds
 script-facing flags: `status --quiet`, `checkpoint --label`, and
-`rollback --to <label>` / `--steps N`, a multi-level undo. The releases
+`rollback --to <label>` / `--steps N`, a multi-level undo. 1.6.0 adds
+`--absolute`, for links that should name their source by its full path;
+either shape counts as hapi's link. The releases
 before 1.2.0 added teeth: 1.0.5 → 1.0.10 closed all
 twenty findings of the
 [2026-08-25 P(-1) audit](docs/audit/2026-08-25-audit.md), and 1.1.1
@@ -75,7 +77,7 @@ for the v1.0 surface.
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/hapi   # compile
 ./build/hapi --help                    # see the verb set
-cyrius test                            # 1340 + 77 assertions, two suites
+cyrius test                            # 1444 + 84 assertions, two suites
 ```
 
 A worked example lives at
@@ -96,9 +98,9 @@ file with `hapi adopt ~/.somerc somepackage`.
   [2026-10-28 pass](docs/audit/2026-10-28-audit.md) is the current one;
   its findings F-035 – F-059 are repaired in 1.1.1, its 1.2.0
   addendum re-walks the argument surface under cmdit (F-060), and its
-  1.3.0, 1.4.0 and 1.5.0 addenda cover `sync`'s scan and prune (F-061),
-  the removal of directories `link` made (F-062), and the script-facing
-  flags (F-063, accepted).
+  1.3.0 – 1.6.0 addenda cover `sync`'s scan and prune (F-061), the
+  removal of directories `link` made (F-062), the script-facing flags
+  (F-063, accepted), and `--absolute`.
 - [`docs/benchmarks.md`](docs/benchmarks.md) — sync over a 100-pkg
   synthetic home.
 - [`docs/development/state.md`](docs/development/state.md) — live

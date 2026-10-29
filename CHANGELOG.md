@@ -6,6 +6,116 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.6.0] - 2026-10-28
+
+> **`--absolute`.** ADR 0003 made relative links the default and reserved an
+> absolute opt-in. `link`, `adopt` and `sync` now take `--absolute`, which gives the
+> links a run creates the source's own path as their text. A link of either shape
+> naming its source is hapi's in every verb, so the flag shapes only what a run
+> creates, and `status` still works without the trail. The trail records
+> `"shape":"absolute"`, additive under ADR 0002, so `rollback` re-creates a removed
+> link in the shape it had. Earlier versions read a 1.6.0 trail; they leave an
+> absolute link alone.
+
+### Added
+
+- **`--absolute` on `link`, `adopt` and `sync`.** The text is the source's path as
+  spelled, lexically normalized (`./` and `//` dropped) and never resolved, so a
+  package reached through a symlink keeps that indirection, as the relative text
+  does. Relative stays the default.
+- **A link of either shape is hapi's link**, by its text alone:
+  - up to date for `link` and `sync`, so `--absolute` does not re-shape an existing
+    link, and a plain `sync` leaves absolute links alone;
+  - `OK` for `status`, with no flag and no trail read (F-006 holds);
+  - removable by `unlink`, `sync --prune` and `rollback`.
+
+  Only the exact text counts: another file's path, a prefix of this one, or this
+  one spelled with `./`, is not hapi's.
+- **`"shape":"absolute"` in the trail**, written last on:
+  - a `link` or `adopt` entry that wrote an absolute text, including the link a
+    rollback re-creates;
+  - an `unlink` or `unadopt` entry that removed one.
+
+  A relative entry has no field and is byte-identical to 1.5.0's. Only `"absolute"`
+  means absolute; anything else is the relative default.
+- **`rollback` re-creates a removed link in the shape it had**, read from the
+  `unlink` entry. It takes no `--absolute` of its own.
+- An absolute link cannot dangle under a symlinked parent (F-046's class): its text
+  does not depend on the directory it sits in.
+
+### Changed
+
+- **An absolute symlink to a row's source that a user put in place of hapi's link**
+  was drift to `status`, a conflict to `link` and refused by `unlink` through 1.5.0.
+  It is now hapi's in every verb. It names the same file, and hapi cannot tell it
+  from one `link --absolute` wrote.
+
+### Security
+
+P(-1) ran: 1.6.0 changes the link text and adds a trail field. The record is the
+*1.6.0 addendum* of [`docs/audit/2026-10-28-audit.md`](docs/audit/2026-10-28-audit.md).
+No finding.
+
+- **Hardening:** rollback builds an absolute text from the entry's `abs_source`. On
+  an edited trail with a relative `abs_source`, it now skips the entry instead of
+  writing a relative text as "absolute".
+- **Ownership widened by exactly one text:** the absolute path of the entry's own
+  source, which names the package's file. Containment is still decided on the
+  target. The new acceptance has tests that it holds and tests that it stays
+  narrow.
+- **Every new guard is held by a test that a seeded revert turns red:** 25 of 26.
+  - The one equivalent is a first-byte check that only spares normalizing the
+    source's path for a relative link.
+  - 1.2.0's 15, 1.3.0's 26, 1.4.0's 19 and 1.5.0's 38 are still caught.
+
+### Tests
+
+- `tests/hapi.tcyr` 1,340 → **1,444** assertions (142 → 149 groups). A new
+  `--absolute` tier covers:
+  - the text and its normalization;
+  - what counts as hapi's, and what does not: another source, a prefix, a `./`
+    spelling, a relative text;
+  - `link --absolute`, its entry, and the field's place after `created_dir`;
+  - a plain `link`, `sync` and `status` over absolute links, and `--absolute` over
+    relative ones;
+  - a user's swapped-in absolute link through `status`, `link` and `unlink`;
+  - rollback re-creating each shape, and ignoring the run's flag;
+  - an unknown `shape`, and a relative `abs_source` under shape absolute;
+  - `sync --prune --absolute`;
+  - `adopt --absolute` and its reversal;
+  - a link under a symlinked parent;
+  - the flag accepted on three verbs and refused on seven.
+- `tests/agnos.tcyr` 77 → **84** (11 → 12 groups): an absolute link's `link`,
+  `unlink` and `rollback` with the scope at `/`, under mirshi too.
+- Verified:
+  - x86_64, `--aarch64`, `--agnos` and `CYRIUS_DCE=1` builds;
+  - `cyrius lint` 0 warnings;
+  - `cyrius test` and `cyrius test --aarch64`;
+  - `cyrius fuzz` and `cyrius bench`;
+  - `scripts/concurrency-test.sh`;
+  - `scripts/agnos-smoke.sh` under mirshi, all five checks;
+  - `cyrius deps --verify` 114 / 114.
+
+  The 819-line golden against 1.5.0: 700 cases identical, 45 the version line, 74
+  the usage text's three new rows. A model-checked differential fuzz of 50,000 lines
+  against 1.5.0 found no mismatch. The 36,680 lines without `--absolute`, every 1.5.0
+  flag among them, are byte-identical.
+
+### Notes
+
+- **The shape does not stick.** A run without `--absolute` that re-creates a deleted
+  link makes it relative. Pass the flag on every run that should create absolute
+  links. Making it stick would mean `link` reading the trail for every row (ADR 0003,
+  1.6.0 addendum).
+- **To re-shape a package**, `hapi unlink <pkg>` and link it again with or without
+  `--absolute`.
+- **Older versions** do not know the absolute text. On an absolute link, before
+  1.6.0, `status` reports drift, `link` a conflict, and `unlink` / `rollback` refuse
+  with exit 1. Nothing is lost.
+- **Benchmarks:** flat against 1.5.0 (cold 137–142 ms on both), trail
+  byte-identical. A cold `sync --absolute` costs the same as relative; the trail
+  grows 19 bytes per entry. DCE binary 617,000 → 617,280 bytes.
+
 ## [1.5.0] - 2026-10-28
 
 > **Script-facing flags.** `status --quiet` stops failing on drift, so a
