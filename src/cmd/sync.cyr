@@ -26,39 +26,15 @@
 #   2  bad usage (incl. no package and HAPI_PACKAGE_ROOTS unset)
 
 include "src/cmd/link.cyr"
-include "src/cmd/unlink.cyr"   # _hul_live_entries_for / _hul_is_ours / _hul_remove_one
+include "src/cmd/unlink.cyr"   # the live set, removal, retiring, made directories
 include "src/audit_reader.cyr"
 include "lib/fs.cyr"           # dir_list_checked
-
-fn _hsy_puts(s): i64 { print(s, strlen(s)); return 0; }
-fn _hsy_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+include "src/out.cyr"
 
 # Test hook, like cap_set_allowlist: when set (non-zero) it stands in
 # for $HAPI_PACKAGE_ROOTS. Reset to 0 to restore the environment.
 var _hsy_roots_override = 0;
 fn sync_set_package_roots(s): i64 { _hsy_roots_override = s; return 0; }
-
-# Read the trail for a step that must not act on a partial view: an
-# unreadable trail or a malformed interior line is refused, as unlink
-# refuses it. An ABSENT trail is Ok(empty). Returns Ok(trail) / Err(1).
-fn _hsy_read_trail(what): Result {
-    var tr_t, tr_v = audit_read_default_r();
-    if (is_err_result(tr_t) == 1) {
-        var trc = tr_v;
-        _hsy_eputs("hapi: ");
-        _hsy_eputs(hapi_ar_err_msg(trc));
-        if (trc == HapiArCorrupt) {
-            _hsy_eputs(" (line ");
-            _hsy_eputs(_har_itoa(audit_corrupt_line()));
-            _hsy_eputs(")");
-        }
-        _hsy_eputs("\n  refusing to ");
-        _hsy_eputs(what);
-        _hsy_eputs(" on a partial view of the trail\n");
-        return Err(1);
-    }
-    return Ok(tr_v);
-}
 
 # Is the entry's target one of this run's rows? Compared lexically
 # normalized and at its physical place (F-080): through 1.7.0 the raw
@@ -71,8 +47,8 @@ fn _hsy_in_plan(plans, abs_tgt): i64 {
     var i = 0;
     while (i < n) {
         var pl = vec_get(plans, i);
-        if (_hul_cstr_eq(fsl_lexical_normalize(hlnk_plan_abs_target(pl)), nt) == 1) { return 1; }
-        if (pt != 0 && _hul_cstr_eq(hlnk_plan_place(pl), pt) == 1) { return 1; }
+        if (hapi_cstr_eq(fsl_lexical_normalize(hlnk_plan_abs_target(pl)), nt) == 1) { return 1; }
+        if (pt != 0 && hapi_cstr_eq(hlnk_plan_place(pl), pt) == 1) { return 1; }
         i = i + 1;
     }
     return 0;
@@ -88,24 +64,24 @@ fn _hsy_entry_in_scope(e, scope): i64 {
     var rel = hae_target(e);
     if (rel == 0) { return _fsl_within(tgt, scope); }
     var want = fsl_lexical_normalize(_fsl_path_join(scope, rel));
-    return _hul_cstr_eq(fsl_lexical_normalize(tgt), want);
+    return hapi_cstr_eq(fsl_lexical_normalize(tgt), want);
 }
 
 fn _hsy_refuse_prune_head(m, why): i64 {
-    _hsy_eputs("hapi: refusing to prune `");
+    hapi_eputs("hapi: refusing to prune `");
     var nm = hapi_mf_name(m);
     eprint(str_data(nm), str_len(nm));
-    _hsy_eputs("` — ");
-    _hsy_eputs(why);
+    hapi_eputs("` — ");
+    hapi_eputs(why);
     return 0;
 }
 
 fn _hsy_print_targets(entries): i64 {
     var i = 0;
     while (i < vec_len(entries)) {
-        _hsy_eputs("  ");
-        _hsy_eputs(hae_abs_target(vec_get(entries, i)));
-        _hsy_eputs("\n");
+        hapi_eputs("  ");
+        hapi_eputs(hae_abs_target(vec_get(entries, i)));
+        hapi_eputs("\n");
         i = i + 1;
     }
     return 0;
@@ -135,7 +111,7 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
     var scope = hlnk_run_scope_root(run);
     var plans = hlnk_run_plans(run);
 
-    var tr_t, tr_v = _hsy_read_trail("prune");
+    var tr_t, tr_v = audit_read_or_refuse("prune");
     if (is_err_result(tr_t) == 1) { return 1; }
     var live = _hul_live_entries_for(tr_v, _fsl_str_to_cstr(hapi_mf_name(m)));
 
@@ -173,8 +149,8 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
     # hapi removes only what it created; --force does not change that.
     if (vec_len(mutated) > 0) {
         _hsy_refuse_prune_head(m, "a link whose row left the manifest is no longer\n");
-        _hsy_eputs("  the one hapi made (hapi removes only what it created; --force does not\n");
-        _hsy_eputs("  override this):\n");
+        hapi_eputs("  the one hapi made (hapi removes only what it created; --force does not\n");
+        hapi_eputs("  override this):\n");
         _hsy_print_targets(mutated);
         return 1;
     }
@@ -184,15 +160,15 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
     if (np * 2 > owned && force == 0) {
         _hsy_refuse_prune_head(m, "");
         fmt_int_fd(2, np);
-        _hsy_eputs(" of its ");
+        hapi_eputs(" of its ");
         fmt_int_fd(2, owned);
-        _hsy_eputs(" live links left the manifest, more than half\n  (rerun with --prune --force to remove them):\n");
+        hapi_eputs(" live links left the manifest, more than half\n  (rerun with --prune --force to remove them):\n");
         _hsy_print_targets(prune);
         return 1;
     }
 
     if (_hlnk_will_write(run, 0) + np > 0) {
-        if (hlnk_preflight("sync") != 0) { return 1; }
+        if (audit_preflight_or_refuse("sync") != 0) { return 1; }
     }
 
     var refused = 0;
@@ -203,24 +179,24 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
         var pe = vec_get(prune, j);
         var rc = _hul_remove_one(pe);
         if (rc == 0 || rc == 2) {
-            _hsy_puts("  - ");
-            _hsy_puts(hae_shown(hae_abs_target(pe)));
-            if (hapi_dry_run() == 1) { _hsy_puts("  (dry-run)"); }
-            _hsy_puts("\n");
+            hapi_puts("  - ");
+            hapi_puts(hae_shown(hae_abs_target(pe)));
+            if (hapi_dry_run() == 1) { hapi_puts("  (dry-run)"); }
+            hapi_puts("\n");
             if (rc == 0 && hapi_dry_run() == 0) {
                 vec_push(gone_tgts, hae_abs_target(pe));
                 vec_push(gone_dirs, hae_created_dir(pe));
                 hul_remove_created_dirs_of(hae_abs_target(pe), hae_created_dir(pe));
             }
         } elif (rc == 1) {
-            _hsy_eputs("  ! ");
-            _hsy_eputs(hae_shown(hae_abs_target(pe)));
-            _hsy_eputs("  (changed since it was planned; skipped)\n");
+            hapi_eputs("  ! ");
+            hapi_eputs(hae_shown(hae_abs_target(pe)));
+            hapi_eputs("  (changed since it was planned; skipped)\n");
             refused = refused + 1;
         } elif (rc == 0 - 1) {
-            _hsy_eputs("hapi: could not prune ");
-            _hsy_eputs(hae_shown(hae_abs_target(pe)));
-            _hsy_eputs(" (IO error)\n");
+            hapi_eputs("hapi: could not prune ");
+            hapi_eputs(hae_shown(hae_abs_target(pe)));
+            hapi_eputs(" (IO error)\n");
             # The directories of the links it did remove go too (F-110).
             hul_remove_created_dirs(gone_tgts, gone_dirs);
             return 1;
@@ -236,11 +212,11 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
     var g = 0;
     while (g < vec_len(gone)) {
         var ge = vec_get(gone, g);
-        _hsy_puts("  = ");
-        _hsy_puts(hae_shown(hae_abs_target(ge)));
-        _hsy_puts("  (already absent");
-        if (hapi_dry_run() == 1) { _hsy_puts("; dry-run"); }
-        _hsy_puts(")\n");
+        hapi_puts("  = ");
+        hapi_puts(hae_shown(hae_abs_target(ge)));
+        hapi_puts("  (already absent");
+        if (hapi_dry_run() == 1) { hapi_puts("; dry-run"); }
+        hapi_puts(")\n");
         if (hapi_dry_run() == 0) {
             var gt_t, gt_v = hul_retire(ge);
             if (is_err_result(gt_t) == 1) {
@@ -259,17 +235,17 @@ fn _hsy_prune_one(pkg_arg, force): i64 {
     # before it is written (F-080, the F-067 backstop).
     if (vec_len(gone_tgts) > 0) { hlnk_note_tree_changed(); }
     var lrc = _hlnk_execute(run, 0);
-    _hsy_puts("pruned ");
+    hapi_puts("pruned ");
     fmt_int(np - refused);
-    _hsy_puts(" (no longer in the manifest)\n");
+    hapi_puts(" (no longer in the manifest)\n");
     if (lrc != 0 || refused > 0) { return 1; }
     return 0;
 }
 
 fn _hsy_one(pkg_arg, prune, force): i64 {
-    _hsy_puts("syncing ");
-    _hsy_puts(pkg_arg);
-    _hsy_puts("...\n");
+    hapi_puts("syncing ");
+    hapi_puts(pkg_arg);
+    hapi_puts("...\n");
     if (prune == 0) {
         hlnk_set_in_sync(1);
         var lrc = cmd_link(pkg_arg, 0);
@@ -287,11 +263,11 @@ fn _hsy_name_cmp(a, b): i64 {
 }
 
 fn _hsy_note(path, why): i64 {
-    _hsy_eputs("hapi: note: skipped ");
-    _hsy_eputs(path);
-    _hsy_eputs(" (");
-    _hsy_eputs(why);
-    _hsy_eputs(")\n");
+    hapi_eputs("hapi: note: skipped ");
+    hapi_eputs(path);
+    hapi_eputs(" (");
+    hapi_eputs(why);
+    hapi_eputs(")\n");
     return 0;
 }
 
@@ -304,9 +280,9 @@ fn _hsy_note(path, why): i64 {
 fn _hsy_scan_root(root, found): i64 {
     var names = vec_new();
     if (dir_list_checked(str_from(root), names) < 0) {
-        _hsy_eputs("hapi: could not list the package root ");
-        _hsy_eputs(root);
-        _hsy_eputs("\n");
+        hapi_eputs("hapi: could not list the package root ");
+        hapi_eputs(root);
+        hapi_eputs("\n");
         return 0 - 1;
     }
     var cnames = vec_new();
@@ -370,8 +346,8 @@ fn _hsy_entry_pkg_dir(e): i64 {
 fn _hsy_report_unscanned(found): i64 {
     var tr_t, tr_v = audit_read_default_r();
     if (is_err_result(tr_t) == 1) {
-        _hsy_eputs("hapi: note: the audit trail could not be read, so packages it\n");
-        _hsy_eputs("  knows outside HAPI_PACKAGE_ROOTS are not listed\n");
+        hapi_eputs("hapi: note: the audit trail could not be read, so packages it\n");
+        hapi_eputs("  knows outside HAPI_PACKAGE_ROOTS are not listed\n");
         return 0;
     }
     var trail = tr_v;
@@ -380,11 +356,11 @@ fn _hsy_report_unscanned(found): i64 {
     while (i < vec_len(trail)) {
         var e = vec_get(trail, i);
         var pn = hae_pkg(e);
-        if (pn != 0 && _hul_cstr_eq(hae_op(e), "link") == 1) {
+        if (pn != 0 && hapi_cstr_eq(hae_op(e), "link") == 1) {
             var seen = 0;
             var k = 0;
             while (k < vec_len(names)) {
-                if (_hul_cstr_eq(vec_get(names, k), pn) == 1) { seen = 1; }
+                if (hapi_cstr_eq(vec_get(names, k), pn) == 1) { seen = 1; }
                 k = k + 1;
             }
             if (seen == 0) { vec_push(names, pn); }
@@ -413,25 +389,25 @@ fn _hsy_report_unscanned(found): i64 {
             var held = 0;
             var f = 0;
             while (f < vec_len(found)) {
-                if (dir != 0 && _hul_cstr_eq(vec_get(found, f), dir) == 1) { held = 1; }
+                if (dir != 0 && hapi_cstr_eq(vec_get(found, f), dir) == 1) { held = 1; }
                 var fp = vec_get(fphys, f);
-                if (dphys != 0 && fp != 0 && _hul_cstr_eq(fp, dphys) == 1) { held = 1; }
+                if (dphys != 0 && fp != 0 && hapi_cstr_eq(fp, dphys) == 1) { held = 1; }
                 f = f + 1;
             }
             if (dir != 0 && held == 0) {
                 var dup = 0;
                 var t = 0;
                 while (t < vec_len(told)) {
-                    if (_hul_cstr_eq(vec_get(told, t), dir) == 1) { dup = 1; }
+                    if (hapi_cstr_eq(vec_get(told, t), dir) == 1) { dup = 1; }
                     t = t + 1;
                 }
                 if (dup == 0) {
                     vec_push(told, dir);
-                    _hsy_eputs("hapi: note: the trail has live links for `");
-                    _hsy_eputs(vec_get(names, a));
-                    _hsy_eputs("` from ");
-                    _hsy_eputs(dir);
-                    _hsy_eputs(",\n  which no package root holds; not synced\n");
+                    hapi_eputs("hapi: note: the trail has live links for `");
+                    hapi_eputs(vec_get(names, a));
+                    hapi_eputs("` from ");
+                    hapi_eputs(dir);
+                    hapi_eputs(",\n  which no package root holds; not synced\n");
                 }
             }
             b = b + 1;
@@ -449,9 +425,9 @@ fn _hsy_all(prune, force): i64 {
     var env = _hsy_roots_override;
     if (env == 0) { env = getenv("HAPI_PACKAGE_ROOTS"); }
     if (env == 0 || strlen(env) == 0) {
-        _hsy_eputs("hapi: `sync` with no package needs HAPI_PACKAGE_ROOTS: the directories\n");
-        _hsy_eputs("  that hold your packages, colon-separated, each scanned one level deep\n");
-        _hsy_eputs("usage: hapi sync [<package-dir|hapi.cyml>] [--prune [--force]]\n");
+        hapi_eputs("hapi: `sync` with no package needs HAPI_PACKAGE_ROOTS: the directories\n");
+        hapi_eputs("  that hold your packages, colon-separated, each scanned one level deep\n");
+        hapi_eputs("usage: hapi sync [<package-dir|hapi.cyml>] [--prune [--force]]\n");
         return 2;
     }
 
@@ -469,9 +445,9 @@ fn _hsy_all(prune, force): i64 {
                 memcpy(r, env + start, i - start);
                 store8(r + i - start, 0);
                 if (load8(r) != 47) {
-                    _hsy_eputs("hapi: HAPI_PACKAGE_ROOTS entry is not an absolute path: ");
-                    _hsy_eputs(r);
-                    _hsy_eputs("\n");
+                    hapi_eputs("hapi: HAPI_PACKAGE_ROOTS entry is not an absolute path: ");
+                    hapi_eputs(r);
+                    hapi_eputs("\n");
                     return 2;
                 }
                 # A root given twice, or two spellings of one, is one
@@ -483,8 +459,8 @@ fn _hsy_all(prune, force): i64 {
                 var rj = 0;
                 while (rj < vec_len(roots)) {
                     var other = fsl_resolve_path(vec_get(roots, rj));
-                    if (pr != 0 && other != 0 && _hul_cstr_eq(pr, other) == 1) { dup = 1; }
-                    if (_hul_cstr_eq(nr, vec_get(roots, rj)) == 1) { dup = 1; }
+                    if (pr != 0 && other != 0 && hapi_cstr_eq(pr, other) == 1) { dup = 1; }
+                    if (hapi_cstr_eq(nr, vec_get(roots, rj)) == 1) { dup = 1; }
                     rj = rj + 1;
                 }
                 if (dup == 0) { vec_push(roots, nr); }
@@ -504,9 +480,9 @@ fn _hsy_all(prune, force): i64 {
     var total = vec_len(found);
     if (total == 0) {
         if (failed == 0) {
-            _hsy_eputs("hapi: no packages under HAPI_PACKAGE_ROOTS (");
-            _hsy_eputs(env);
-            _hsy_eputs(")\n");
+            hapi_eputs("hapi: no packages under HAPI_PACKAGE_ROOTS (");
+            hapi_eputs(env);
+            hapi_eputs(")\n");
         }
         return 1;
     }
@@ -530,17 +506,17 @@ fn _hsy_all(prune, force): i64 {
         var twin = 0;
         var q = 0;
         while (q < total) {
-            if (q != p && mine != 0 && _hul_cstr_eq(vec_get(mnames, q), mine) == 1) { twin = vec_get(found, q); }
+            if (q != p && mine != 0 && hapi_cstr_eq(vec_get(mnames, q), mine) == 1) { twin = vec_get(found, q); }
             q = q + 1;
         }
         if (twin != 0) {
-            _hsy_eputs("hapi: refusing to sync ");
-            _hsy_eputs(dir);
-            _hsy_eputs(" — package `");
-            _hsy_eputs(mine);
-            _hsy_eputs("` is also\n  ");
-            _hsy_eputs(twin);
-            _hsy_eputs(", and the audit trail cannot tell them apart\n");
+            hapi_eputs("hapi: refusing to sync ");
+            hapi_eputs(dir);
+            hapi_eputs(" — package `");
+            hapi_eputs(mine);
+            hapi_eputs("` is also\n  ");
+            hapi_eputs(twin);
+            hapi_eputs(", and the audit trail cannot tell them apart\n");
             failed = failed + 1;
         } elif (_hsy_one(dir, prune, force) == 0) {
             ok = ok + 1;
@@ -551,11 +527,11 @@ fn _hsy_all(prune, force): i64 {
     }
 
     _hsy_report_unscanned(found);
-    _hsy_puts("synced ");
+    hapi_puts("synced ");
     fmt_int(ok);
-    _hsy_puts(" / ");
+    hapi_puts(" / ");
     fmt_int(total);
-    _hsy_puts(" packages\n");
+    hapi_puts(" packages\n");
     if (failed > 0) { return 1; }
     return 0;
 }

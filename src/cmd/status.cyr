@@ -30,21 +30,17 @@
 include "src/manifest.cyr"
 include "src/fs_link.cyr"
 include "src/cmd/link.cyr"   # scope-root override hook
-
-fn _hst_puts(s): i64 { print(s, strlen(s)); return 0; }
-fn _hst_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+include "src/out.cyr"
 
 # Same resolver as inspect/link — accept a *.cyml path or a
 # package directory.
 fn _hst_resolve_manifest(arg): i64 { return fsl_manifest_of_arg(arg); }
 
-fn _hst_cstr_eq(a, b): i64 { return hapi_cstr_eq(a, b); }
-
 fn cmd_status(pkg_arg): i64 { return cmd_status_run(pkg_arg, 0); }
 
 fn cmd_status_run(pkg_arg, quiet): i64 {
     if (pkg_arg == 0) {
-        _hst_eputs("usage: hapi status <package-dir|hapi.cyml>\n");
+        hapi_eputs("usage: hapi status <package-dir|hapi.cyml>\n");
         return 2;
     }
 
@@ -55,41 +51,20 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
     # requires to be absolute, and the symlink body would resolve
     # against the wrong directory (F-027).
     if (manifest_path == 0) {
-        _hst_eputs("hapi: cannot resolve a relative package path — the working\n");
-        _hst_eputs("  directory is not knowable on this target. Pass an absolute\n");
-        _hst_eputs("  path, or set PWD.\n");
+        hapi_refuse_unknown_cwd();
         return 1;
     }
     var pkg_dir_abs = _fsl_path_dirname(manifest_path);
 
     var mr_t, mr_v = hapi_mf_parse_file_r(manifest_path);
     if (is_err_result(mr_t) == 1) {
-        var code = mr_v;
-        var msg = hapi_mf_err_msg(code);
-        _hst_eputs("hapi: ");
-        eprint(msg, strlen(msg));
-        _hst_eputs(" (");
-        eprint(manifest_path, strlen(manifest_path));
-        _hst_eputs(")\n");
+        hapi_mf_report_err(mr_v, manifest_path);
         return 1;
     }
     var m = mr_v;
 
-    var scope_root = _hlnk_scope_root_override;
-    if (scope_root == 0) { scope_root = getenv("HOME"); }
-    if (scope_root == 0 || strlen(scope_root) == 0) {
-        _hst_eputs("hapi: $HOME is unset; cannot resolve link targets\n");
-        return 1;
-    }
-    # A relative scope root put every target under the cwd (F-109): from
-    # another directory, link made `./home` and wrote there. Only an
-    # absolute HOME, or a --root already made absolute, is a scope root.
-    if (load8(scope_root) != 47) {
-        _hst_eputs("hapi: the scope root is not an absolute path: ");
-        _hst_eputs(scope_root);
-        _hst_eputs("\n");
-        return 1;
-    }
+    var scope_root = link_scope_root("cannot resolve link targets");
+    if (scope_root == 0) { return 1; }
     var scope_root_abs = fsl_to_absolute(scope_root);
 
     var links = hapi_mf_links(m);
@@ -131,7 +106,7 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
             # Either shape naming the source is OK (1.6.0): `--absolute`
             # shapes only the links a run creates, and status reads no
             # trail, so it needs no flag (F-006).
-            if (_hst_cstr_eq(existing, expected) == 1 || fsl_is_absolute_text(existing, abs_src) == 1) {
+            if (hapi_cstr_eq(existing, expected) == 1 || fsl_is_absolute_text(existing, abs_src) == 1) {
                 # Ownership is still proved by the byte-compare above,
                 # unchanged. This is an ADDITIONAL probe: a dangling link
                 # holds exactly the right target text, so the compare
@@ -158,24 +133,24 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
             status_lit = "DIR    ";
         }
 
-        _hst_puts("  ");
-        _hst_puts(status_lit);
-        _hst_puts("  ");
-        _hst_puts(abs_tgt);
+        hapi_puts("  ");
+        hapi_puts(status_lit);
+        hapi_puts("  ");
+        hapi_puts(abs_tgt);
         if (refused == 1) {
-            _hst_puts("  (resolves outside the scoped root, or cannot be followed; link refuses it)");
+            hapi_puts("  (resolves outside the scoped root, or cannot be followed; link refuses it)");
         } elif (broken == 1 || no_src == 1) {
-            _hst_puts("  (source missing: ");
-            _hst_puts(abs_src);
-            _hst_puts(")");
+            hapi_puts("  (source missing: ");
+            hapi_puts(abs_src);
+            hapi_puts(")");
         } elif (kind == HAPI_LP_SYMLINK && row_ok == 0) {
-            _hst_puts("  (-> ");
-            _hst_puts(detail);
-            _hst_puts("; expected -> ");
-            _hst_puts(expected);
-            _hst_puts(")");
+            hapi_puts("  (-> ");
+            hapi_puts(detail);
+            hapi_puts("; expected -> ");
+            hapi_puts(expected);
+            hapi_puts(")");
         }
-        _hst_puts("\n");
+        hapi_puts("\n");
 
         if (row_ok == 1) { ok = ok + 1; }
         else { drift = drift + 1; }
@@ -184,31 +159,31 @@ fn cmd_status_run(pkg_arg, quiet): i64 {
         i = i + 1;
     }
 
-    _hst_puts("status ");
+    hapi_puts("status ");
     fmt_int(ok);
-    _hst_puts(" / ");
+    hapi_puts(" / ");
     fmt_int(nlinks);
-    _hst_puts(" OK");
+    hapi_puts(" OK");
     if (drift > 0) {
-        _hst_puts(" (");
+        hapi_puts(" (");
         fmt_int(drift);
-        _hst_puts(" drift)");
+        hapi_puts(" drift)");
     }
-    _hst_puts("\n");
+    hapi_puts("\n");
     if (quiet == 1) {
         if (unchecked == 0 && nrefused == 0) { return 0; }
         if (unchecked > 0) {
-            _hst_eputs("hapi: ");
+            hapi_eputs("hapi: ");
             fmt_int_fd(2, unchecked);
-            if (unchecked == 1) { _hst_eputs(" target could not be checked (ERROR above)\n"); }
-            else { _hst_eputs(" targets could not be checked (ERROR above)\n"); }
+            if (unchecked == 1) { hapi_eputs(" target could not be checked (ERROR above)\n"); }
+            else { hapi_eputs(" targets could not be checked (ERROR above)\n"); }
         }
         if (nrefused > 0) {
-            _hst_eputs("hapi: ");
+            hapi_eputs("hapi: ");
             fmt_int_fd(2, nrefused);
-            if (nrefused == 1) { _hst_eputs(" row resolves"); }
-            else { _hst_eputs(" rows resolve"); }
-            _hst_eputs(" outside the scope or cannot be followed (REFUSED above)\n");
+            if (nrefused == 1) { hapi_eputs(" row resolves"); }
+            else { hapi_eputs(" rows resolve"); }
+            hapi_eputs(" outside the scope or cannot be followed (REFUSED above)\n");
         }
         return 1;
     }

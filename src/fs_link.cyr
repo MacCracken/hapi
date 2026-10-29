@@ -7,7 +7,8 @@
 #
 # Implements the symlink-shape decision from ADR 0003 — links
 # carry a *relative* target computed at link time as the path
-# from the link's parent directory to the absolute source.
+# from the link's parent directory to the absolute source, or, under
+# `--absolute` (1.6.0), the absolute source itself.
 
 include "lib/string.cyr"
 include "lib/alloc.cyr"
@@ -15,6 +16,7 @@ include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/str.cyr"
 include "lib/vec.cyr"
+include "src/out.cyr"
 
 enum HapiLinkProbe {
     HAPI_LP_ABSENT = 0;
@@ -185,14 +187,27 @@ fn fsl_has_cyml_suffix(s): i64 {
 # The manifest a package argument names, for link, status, adopt and fmt:
 # a `*.cyml` path as given, made absolute, or `<dir>/hapi.cyml`. 0 for a
 # relative argument with no knowable cwd (F-027): the caller refuses
-# rather than record an `abs_source` that is not absolute. (check keeps
-# its own: it resolves nothing, and its messages print the argument as
-# given.)
+# rather than record an `abs_source` that is not absolute.
 fn fsl_manifest_of_arg(arg): i64 {
     if (fsl_has_cyml_suffix(arg) == 1) { return fsl_canonical_arg(arg); }
     var abs_arg = fsl_canonical_arg(arg);
     if (abs_arg == 0) { return 0; }
     return _fsl_path_join(abs_arg, "hapi.cyml");
+}
+
+# The manifest a package argument names, as given, resolving nothing: a
+# `*.cyml` path, or `<arg>/hapi.cyml` with one trailing `/` dropped. For
+# inspect and check, whose messages print the argument as typed. Each had
+# its own copy (finding 156).
+fn fsl_manifest_as_given(arg): i64 {
+    if (fsl_has_cyml_suffix(arg) == 1) { return _fsl_cstr_dup(arg); }
+    var trim = strlen(arg);
+    if (trim > 0 && load8(arg + trim - 1) == 47) { trim = trim - 1; }
+    var out = alloc(trim + 11);
+    memcpy(out, arg, trim);
+    memcpy(out + trim, "/hapi.cyml", 10);
+    store8(out + trim + 10, 0);
+    return out;
 }
 
 # 1 when `path` is a regular file (stat follows the last component).
@@ -269,13 +284,7 @@ fn _fsl_getcwd(): i64 {
     # exec, so prefer that when it is absolute — it is the only source
     # of truth available (F-027).
     var pwd = getenv("PWD");
-    if (pwd != 0 && strlen(pwd) > 0 && load8(pwd) == 47) {
-        var pl = strlen(pwd);
-        var pc = alloc(pl + 1);
-        memcpy(pc, pwd, pl);
-        store8(pc + pl, 0);
-        return pc;
-    }
+    if (pwd != 0 && strlen(pwd) > 0 && load8(pwd) == 47) { return _fsl_cstr_dup(pwd); }
     # No usable PWD (a supervisor that passes no envp, for one). Return
     # 0 rather than "." — "." made `fsl_to_absolute` hand back a
     # RELATIVE path that flowed into the trail's `abs_source`, which
@@ -290,14 +299,7 @@ fn _fsl_getcwd(): i64 {
     # that dangled. Linux can also answer "(unreachable)/..." for a cwd
     # outside the process's root; only an absolute answer is one.
     if (n < 0 || load8(buf) != 47) { return 0; }
-    # On Linux, getcwd writes a null-terminated path; the return
-    # value is the length including the trailing null. The buf is
-    # already what we want — just clone it tight.
-    var len = strlen(buf);
-    var out = alloc(len + 1);
-    memcpy(out, buf, len);
-    store8(out + len, 0);
-    return out;
+    return _fsl_cstr_dup(buf);       # getcwd wrote a NUL-terminated path
     #endif
 }
 
@@ -330,21 +332,19 @@ fn fsl_canonical_arg(path): i64 {
     return fsl_lexical_normalize(abs);
 }
 
-# Lexical path canonicalization: collapse `.` and `..` segments
-# in `path` (an absolute cstring). Returns a fresh heap cstring.
-#
-# `/a/b/../c` → `/a/c`
-# `/a/./b`    → `/a/b`
-# `/a/b/..`   → `/a`
-# `/..`       → `/` (cannot escape root)
-# `/`         → `/`
-#
-# Lexical means: no filesystem calls; no symlink resolution. A
-# leading symlink in the path is preserved (`/home/user/trap`
-# stays `/home/user/trap` even if `trap` is a symlink). This is
-# exactly the property the capability cap-check needs to reject
-# `--root /home/user/../etc` while leaving the symlink-resolution
-# question for the kavach migration.
+# The refusal for a package argument fsl_canonical_arg could not make
+# absolute: the working directory is not knowable (agnos with no usable
+# PWD). Going on would put a relative path into the trail's `abs_source`,
+# which ADR 0002 requires to be absolute, and the link text would resolve
+# against the wrong directory (F-027). link, adopt, status and fmt each
+# printed it with their own copy (finding 160).
+fn hapi_refuse_unknown_cwd(): i64 {
+    hapi_eputs("hapi: cannot resolve a relative package path — the working\n");
+    hapi_eputs("  directory is not knowable on this target. Pass an absolute\n");
+    hapi_eputs("  path, or set PWD.\n");
+    return 1;
+}
+
 # Split a path into its components, absolute or relative. Returns a vec
 # of Str; an empty segment (a leading or doubled `/`) is dropped, so
 # `/a/b` and `a/b` split alike. `.` and `..` are kept for the caller.
@@ -512,18 +512,18 @@ fn _fsl_seg_is(seg, lit): i64 {
     return memeq(seg, lit, n);
 }
 
-# Is the PHYSICAL location of `path` inside the PHYSICAL scope root?
-# Both sides are resolved, so a scope root that is itself reached
-# through a symlink (`/home/u -> /mnt/home/u`) does not cause a false
-# refusal. Returns 0 when containment cannot be proven.
-# Component-boundary prefix match. Local to this module: cap.cyr's
-# equivalent lives downstream of this file (it includes fs_link.cyr), so
-# reaching for it here would be a cycle.
+# Component-boundary prefix match: `path` is `prefix` or lies beneath it.
+# The one copy: cap.cyr had its own (finding 158).
 fn _fsl_within(path, prefix): i64 {
     var pn = strlen(path);
     var fn_ = strlen(prefix);
     if (fn_ == 0) { return 0; }
-    # "/" contains every absolute path — see _cap_path_within (F-047).
+    # The root contains every absolute path (F-047). Without this arm the
+    # trailing-slash strip below is skipped for "/" (it must be, or the
+    # prefix would be empty) and the boundary test then asked for a
+    # second '/' at path[1], so `--root /` and HAPI_ALLOWED_ROOTS=/
+    # contained nothing — and agnos, which stages HOME=/, refused every
+    # row of every verb.
     if (fn_ == 1 && load8(prefix) == 47) {
         if (pn > 0 && load8(path) == 47) { return 1; }
         return 0;
@@ -664,6 +664,21 @@ fn _fsl_text_is(text, want): i64 {
     return memeq(text, want, n);
 }
 
+# Lexical path canonicalization: collapse `.` and `..` segments
+# in `path` (an absolute cstring). Returns a fresh heap cstring.
+#
+# `/a/b/../c` → `/a/c`
+# `/a/./b`    → `/a/b`
+# `/a/b/..`   → `/a`
+# `/..`       → `/` (cannot escape root)
+# `/`         → `/`
+#
+# Lexical means: no filesystem calls; no symlink resolution. A
+# leading symlink in the path is preserved (`/home/user/trap`
+# stays `/home/user/trap` even if `trap` is a symlink). This is
+# exactly the property the capability cap-check needs to reject
+# `--root /home/user/../etc`; where a path physically resolves is
+# fsl_resolve_path's question.
 fn fsl_lexical_normalize(path): i64 {
     var n = strlen(path);
     if (n == 0 || load8(path) != 47) { return _fsl_cstr_dup(path); }
@@ -822,10 +837,9 @@ fn fsl_compute_relative(from_dir, to_file): i64 {
     return out;
 }
 
-# mkdir -p `path`'s parent. Treats EEXIST as success. Mode 0700.
-# Returns 0 on success, negative on first non-EEXIST failure.
-# Mode-carrying form. `mode` is the mkdir(2) mode, which the kernel then
-# filters through the process umask.
+# mkdir -p `file_path`'s parent with `mode`, the mkdir(2) mode, which the
+# kernel then filters through the process umask. Treats EEXIST as
+# success. Returns 0 on success, negative on the first other failure.
 #
 # Two callers want opposite things (F-029). A directory hapi creates in
 # the user's $HOME on their behalf should look like one they made
@@ -901,9 +915,6 @@ fn fsl_mkdir_parents_mode(file_path, mode): i64 {
     return fsl_mkdir_parents_mode_r(file_path, mode, 0);
 }
 
-# Create a symlink at `linkpath` pointing at `target`. Creates
-# the parent directory of `linkpath` on demand. Returns the
-# raw kernel return code (0 on success, -errno on failure).
 # Back-compat name: private (0700) parents. Kept so the state-dir and
 # backup-destination callers, which WANT 0700, need no change.
 fn fsl_mkdir_parents(file_path): i64 {
@@ -935,6 +946,9 @@ fn link_create_r(target, linkpath, created_out): i64 {
     return 0;
 }
 
+# Create a symlink at `linkpath` pointing at `target`. Creates
+# the parent directory of `linkpath` on demand. Returns the
+# raw kernel return code (0 on success, -errno on failure).
 fn link_create(target, linkpath): i64 {
     return link_create_r(target, linkpath, 0);
 }

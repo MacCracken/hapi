@@ -1,14 +1,15 @@
 # hapi — main entry point.
 #
-# The command line — ten verbs frozen at v1.0.0, --version / --help,
-# and each verb's flags — is parsed by cmdit in src/cli.cyr, where
-# tests/hapi.tcyr can drive it with a synthetic argv. The flags:
+# The command line — eleven verbs (ten frozen at v1.0.0, and `fmt` since
+# 1.7.0), --version / --help, and each verb's flags — is parsed by cmdit
+# in src/cli.cyr, where tests/hapi.tcyr can drive it with a synthetic
+# argv; src/cli.cyr holds the whole table. The flags:
 #   --root <path>  — open a non-$HOME scope, gated by ADR 0005
 #                    (HAPI_ALLOWED_ROOTS stopgap, kavach later).
 #                    Accepted on: link, adopt, status, list, sync.
 #   --dry-run      — show what would happen; no syscalls or
 #                    audit writes. Accepted on: link, unlink,
-#                    adopt, sync, rollback, checkpoint.
+#                    adopt, sync, rollback, checkpoint, fmt.
 #   --backup-to <dir> — snapshot the existing on-disk file
 #                    before a destructive overwrite. Audit entry
 #                    gains an additive `backup_path` field per ADR
@@ -19,7 +20,11 @@
 #                    has no destructive step and the flag is inert
 #                    there (F-026). Kept accepted on sync rather
 #                    than rejected: the command surface is frozen.
-#   --force (link) and --strict (check).
+#   --force        — link: replace a conflicting file; sync: lift
+#                    --prune's limit; fmt: write what it would drop.
+#   --absolute (link, adopt, sync), --prune (sync), --quiet (status),
+#   --steps / --to (rollback), --label (checkpoint), --check (fmt) and
+#   --strict (check).
 
 include "src/agnos_compat.cyr"
 include "src/cli.cyr"

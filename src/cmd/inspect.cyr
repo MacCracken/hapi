@@ -4,7 +4,7 @@
 # dumps the parsed form to stdout. Filesystem state (source paths
 # exist, target conflicts) is intentionally NOT checked here —
 # inspect is the "what does the manifest say?" command. Conflict
-# checking is `hapi status` (M5) and link-time enforcement (M2).
+# checking is `hapi status`, and `hapi link`'s plan.
 #
 # Path argument is either:
 #   - a directory containing hapi.cyml  (e.g. `docs/examples/dotfiles-zsh`)
@@ -16,37 +16,12 @@
 #   2  bad usage (no path argument)
 
 include "src/manifest.cyr"
-
-# Strlen-using print helpers — avoid hand-counted byte literals
-# (off-by-one writes adjacent rodata bytes to the terminal).
-fn _hi_puts(s): i64 { print(s, strlen(s)); return 0; }
-fn _hi_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+include "src/out.cyr"
 
 # Resolve `path` to a concrete manifest-file path. If `path` ends
 # in `.cyml` we use it verbatim; otherwise we join `/hapi.cyml`.
 # Returned cstring is heap-allocated (null-terminated).
-fn _hapi_inspect_resolve(path): i64 {
-    var n = strlen(path);
-    if (n >= 5) {
-        if (load8(path + n - 5) == 46 && load8(path + n - 4) == 99
-            && load8(path + n - 3) == 121 && load8(path + n - 2) == 109
-            && load8(path + n - 1) == 108) {
-            var out = alloc(n + 1);
-            memcpy(out, path, n);
-            store8(out + n, 0);
-            return out;
-        }
-    }
-    var trim = n;
-    if (trim > 0 && load8(path + trim - 1) == 47) { trim = trim - 1; }
-    var suffix = "/hapi.cyml";
-    var slen = 10;
-    var out = alloc(trim + slen + 1);
-    memcpy(out, path, trim);
-    memcpy(out + trim, suffix, slen);
-    store8(out + trim + slen, 0);
-    return out;
-}
+fn _hapi_inspect_resolve(path): i64 { return fsl_manifest_as_given(path); }
 
 # Walk the links vec once to compute the widest source-side width
 # so the `source → target` columns line up.
@@ -77,9 +52,9 @@ fn _hapi_inspect_pad(count): i64 {
 }
 
 fn _hapi_inspect_print_field(label, val): i64 {
-    _hi_puts(label);
+    hapi_puts(label);
     str_print(val);
-    _hi_puts("\n");
+    hapi_puts("\n");
     return 0;
 }
 
@@ -93,11 +68,11 @@ fn _hapi_inspect_print_manifest(m): i64 {
 
     var links = hapi_mf_links(m);
     var nlinks = vec_len(links);
-    _hi_puts("\nlinks (");
+    hapi_puts("\nlinks (");
     fmt_int(nlinks);
-    _hi_puts("):\n");
+    hapi_puts("):\n");
     if (nlinks == 0) {
-        _hi_puts("  (none)\n");
+        hapi_puts("  (none)\n");
     } else {
         var width = _hapi_inspect_max_src_len(links);
         var i = 0;
@@ -105,30 +80,30 @@ fn _hapi_inspect_print_manifest(m): i64 {
             var l = vec_get(links, i);
             var src = hapi_link_source(l);
             var tgt = hapi_link_target(l);
-            _hi_puts("  ");
+            hapi_puts("  ");
             str_print(src);
             _hapi_inspect_pad(width - str_len(src));
-            _hi_puts("  -> ");
+            hapi_puts("  -> ");
             str_print(tgt);
-            _hi_puts("\n");
+            hapi_puts("\n");
             i = i + 1;
         }
     }
 
     var ignore = hapi_mf_ignore(m);
     var nignore = vec_len(ignore);
-    _hi_puts("\nignore (");
+    hapi_puts("\nignore (");
     fmt_int(nignore);
-    _hi_puts("):\n");
+    hapi_puts("):\n");
     if (nignore == 0) {
-        _hi_puts("  (none)\n");
+        hapi_puts("  (none)\n");
     } else {
         var i = 0;
         while (i < nignore) {
             var pat = vec_get(ignore, i);
-            _hi_puts("  ");
+            hapi_puts("  ");
             str_print(pat);
-            _hi_puts("\n");
+            hapi_puts("\n");
             i = i + 1;
         }
     }
@@ -139,19 +114,13 @@ fn _hapi_inspect_print_manifest(m): i64 {
 # (argv pointer). Returns the process exit code.
 fn cmd_inspect(path): i64 {
     if (path == 0) {
-        _hi_eputs("usage: hapi inspect <package-dir|hapi.cyml>\n");
+        hapi_eputs("usage: hapi inspect <package-dir|hapi.cyml>\n");
         return 2;
     }
     var mpath = _hapi_inspect_resolve(path);
     var res_t, res_v = hapi_mf_parse_file_r(mpath);
     if (is_err_result(res_t) == 1) {
-        var code = res_v;
-        var msg = hapi_mf_err_msg(code);
-        _hi_eputs("hapi: ");
-        eprint(msg, strlen(msg));
-        _hi_eputs(" (");
-        eprint(mpath, strlen(mpath));
-        _hi_eputs(")\n");
+        hapi_mf_report_err(res_v, mpath);
         return 1;
     }
     var m = res_v;

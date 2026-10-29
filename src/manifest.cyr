@@ -31,6 +31,7 @@ include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/syscalls.cyr"
 include "src/manifest_write.cyr"   # manifest_read: the checked whole-file read
+include "src/out.cyr"
 
 # Error variants surfaced as Err(...) by hapi_mf_parse_*. Names
 # prefixed `HapiMf` to keep them out of the lib/* enum namespace.
@@ -52,7 +53,9 @@ enum HapiMfError {
 # Strict-mode flag. When 1, the parser rejects unknown
 # sections and unknown keys (used by `hapi check --strict`).
 # Default 0 keeps the lenient behavior callers (inspect, link,
-# unlink, adopt, status) rely on for additive schema growth.
+# adopt, status, sync, fmt) rely on for additive schema growth.
+# unlink is trail-driven; it parses a manifest only to name the package
+# a path argument holds.
 var _hapi_mf_strict = 0;
 
 fn hapi_mf_set_strict(v): i64 { _hapi_mf_strict = v; return 0; }
@@ -348,11 +351,41 @@ fn _hapi_mf_parse_key(buf, pos, end, out_pos): Str {
     return k;
 }
 
+# A section header at data[pos]: `[name]`, or `[[name]]` when `dbl` is 1.
+# Returns the name. Stores where the name begins in `nstart_out`, which a
+# dropped section is reported at, and in `pos_out` where the next line
+# starts, after recording any text after the header. The two shapes had a
+# copy each (finding 163).
+fn _hapi_mf_section(data, pos, len, dbl, nstart_out, pos_out): i64 {
+    var p = pos + 1 + dbl;
+    var nstart = p;
+    while (p < len && load8(data + p) != 93) { p = p + 1; }
+    var section = str_new(data + nstart, p - nstart);
+    if (p < len && load8(data + p) == 93) { p = p + 1; }
+    if (dbl == 1 && p < len && load8(data + p) == 93) { p = p + 1; }
+    _hapi_mf_drop_rest(data, p, len, "text after a section header", 0, "");
+    store64(nstart_out, nstart);
+    store64(pos_out, _hapi_mf_skip_to_eol(data, p, len));
+    return section;
+}
+
+# A key `cur`'s section does not know: 1 in strict mode, where it is an
+# error; otherwise it is recorded as dropped, and 0.
+fn _hapi_mf_unknown_key(data, kstart, key, cur): i64 {
+    if (_hapi_mf_strict == 1) { return 1; }
+    if (cur == HAPI_MF_SECT_PACKAGE) {
+        _hapi_mf_drop(data, kstart, "unknown key `", key, "` in [package]");
+    } else {
+        _hapi_mf_drop(data, kstart, "unknown key `", key, "` in a [[link]] row");
+    }
+    return 0;
+}
+
 # Parse the TOML header of a hapi.cyml into a HapiManifest.
 # Returns Ok(manifest) on success, Err(HapiMf*) on validation
-# failure. Unknown sections and unknown keys are tolerated
-# silently — the schema is additive, and a stricter mode is
-# reserved for a future `hapi check --strict`.
+# failure. Unknown sections and unknown keys are tolerated — the
+# schema is additive — and recorded as drops when a caller tracks
+# them (`fmt`, `check --strict`); strict mode rejects them.
 fn hapi_mf_parse_header_r(data, len): Result {
     _hapi_mf_open_str = 0;
     _hapi_mf_drop_buf = 0;
@@ -375,55 +408,29 @@ fn hapi_mf_parse_header_r(data, len): Result {
         else {
             var c = load8(data + pos);
 
-            if (c == 91 && pos + 1 < len && load8(data + pos + 1) == 91) {
+            if (c == 91) {
+                var dbl = 0;
+                if (pos + 1 < len && load8(data + pos + 1) == 91) { dbl = 1; }
                 if (cur == HAPI_MF_SECT_LINK && cur_link != 0) {
                     vec_push(hapi_mf_links(m), cur_link);
                     cur_link = 0;
                 }
-                pos = pos + 2;
-                var nstart = pos;
-                var ng = 1;
-                while (pos < len && ng == 1) {
-                    if (load8(data + pos) == 93) { ng = 0; }
-                    else { pos = pos + 1; }
-                }
-                var section = str_new(data + nstart, pos - nstart);
-                if (pos < len && load8(data + pos) == 93) { pos = pos + 1; }
-                if (pos < len && load8(data + pos) == 93) { pos = pos + 1; }
-                _hapi_mf_drop_rest(data, pos, len, "text after a section header", 0, "");
-                pos = _hapi_mf_skip_to_eol(data, pos, len);
-
-                if (str_eq_cstr(section, "link") == 1) {
+                var nstart = 0;
+                var np = 0;
+                var section = _hapi_mf_section(data, pos, len, dbl, &nstart, &np);
+                pos = np;
+                if (dbl == 1 && str_eq_cstr(section, "link") == 1) {
                     cur = HAPI_MF_SECT_LINK;
                     cur_link = hapi_link_new(0, 0);
-                } else {
-                    if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownSection); }
-                    _hapi_mf_drop(data, nstart, "unknown section [[", section, "]] and its keys");
-                    cur = HAPI_MF_SECT_UNKNOWN;
-                }
-            }
-            elif (c == 91) {
-                if (cur == HAPI_MF_SECT_LINK && cur_link != 0) {
-                    vec_push(hapi_mf_links(m), cur_link);
-                    cur_link = 0;
-                }
-                pos = pos + 1;
-                var nstart = pos;
-                var ng = 1;
-                while (pos < len && ng == 1) {
-                    if (load8(data + pos) == 93) { ng = 0; }
-                    else { pos = pos + 1; }
-                }
-                var section = str_new(data + nstart, pos - nstart);
-                if (pos < len && load8(data + pos) == 93) { pos = pos + 1; }
-                _hapi_mf_drop_rest(data, pos, len, "text after a section header", 0, "");
-                pos = _hapi_mf_skip_to_eol(data, pos, len);
-
-                if (str_eq_cstr(section, "package") == 1) {
+                } elif (dbl == 0 && str_eq_cstr(section, "package") == 1) {
                     cur = HAPI_MF_SECT_PACKAGE;
                 } else {
                     if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownSection); }
-                    _hapi_mf_drop(data, nstart, "unknown section [", section, "] and its keys");
+                    if (dbl == 1) {
+                        _hapi_mf_drop(data, nstart, "unknown section [[", section, "]] and its keys");
+                    } else {
+                        _hapi_mf_drop(data, nstart, "unknown section [", section, "] and its keys");
+                    }
                     cur = HAPI_MF_SECT_UNKNOWN;
                 }
             }
@@ -452,9 +459,8 @@ fn hapi_mf_parse_header_r(data, len): Result {
                                     _hapi_mf_drop(data, kstart, "the earlier `", key, "`, set again here");
                                 }
                                 store64(m + slot, val);
-                            } else {
-                                if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
-                                _hapi_mf_drop(data, kstart, "unknown key `", key, "` in [package]");
+                            } elif (_hapi_mf_unknown_key(data, kstart, key, cur) == 1) {
+                                return Err(HapiMfUnknownKey);
                             }
                         } elif (cur == HAPI_MF_SECT_LINK && cur_link != 0) {
                             var lslot = 0 - 1;
@@ -465,9 +471,8 @@ fn hapi_mf_parse_header_r(data, len): Result {
                                     _hapi_mf_drop(data, kstart, "the earlier `", key, "`, set again here");
                                 }
                                 store64(cur_link + lslot, val);
-                            } else {
-                                if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
-                                _hapi_mf_drop(data, kstart, "unknown key `", key, "` in a [[link]] row");
+                            } elif (_hapi_mf_unknown_key(data, kstart, key, cur) == 1) {
+                                return Err(HapiMfUnknownKey);
                             }
                         } elif (cur == HAPI_MF_SECT_NONE) {
                             _hapi_mf_drop(data, kstart, "key `", key, "` before any section");
@@ -483,12 +488,10 @@ fn hapi_mf_parse_header_r(data, len): Result {
                                 _hapi_mf_drop(data, kstart, "the earlier `", key, "`, set again here");
                             }
                             store64(m + 32, arr);
-                        } elif (cur == HAPI_MF_SECT_PACKAGE) {
-                            if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
-                            _hapi_mf_drop(data, kstart, "unknown key `", key, "` in [package]");
-                        } elif (cur == HAPI_MF_SECT_LINK) {
-                            if (_hapi_mf_strict == 1) { return Err(HapiMfUnknownKey); }
-                            _hapi_mf_drop(data, kstart, "unknown key `", key, "` in a [[link]] row");
+                        } elif (cur == HAPI_MF_SECT_PACKAGE || cur == HAPI_MF_SECT_LINK) {
+                            if (_hapi_mf_unknown_key(data, kstart, key, cur) == 1) {
+                                return Err(HapiMfUnknownKey);
+                            }
                         } elif (cur == HAPI_MF_SECT_NONE) {
                             _hapi_mf_drop(data, kstart, "key `", key, "` before any section");
                         }
@@ -692,6 +695,16 @@ fn _hapi_mf_emit_kv(out, pos_ptr, cap, key, val_data, val_len): i64 {
     _hapi_mf_put8(out, pos_ptr, cap, 32);     # space
     _hapi_mf_put8(out, pos_ptr, cap, 61);     # =
     _hapi_mf_put8(out, pos_ptr, cap, 32);     # space
+    _hapi_mf_emit_quoted(out, pos_ptr, cap, val_data, val_len);
+    _hapi_mf_put8(out, pos_ptr, cap, 10);     # \n
+    return 0;
+}
+
+# `"<value>"`, with each `"` and `\` escaped by a `\`: how the canonical
+# form writes a value and each ignore pattern. These bytes are the sha1c:
+# preimage (ADR 0002), so the one rule must not change. The two had a
+# copy each (finding 163).
+fn _hapi_mf_emit_quoted(out, pos_ptr, cap, val_data, val_len): i64 {
     _hapi_mf_put8(out, pos_ptr, cap, 34);     # "
     var i = 0;
     while (i < val_len) {
@@ -703,7 +716,6 @@ fn _hapi_mf_emit_kv(out, pos_ptr, cap, key, val_data, val_len): i64 {
         i = i + 1;
     }
     _hapi_mf_put8(out, pos_ptr, cap, 34);     # "
-    _hapi_mf_put8(out, pos_ptr, cap, 10);     # \n
     return 0;
 }
 
@@ -782,20 +794,8 @@ fn hapi_mf_canonicalize(m, out, cap): i64 {
                 _hapi_mf_put8(out, &pos, cap, 44);      # ,
                 _hapi_mf_put8(out, &pos, cap, 32);      # space
             }
-            _hapi_mf_put8(out, &pos, cap, 34);          # "
             var s = vec_get(ig, i);
-            var sd = str_data(s);
-            var sl = str_len(s);
-            var k = 0;
-            while (k < sl) {
-                var c = load8(sd + k);
-                if (c == 34 || c == 92) {
-                    _hapi_mf_put8(out, &pos, cap, 92);
-                }
-                _hapi_mf_put8(out, &pos, cap, c);
-                k = k + 1;
-            }
-            _hapi_mf_put8(out, &pos, cap, 34);          # "
+            _hapi_mf_emit_quoted(out, &pos, cap, str_data(s), str_len(s));
             i = i + 1;
         }
         _hapi_mf_put8(out, &pos, cap, 93);              # ]
@@ -967,4 +967,16 @@ fn hapi_mf_err_msg(code): i64 {
     if (code == HapiMfChanged) { return "the manifest changed while it was read; rerun"; }
     if (code == HapiMfControlByte) { return "a value holds a control character (a NUL, a newline, an escape)"; }
     return "unknown manifest error";
+}
+
+# `hapi: <what is wrong> (<path>)` on stderr, for a manifest that did not
+# parse. link, adopt, status, inspect, check and fmt each printed it with
+# their own copy (finding 160).
+fn hapi_mf_report_err(code, path): i64 {
+    hapi_eputs("hapi: ");
+    hapi_eputs(hapi_mf_err_msg(code));
+    hapi_eputs(" (");
+    hapi_eputs(path);
+    hapi_eputs(")\n");
+    return 0;
 }

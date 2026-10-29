@@ -13,8 +13,8 @@
 # final line: the reader drops it, and the next append refuses to write
 # onto it (see _audit_append_durable).
 #
-# M3 (`unlink`, `rollback`) layers the *reader* on top of this
-# same file; nothing in this module needs to change for M3.
+# The reader is src/audit_reader.cyr; unlink, rollback, list, status,
+# sync and link read the trail through it.
 
 include "lib/io.cyr"
 include "lib/string.cyr"
@@ -25,6 +25,8 @@ include "lib/chrono.cyr"
 include "lib/result.cyr"
 include "src/manifest.cyr"
 include "src/dry_run.cyr"      # audit_preflight_now_r
+include "src/fs_link.cyr"      # fsl_mkdir_parents
+include "src/out.cyr"
 
 enum HapiAuditError {
     HapiAuditMkdirFailed;
@@ -104,59 +106,30 @@ fn audit_trail_path_shown(): i64 {
     return p;
 }
 
-# Recursively mkdir the parent of `file_path`. Treats EEXIST
-# (errno 17) as success. Returns 0 on success, negative on
-# failure of any single mkdir.
-fn _audit_mkdir_parents(file_path): i64 {
-    var n = strlen(file_path);
-    # Walk forward, mkdir at each `/` we hit (except position 0).
-    # Stop before the final component (the file itself).
-    var last_slash = 0 - 1;
-    var i = 0;
-    while (i < n) {
-        if (load8(file_path + i) == 47) { last_slash = i; }
-        i = i + 1;
-    }
-    if (last_slash <= 0) { return 0; }
-
-    # Walk every intermediate '/' from left to right, mkdir each
-    # accumulated prefix. We pass a temporary buffer where the
-    # slash gets temporarily replaced by '\0' so the mkdir sees
-    # only the prefix.
-    var tmp = alloc(n + 1);
-    memcpy(tmp, file_path, n);
-    store8(tmp + n, 0);
-
-    var j = 1;
-    while (j <= last_slash) {
-        if (load8(tmp + j) == 47) {
-            store8(tmp + j, 0);
-            var rc = hapi_mkdir(tmp, 0x1C0);   # 0700
-            if (rc < 0) {
-                # EEXIST = 17. Anything else is fatal.
-                var err = 0 - rc;
-                if (err != 17) { return rc; }
-            }
-            store8(tmp + j, 47);
-        }
-        j = j + 1;
-    }
-    # Final mkdir for the parent itself (everything up to last_slash).
-    store8(tmp + last_slash, 0);
-    var rc = hapi_mkdir(tmp, 0x1C0);
-    if (rc < 0) {
-        var err = 0 - rc;
-        if (err != 17) { return rc; }
-    }
-    return 0;
-}
-
 # Ensure the trail's parent directory exists. Returns 0 on
 # success, Err(...) shape encoded as a negative value otherwise.
 fn audit_ensure_dir(): i64 {
     var path = audit_trail_path();
     if (path == 0) { return 0 - 1; }
-    return _audit_mkdir_parents(path);
+    # Private (0700) whatever the umask: the trail records every path the
+    # user links (F-029). The trail had its own copy of this walk, which
+    # made the parent twice (finding 159).
+    return fsl_mkdir_parents(path);
+}
+
+# The lowercase hex of bytes[0..n) into `out`: 2n bytes, no NUL. A `\u00XX`
+# escape and the manifest hash each had a copy (finding 163).
+fn _audit_hex(out, bytes, n): i64 {
+    var i = 0;
+    while (i < n) {
+        var b = load8(bytes + i);
+        var hi = b / 16;
+        var lo = b - hi * 16;
+        if (hi < 10) { store8(out + i * 2, 48 + hi); } else { store8(out + i * 2, 87 + hi); }
+        if (lo < 10) { store8(out + i * 2 + 1, 48 + lo); } else { store8(out + i * 2 + 1, 87 + lo); }
+        i = i + 1;
+    }
+    return n * 2;
 }
 
 # JSON-escape a single byte into `out`, returning bytes written.
@@ -173,10 +146,9 @@ fn _audit_json_escape_byte(c, out): i64 {
         store8(out + 1, 117);
         store8(out + 2, 48);
         store8(out + 3, 48);
-        var hi = c / 16;
-        var lo = c - hi * 16;
-        if (hi < 10) { store8(out + 4, 48 + hi); } else { store8(out + 4, 87 + hi); }
-        if (lo < 10) { store8(out + 5, 48 + lo); } else { store8(out + 5, 87 + lo); }
+        var one[8];
+        store8(&one, c);
+        _audit_hex(out + 4, &one, 1);
         return 6;
     }
     store8(out, c);
@@ -258,15 +230,15 @@ fn _audit_emit_comma(out, pos_ptr, cap): i64 {
     return _audit_put8(out, pos_ptr, cap, 44);
 }
 
-# Upper bound on the composed length of a link-shape entry. Every value
-# is counted at 6x for worst-case `\u00XX` control-byte escaping, plus
-# the fixed key/punctuation overhead and the ISO-8601 `ts`. A sizing
-# hint, not the safety mechanism — the bounded writers are that.
 fn _audit_vlen(v): i64 {
     if (v == 0) { return 0; }
     return strlen(v);
 }
 
+# Upper bound on the composed length of a link-shape entry. Every value
+# is counted at 6x for worst-case `\u00XX` control-byte escaping, plus
+# the fixed key/punctuation overhead and the ISO-8601 `ts`. A sizing
+# hint, not the safety mechanism — the bounded writers are that.
 fn audit_entry_size(pkg, pkg_version, manifest_hash,
   source, target, abs_source, abs_target,
   backup_path): i64 {
@@ -428,8 +400,6 @@ fn audit_label_ok(label): i64 {
     return 1;
 }
 
-# Append a formatted entry to the audit trail. Shared core
-# used by the link / unlink / rollback-marker callers.
 # Durable append. `lib/io.cyr`'s `file_append_locked` does
 # open/lock/write/unlock/close with no fsync and no close-return check,
 # and lib/ is a pinned snapshot we do not edit — so hapi appends the
@@ -579,6 +549,25 @@ fn audit_preflight_now_r(): Result {
     return audit_preflight_r();
 }
 
+# Every hapi write must be auditable (CLAUDE.md). Prove the trail is
+# writable BEFORE touching the filesystem, so the common failures — a
+# full state partition, a permissions change — refuse cleanly instead of
+# leaving a symlink on disk that no recovery verb can see (F-018). `what`
+# names the refused step. Returns 0, or 1 refused. link, unlink, adopt
+# and rollback each had a copy of this refusal (finding 160).
+fn audit_preflight_or_refuse(what): i64 {
+    var pf_t, pf_v = audit_preflight_now_r();
+    if (is_err_result(pf_t) == 1) {
+        hapi_eputs("hapi: audit trail is not writable; refusing to ");
+        hapi_eputs(what);
+        hapi_eputs("\n  ");
+        hapi_eputs(audit_trail_path_shown());
+        hapi_eputs("\n  every hapi write must be auditable; nothing was changed\n");
+        return 1;
+    }
+    return 0;
+}
+
 # Test hook: when 1, every append is refused as a failed write, while the
 # pre-flight still passes — the window F-061 is about, which a test cannot
 # open any other way without raw syscalls (an RLIMIT_FSIZE between the
@@ -609,6 +598,8 @@ fn audit_report_unwritten(abs_tgt, undone, left): i64 {
     return 0;
 }
 
+# Append a formatted entry to the audit trail: the shared core every
+# `audit_append_*_r` writer goes through.
 fn _audit_append_bytes(buf, n): Result {
     if (_audit_fail_appends == 1) { return Err(HapiAuditWriteFailed); }
     # A composer that overflowed its buffer returns -1. Refuse the
@@ -652,6 +643,21 @@ fn audit_append_link_full_r(pkg, pkg_version, manifest_hash,
       source, target, abs_source, abs_target,
       backup_path, created_dir, shape);
     return _audit_append_bytes(buf, n);
+}
+
+# Record the link just made at `abs_tgt`, with text `rel` and made
+# directories `made`, in an op:link; when the trail refuses the entry, take
+# the link back, and the directories that very call made (1.4.0): those,
+# hapi can prove. 0 recorded; -2 refused and taken back; -3 refused and
+# the link could not be removed (F-018, F-061). link and rollback's
+# unlink reversal each had a copy (finding 162).
+fn audit_record_link_or_take_back(pkg, ver, hash, src, tgt, abs_src, abs_tgt, backup, made, rel): i64 {
+    var ar_t, ar_v = audit_append_link_full_r(pkg, ver, hash, src, tgt, abs_src, abs_tgt,
+      backup, made, fsl_shape_of(rel));
+    if (is_err_result(ar_t) == 0) { return 0; }
+    if (hapi_unlink(abs_tgt) < 0) { return 0 - 3; }
+    if (made != 0) { fsl_rmdir_created(abs_tgt, made, 0); }
+    return 0 - 2;
 }
 
 fn audit_append_unlink_r(pkg, pkg_version, manifest_hash,
@@ -760,17 +766,7 @@ fn audit_manifest_hash_of(m): i64 {
     var out = alloc(47);
     var prefix = "sha1c:";
     memcpy(out, prefix, 6);
-    var i = 0;
-    while (i < 20) {
-        var b = load8(&digest + i);
-        var hi = b / 16;
-        var lo = b - hi * 16;
-        if (hi < 10) { store8(out + 6 + i * 2, 48 + hi); }
-        else { store8(out + 6 + i * 2, 87 + hi); }
-        if (lo < 10) { store8(out + 6 + i * 2 + 1, 48 + lo); }
-        else { store8(out + 6 + i * 2 + 1, 87 + lo); }
-        i = i + 1;
-    }
+    _audit_hex(out + 6, &digest, 20);
     store8(out + 46, 0);
     return out;
 }

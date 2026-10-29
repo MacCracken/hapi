@@ -10,8 +10,8 @@
 # last-write-wins reduction `unlink` uses, generalized to
 # include adopt/unadopt.
 #
-# Scope is `$HOME` at v0.5.x — capability-bounded `--root`
-# support lands in M6. The line is informational either way.
+# Scope is `$HOME`, or `--root`'s. Since 1.7.1 the counts cover only
+# links inside it (F-106).
 #
 # Exit codes:
 #   0  trail walked (empty trail is not an error)
@@ -20,12 +20,8 @@
 include "lib/hashmap.cyr"
 include "src/audit.cyr"
 include "src/audit_reader.cyr"
-include "src/cmd/link.cyr"   # _hlnk_scope_root_override
-
-fn _hls_puts(s): i64 { print(s, strlen(s)); return 0; }
-fn _hls_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
-
-fn _hls_cstr_eq(a, b): i64 { return hapi_cstr_eq(a, b); }
+include "src/cmd/link.cyr"   # link_scope_root, link_scope_override
+include "src/out.cyr"
 
 # Build the per-target CURRENT-OWNER map for the whole trail, in
 # one pass. A target is owned by at most one package at a time:
@@ -54,11 +50,11 @@ fn _hls_owner_map(trail): i64 {
             var tgt = hae_abs_target(e);
             if (tgt != 0) {
                 var is_create = 0;
-                if (_hls_cstr_eq(op, "link") == 1)  { is_create = 1; }
-                elif (_hls_cstr_eq(op, "adopt") == 1) { is_create = 1; }
+                if (hapi_cstr_eq(op, "link") == 1)  { is_create = 1; }
+                elif (hapi_cstr_eq(op, "adopt") == 1) { is_create = 1; }
                 var is_remove = 0;
-                if (_hls_cstr_eq(op, "unlink") == 1)   { is_remove = 1; }
-                elif (_hls_cstr_eq(op, "unadopt") == 1) { is_remove = 1; }
+                if (hapi_cstr_eq(op, "unlink") == 1)   { is_remove = 1; }
+                elif (hapi_cstr_eq(op, "unadopt") == 1) { is_remove = 1; }
 
                 if (is_create == 1 || is_remove == 1) {
                     var found = 0 - 1;
@@ -73,7 +69,7 @@ fn _hls_owner_map(trail): i64 {
                         }
                     } else {
                         if (found >= 0) {
-                            if (_hls_cstr_eq(vec_get(owner, found), ep) == 1) {
+                            if (hapi_cstr_eq(vec_get(owner, found), ep) == 1) {
                                 vec_set(owner, found, 0);
                             }
                         }
@@ -102,7 +98,7 @@ fn _hls_count_owned_in(om, pkg_cstr, scope): i64 {
     var count = 0;
     var i = 0;
     while (i < vec_len(owner)) {
-        if (_hls_cstr_eq(vec_get(owner, i), pkg_cstr) == 1) {
+        if (hapi_cstr_eq(vec_get(owner, i), pkg_cstr) == 1) {
             if (scope == 0 || _fsl_within(vec_get(targets, i), scope) == 1) { count = count + 1; }
         }
         i = i + 1;
@@ -129,7 +125,7 @@ fn _hls_unique_pkgs(trail): i64 {
             var dup = 0;
             var j = 0;
             while (j < vec_len(seen) && dup == 0) {
-                if (_hls_cstr_eq(vec_get(seen, j), p) == 1) { dup = 1; }
+                if (hapi_cstr_eq(vec_get(seen, j), p) == 1) { dup = 1; }
                 j = j + 1;
             }
             if (dup == 0) { vec_push(seen, p); }
@@ -140,66 +136,42 @@ fn _hls_unique_pkgs(trail): i64 {
 }
 
 fn cmd_list(): i64 {
-    var scope_root = _hlnk_scope_root_override;
-    if (scope_root == 0) { scope_root = getenv("HOME"); }
-    if (scope_root == 0 || strlen(scope_root) == 0) {
-        _hls_eputs("hapi: $HOME is unset; cannot resolve scope\n");
-        return 1;
-    }
-    # A relative scope root put every target under the cwd (F-109): from
-    # another directory, link made `./home` and wrote there. Only an
-    # absolute HOME, or a --root already made absolute, is a scope root.
-    if (load8(scope_root) != 47) {
-        _hls_eputs("hapi: the scope root is not an absolute path: ");
-        _hls_eputs(scope_root);
-        _hls_eputs("\n");
-        return 1;
-    }
+    var scope_root = link_scope_root("cannot resolve scope");
+    if (scope_root == 0) { return 1; }
 
     # A trail that exists but will not read, or that has a malformed
     # interior line, is a conflict with the user's own history — surface
     # it rather than acting on a partial view. An ABSENT trail is still
     # Ok(empty): that is the first-run case, not a failure.
-    var tr_t, tr_v = audit_read_default_r();
-    if (is_err_result(tr_t) == 1) {
-        var trc = tr_v;
-        _hls_eputs("hapi: ");
-        _hls_eputs(hapi_ar_err_msg(trc));
-        if (trc == HapiArCorrupt) {
-            _hls_eputs(" (line ");
-            _hls_eputs(_har_itoa(audit_corrupt_line()));
-            _hls_eputs(")");
-        }
-        _hls_eputs("\n  refusing to act on a partial view of the trail\n");
-        return 1;
-    }
+    var tr_t, tr_v = audit_read_or_refuse("act");
+    if (is_err_result(tr_t) == 1) { return 1; }
     var trail = tr_v;
     var pkgs = _hls_unique_pkgs(trail);
     var npkg = vec_len(pkgs);
 
-    _hls_puts("scope: ");
-    _hls_puts(scope_root);
-    _hls_puts("\n");
+    hapi_puts("scope: ");
+    hapi_puts(scope_root);
+    hapi_puts("\n");
 
     if (npkg == 0) {
-        _hls_puts("(no packages in audit trail)\n");
+        hapi_puts("(no packages in audit trail)\n");
         return 0;
     }
 
     var om = _hls_owner_map(trail);
     var only = 0;
-    if (_hlnk_scope_root_override != 0) { only = fsl_to_absolute(_hlnk_scope_root_override); }
+    if (link_scope_override() != 0) { only = fsl_to_absolute(link_scope_override()); }
     var i = 0;
     while (i < npkg) {
         var p = vec_get(pkgs, i);
         var live = _hls_count_owned_in(om, p, only);
-        _hls_puts("  ");
-        _hls_puts(p);
-        _hls_puts("  ");
+        hapi_puts("  ");
+        hapi_puts(p);
+        hapi_puts("  ");
         fmt_int(live);
-        _hls_puts(" live link");
-        if (live != 1) { _hls_puts("s"); }
-        _hls_puts("\n");
+        hapi_puts(" live link");
+        if (live != 1) { hapi_puts("s"); }
+        hapi_puts("\n");
         i = i + 1;
     }
     return 0;

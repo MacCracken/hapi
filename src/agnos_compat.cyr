@@ -15,6 +15,7 @@
 include "lib/syscalls.cyr"
 include "lib/string.cyr"
 include "lib/io.cyr"
+include "src/out.cyr"
 
 # unlink(path). Linux: unlink(path). agnos: unlink(path, pathlen) — the
 # path length is an explicit argument (no NUL-scan in the kernel).
@@ -34,15 +35,6 @@ fn hapi_rename(old, new): i64 {
     #else
     return sys_rename(old, new);
     #endif
-}
-
-# 1 when the cstrings `a` and `b` are equal; 0 when either is 0. The one
-# copy of what seven modules each had their own of (1.7.1 refactor).
-fn hapi_cstr_eq(a, b): i64 {
-    if (a == 0 || b == 0) { return 0; }
-    var n = strlen(a);
-    if (strlen(b) != n) { return 0; }
-    return memeq(a, b, n);
 }
 
 # rename(old -> new) that never replaces an existing `new` (F-071). A
@@ -96,18 +88,6 @@ fn hapi_ignore_signal(sig): i64 {
     nr = 134;
     #endif
     return syscall(nr, sig, &act, 0, 8);
-    #endif
-}
-
-# fsync(fd). agnos has no per-fd fsync; SYS_SYNC (#12) flushes globally,
-# which still guarantees the just-written manifest/audit bytes reach disk
-# before the subsequent rename durability point. Linux keeps precise
-# per-fd fsync.
-fn hapi_fsync(fd): i64 {
-    #ifdef CYRIUS_TARGET_AGNOS
-    return sys_sync();
-    #else
-    return sys_fsync(fd);
     #endif
 }
 

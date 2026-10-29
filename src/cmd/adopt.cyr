@@ -19,12 +19,10 @@ include "src/manifest.cyr"
 include "src/manifest_write.cyr"
 include "src/audit.cyr"
 include "src/fs_link.cyr"
-include "src/cmd/link.cyr"   # link_set_scope_root + _hlnk_scope_root_override
+include "src/cmd/link.cyr"   # link_scope_root
 include "src/dry_run.cyr"
 include "src/backup.cyr"
-
-fn _hap_puts(s): i64 { print(s, strlen(s)); return 0; }
-fn _hap_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+include "src/out.cyr"
 
 # Resolve the package-dir argument to an absolute manifest path.
 # Mirrors the inspect / link resolvers.
@@ -37,75 +35,32 @@ fn _hap_resolve_target(arg, scope_root_abs): i64 {
     return _fsl_path_join(scope_root_abs, arg);
 }
 
-# 1 when `path` has a `..` component.
-fn _hap_has_dotdot(path): i64 {
-    var n = strlen(path);
-    var i = 0;
-    while (i + 1 < n) {
-        if (load8(path + i) == 46 && load8(path + i + 1) == 46) {
-            var at_start = 0;
-            if (i == 0) { at_start = 1; }
-            elif (load8(path + i - 1) == 47) { at_start = 1; }
-            var at_end = 0;
-            if (i + 2 == n) { at_end = 1; }
-            elif (load8(path + i + 2) == 47) { at_end = 1; }
-            if (at_start == 1 && at_end == 1) { return 1; }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
 # Derive the in-package source name from a target path's
 # basename, stripping one leading `.`. Returns a heap cstring.
 fn _hap_derive_source(target_abs): i64 {
-    var n = strlen(target_abs);
-    var last_slash = 0 - 1;
-    var i = 0;
-    while (i < n) {
-        if (load8(target_abs + i) == 47) { last_slash = i; }
-        i = i + 1;
-    }
-    var name_start = last_slash + 1;
-    var name_len = n - name_start;
-    var skip = 0;
-    if (name_len > 1 && load8(target_abs + name_start) == 46) { skip = 1; }
-    var out = alloc(name_len - skip + 1);
-    memcpy(out, target_abs + name_start + skip, name_len - skip);
-    store8(out + name_len - skip, 0);
-    return out;
+    var b = _fsl_path_basename(target_abs);
+    if (strlen(b) > 1 && load8(b) == 46) { return b + 1; }
+    return b;
 }
 
 # Check whether the parsed manifest already has a row whose
 # target matches `target_cstr`. Used to refuse on duplicate.
-fn _hap_manifest_has_target(m, target_cstr): i64 {
-    var links = hapi_mf_links(m);
-    var n = vec_len(links);
-    var tlen = strlen(target_cstr);
-    var i = 0;
-    while (i < n) {
-        var l = vec_get(links, i);
-        var t = hapi_link_target(l);
-        if (str_len(t) == tlen) {
-            if (memeq(str_data(t), target_cstr, tlen) == 1) { return 1; }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
+fn _hap_manifest_has_target(m, target_cstr): i64 { return _hap_manifest_has(m, target_cstr, 1); }
+fn _hap_manifest_has_source(m, source_cstr): i64 { return _hap_manifest_has(m, source_cstr, 0); }
 
-# Same as above but for source — refuse if the in-package
-# source name already appears in the manifest.
-fn _hap_manifest_has_source(m, source_cstr): i64 {
+# 1 when a row of `m` has `value` as its target (`target` = 1) or its
+# source (0).
+fn _hap_manifest_has(m, value, target): i64 {
     var links = hapi_mf_links(m);
     var n = vec_len(links);
-    var slen = strlen(source_cstr);
+    var vlen = strlen(value);
     var i = 0;
     while (i < n) {
         var l = vec_get(links, i);
-        var s = hapi_link_source(l);
-        if (str_len(s) == slen) {
-            if (memeq(str_data(s), source_cstr, slen) == 1) { return 1; }
+        var f = hapi_link_source(l);
+        if (target == 1) { f = hapi_link_target(l); }
+        if (str_len(f) == vlen) {
+            if (memeq(str_data(f), value, vlen) == 1) { return 1; }
         }
         i = i + 1;
     }
@@ -117,12 +72,12 @@ fn _hap_manifest_has_source(m, source_cstr): i64 {
 # was ignored, and the message said `restored` regardless.
 fn _hap_say_restored(abs_source, abs_target): i64 {
     if (hapi_rename_noreplace(abs_source, abs_target) == 0) {
-        _hap_eputs(" (file restored)\n");
+        hapi_eputs(" (file restored)\n");
         return 0;
     }
-    _hap_eputs("\n  the file could NOT be moved back; it is in the package at\n  ");
-    _hap_eputs(abs_source);
-    _hap_eputs("\n");
+    hapi_eputs("\n  the file could NOT be moved back; it is in the package at\n  ");
+    hapi_eputs(abs_source);
+    hapi_eputs("\n");
     return 0 - 1;
 }
 
@@ -136,8 +91,8 @@ fn _hap_row_read_back(path, old_rows, source, target): i64 {
     var i = 0;
     while (i < vec_len(links)) {
         var l = vec_get(links, i);
-        if (_hlnk_cstr_eq(_fsl_str_to_cstr(hapi_link_source(l)), source) == 1
-            && _hlnk_cstr_eq(_fsl_str_to_cstr(hapi_link_target(l)), target) == 1) { return 1; }
+        if (hapi_cstr_eq(_fsl_str_to_cstr(hapi_link_source(l)), source) == 1
+            && hapi_cstr_eq(_fsl_str_to_cstr(hapi_link_target(l)), target) == 1) { return 1; }
         i = i + 1;
     }
     return 0;
@@ -145,31 +100,18 @@ fn _hap_row_read_back(path, old_rows, source, target): i64 {
 
 fn cmd_adopt(file_arg, pkg_arg): i64 {
     if (file_arg == 0 || pkg_arg == 0) {
-        _hap_eputs("usage: hapi adopt <file> <package-dir>\n");
+        hapi_eputs("usage: hapi adopt <file> <package-dir>\n");
         return 2;
     }
 
-    var scope_root = _hlnk_scope_root_override;
-    if (scope_root == 0) { scope_root = getenv("HOME"); }
-    if (scope_root == 0 || strlen(scope_root) == 0) {
-        _hap_eputs("hapi: $HOME is unset; cannot resolve scope root\n");
-        return 1;
-    }
-    # A relative scope root put every target under the cwd (F-109): from
-    # another directory, link made `./home` and wrote there. Only an
-    # absolute HOME, or a --root already made absolute, is a scope root.
-    if (load8(scope_root) != 47) {
-        _hap_eputs("hapi: the scope root is not an absolute path: ");
-        _hap_eputs(scope_root);
-        _hap_eputs("\n");
-        return 1;
-    }
+    var scope_root = link_scope_root("cannot resolve scope root");
+    if (scope_root == 0) { return 1; }
     # Normalized once, here: the target slice below measures it, so it
     # must be spelled exactly as abs_target's prefix is.
     var scope_root_abs = fsl_to_absolute(scope_root);
     if (scope_root_abs == 0) {
-        _hap_eputs("hapi: cannot resolve a relative scope root — the working\n");
-        _hap_eputs("  directory is not knowable on this target\n");
+        hapi_eputs("hapi: cannot resolve a relative scope root — the working\n");
+        hapi_eputs("  directory is not knowable on this target\n");
         return 1;
     }
     scope_root_abs = fsl_lexical_normalize(scope_root_abs);
@@ -180,10 +122,10 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     # named a file outside $HOME, and the row recorded `a/../c.conf`, which
     # the manifest parser itself rejects. The manifest cannot say `..`, so
     # adopt cannot either.
-    if (_hap_has_dotdot(file_arg) == 1) {
-        _hap_eputs("hapi: refusing a `..` component in the file to adopt: ");
-        _hap_eputs(file_arg);
-        _hap_eputs("\n  (spell the path without `..` — a [[link]] target cannot hold one)\n");
+    if (_hapi_mf_has_dotdot(str_from(file_arg)) == 1) {
+        hapi_eputs("hapi: refusing a `..` component in the file to adopt: ");
+        hapi_eputs(file_arg);
+        hapi_eputs("\n  (spell the path without `..` — a [[link]] target cannot hold one)\n");
         return 1;
     }
     # With no `..` left, normalizing only drops `.` and `//` — no-ops to
@@ -197,13 +139,13 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     # root's length regardless: shorter than the root it read before the
     # buffer and crashed (SIGSEGV, exit 139), longer it recorded a
     # garbled target in the manifest and the trail.
-    if (_cap_path_within(abs_target, scope_root_abs) == 0) {
-        _hap_eputs("hapi: refusing to adopt a file outside the scope root: ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n  (scope: ");
-        _hap_eputs(scope_root_abs);
-        _hap_eputs(")\n  a [[link]] target is relative to the scope root, so a file\n");
-        _hap_eputs("  outside it has no row to record — pass --root to adopt there\n");
+    if (_fsl_within(abs_target, scope_root_abs) == 0) {
+        hapi_eputs("hapi: refusing to adopt a file outside the scope root: ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n  (scope: ");
+        hapi_eputs(scope_root_abs);
+        hapi_eputs(")\n  a [[link]] target is relative to the scope root, so a file\n");
+        hapi_eputs("  outside it has no row to record — pass --root to adopt there\n");
         return 1;
     }
 
@@ -214,11 +156,11 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     # cap-approved override by this point); without it an absolute or
     # `..` path used to escape $HOME entirely at exit 0.
     if (cap_target_allowed(_fsl_path_dirname(abs_target), scope_root_abs) == 0) {
-        _hap_eputs("hapi: refusing to adopt outside the scoped root: ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n  (scope: ");
-        _hap_eputs(scope_root_abs);
-        _hap_eputs(")\n  (pass --root <path> to open a different scope)\n");
+        hapi_eputs("hapi: refusing to adopt outside the scoped root: ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n  (scope: ");
+        hapi_eputs(scope_root_abs);
+        hapi_eputs(")\n  (pass --root <path> to open a different scope)\n");
         return 1;
     }
 
@@ -229,9 +171,7 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     # requires to be absolute, and the symlink body would resolve
     # against the wrong directory (F-027).
     if (manifest_path == 0) {
-        _hap_eputs("hapi: cannot resolve a relative package path — the working\n");
-        _hap_eputs("  directory is not knowable on this target. Pass an absolute\n");
-        _hap_eputs("  path, or set PWD.\n");
+        hapi_refuse_unknown_cwd();
         return 1;
     }
     var pkg_dir_abs = _fsl_path_dirname(manifest_path);
@@ -240,30 +180,30 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     var probe = link_probe(abs_target);
     var kind = link_probe_kind(probe);
     if (kind == HAPI_LP_SYMLINK) {
-        _hap_eputs("hapi: target is already a symlink: ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n  (use `hapi unlink <pkg>` first if hapi created it)\n");
+        hapi_eputs("hapi: target is already a symlink: ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n  (use `hapi unlink <pkg>` first if hapi created it)\n");
         return 1;
     }
     if (kind == HAPI_LP_DIRECTORY) {
-        _hap_eputs("hapi: target is a directory (adopt is file-scoped at v0.5.0): ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n");
+        hapi_eputs("hapi: target is a directory (adopt is file-scoped): ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n");
         return 1;
     }
     if (kind == HAPI_LP_ABSENT) {
-        _hap_eputs("hapi: target does not exist: ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n");
+        hapi_eputs("hapi: target does not exist: ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n");
         return 1;
     }
     # link_probe's FILE is anything that is not a directory; adopt moves
     # only a regular file (F-091). Through 1.7.0 it moved a FIFO or a
     # socket into the package despite this very message.
     if (kind != HAPI_LP_FILE || fsl_is_regular(abs_target) == 0) {
-        _hap_eputs("hapi: target is not a regular file: ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n");
+        hapi_eputs("hapi: target is not a regular file: ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n");
         return 1;
     }
 
@@ -273,14 +213,14 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     # a dangling symlink where it had been — inside the package itself.
     if (fsl_lands_in(abs_target, pkg_dir_abs) == 1) {
         var phys = fsl_physical_target(abs_target);
-        _hap_eputs("hapi: file is already inside the package: ");
-        _hap_eputs(abs_target);
+        hapi_eputs("hapi: file is already inside the package: ");
+        hapi_eputs(abs_target);
         if (phys != 0) {
-            _hap_eputs("\n  (it resolves to ");
-            _hap_eputs(phys);
-            _hap_eputs(")");
+            hapi_eputs("\n  (it resolves to ");
+            hapi_eputs(phys);
+            hapi_eputs(")");
         }
-        _hap_eputs("\n");
+        hapi_eputs("\n");
         return 1;
     }
 
@@ -290,11 +230,11 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     if (trail_now != 0) {
         var tphys = fsl_physical_target(trail_now);
         var aph = fsl_physical_target(abs_target);
-        if (_hlnk_cstr_eq(fsl_lexical_normalize(trail_now), fsl_lexical_normalize(abs_target)) == 1
-            || (tphys != 0 && aph != 0 && _hlnk_cstr_eq(tphys, aph) == 1)) {
-            _hap_eputs("hapi: the audit trail is hapi's own record, not a file to adopt: ");
-            _hap_eputs(abs_target);
-            _hap_eputs("\n");
+        if (hapi_cstr_eq(fsl_lexical_normalize(trail_now), fsl_lexical_normalize(abs_target)) == 1
+            || (tphys != 0 && aph != 0 && hapi_cstr_eq(tphys, aph) == 1)) {
+            hapi_eputs("hapi: the audit trail is hapi's own record, not a file to adopt: ");
+            hapi_eputs(abs_target);
+            hapi_eputs("\n");
             return 1;
         }
     }
@@ -304,20 +244,20 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     # into this one and planted a link inside the other package's tree.
     var others = hlnk_package_sources();
     if (others == 0) {
-        _hap_eputs("hapi: the audit trail could not be read, so hapi cannot tell\n");
-        _hap_eputs("  whether the file is another package's; nothing was changed\n");
+        hapi_eputs("hapi: the audit trail could not be read, so hapi cannot tell\n");
+        hapi_eputs("  whether the file is another package's; nothing was changed\n");
         return 1;
     }
     var aphys = fsl_physical_target(abs_target);
     var owner = hlnk_owner_at(others, aphys);
     if (owner != 0) {
-        _hap_eputs("hapi: file is package `");
-        _hap_eputs(owner);
-        _hap_eputs("`'s source: ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n  (it resolves to ");
-        _hap_eputs(aphys);
-        _hap_eputs("); change it through that package\n");
+        hapi_eputs("hapi: file is package `");
+        hapi_eputs(owner);
+        hapi_eputs("`'s source: ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n  (it resolves to ");
+        hapi_eputs(aphys);
+        hapi_eputs("); change it through that package\n");
         return 1;
     }
 
@@ -332,20 +272,16 @@ fn cmd_adopt(file_arg, pkg_arg): i64 {
     # — is reported as such, before the lock, which needs its directory.
     var pre_t, pre_v = hapi_mf_parse_file_r(manifest_path);
     if (is_err_result(pre_t) == 1) {
-        _hap_eputs("hapi: ");
-        _hap_eputs(hapi_mf_err_msg(pre_v));
-        _hap_eputs(" (");
-        _hap_eputs(manifest_path);
-        _hap_eputs(")\n");
+        hapi_mf_report_err(pre_v, manifest_path);
         return 1;
     }
     var lk = 0 - 1;
     if (hapi_dry_run() == 0) {
         lk = manifest_lock(manifest_path);
         if (lk < 0) {
-            _hap_eputs("hapi: could not lock the package directory of ");
-            _hap_eputs(manifest_path);
-            _hap_eputs("\n");
+            hapi_eputs("hapi: could not lock the package directory of ");
+            hapi_eputs(manifest_path);
+            hapi_eputs("\n");
             return 1;
         }
     }
@@ -359,13 +295,7 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     # Parse the manifest (must exist).
     var mr_t, mr_v = hapi_mf_parse_file_r(manifest_path);
     if (is_err_result(mr_t) == 1) {
-        var code = mr_v;
-        var msg = hapi_mf_err_msg(code);
-        _hap_eputs("hapi: ");
-        _hap_eputs(msg);
-        _hap_eputs(" (");
-        _hap_eputs(manifest_path);
-        _hap_eputs(")\n");
+        hapi_mf_report_err(mr_v, manifest_path);
         return 1;
     }
     var m = mr_v;
@@ -376,10 +306,10 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     var source_cstr = _hap_derive_source(abs_target);
     # `...` derives `..`, and `.` alone `.`: neither is a name in the
     # package (F-110). Through 1.7.0 `..` was refused only by accident.
-    if (_hlnk_cstr_eq(source_cstr, ".") == 1 || _hlnk_cstr_eq(source_cstr, "..") == 1) {
-        _hap_eputs("hapi: the file's name leaves no name for it in the package: ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n");
+    if (hapi_cstr_eq(source_cstr, ".") == 1 || hapi_cstr_eq(source_cstr, "..") == 1) {
+        hapi_eputs("hapi: the file's name leaves no name for it in the package: ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n");
         return 1;
     }
     var srl = strlen(scope_root_abs);
@@ -391,9 +321,9 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     # `--root ~/somefile`, adopt wrote `target = ""`, a row no verb could
     # parse, at exit 0.
     if (rel_target_len <= 0) {
-        _hap_eputs("hapi: the file is the scope root itself, which no [[link]] row can name: ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n");
+        hapi_eputs("hapi: the file is the scope root itself, which no [[link]] row can name: ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n");
         return 1;
     }
     var target_cstr = alloc(rel_target_len + 1);
@@ -402,15 +332,15 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
 
     # Refuse on duplicate source / target in the manifest.
     if (_hap_manifest_has_target(m, target_cstr) == 1) {
-        _hap_eputs("hapi: manifest already has a [[link]] row with target = \"");
-        _hap_eputs(target_cstr);
-        _hap_eputs("\"\n");
+        hapi_eputs("hapi: manifest already has a [[link]] row with target = \"");
+        hapi_eputs(target_cstr);
+        hapi_eputs("\"\n");
         return 1;
     }
     if (_hap_manifest_has_source(m, source_cstr) == 1) {
-        _hap_eputs("hapi: manifest already has a [[link]] row with source = \"");
-        _hap_eputs(source_cstr);
-        _hap_eputs("\"\n");
+        hapi_eputs("hapi: manifest already has a [[link]] row with source = \"");
+        hapi_eputs(source_cstr);
+        hapi_eputs("\"\n");
         return 1;
     }
 
@@ -419,9 +349,9 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     var abs_source = _fsl_path_join(pkg_dir_abs, source_cstr);
     var src_probe = link_probe(abs_source);
     if (link_probe_kind(src_probe) != HAPI_LP_ABSENT) {
-        _hap_eputs("hapi: source path already exists in package: ");
-        _hap_eputs(abs_source);
-        _hap_eputs("\n");
+        hapi_eputs("hapi: source path already exists in package: ");
+        hapi_eputs(abs_source);
+        hapi_eputs("\n");
         return 1;
     }
 
@@ -440,15 +370,15 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
         var bphys = fsl_resolve_path(hapi_backup_dir());
         var pphys = fsl_resolve_path(pkg_dir_abs);
         if (bphys == 0) {
-            _hap_eputs("hapi: the --backup-to directory cannot be resolved: ");
-            _hap_eputs(hapi_backup_dir());
-            _hap_eputs("\n  (a file where a directory should be, or a loop); nothing was changed\n");
+            hapi_eputs("hapi: the --backup-to directory cannot be resolved: ");
+            hapi_eputs(hapi_backup_dir());
+            hapi_eputs("\n  (a file where a directory should be, or a loop); nothing was changed\n");
             return 1;
         }
         if (pphys != 0 && _fsl_within(bphys, pphys) == 1) {
-            _hap_eputs("hapi: the --backup-to directory is in the package: ");
-            _hap_eputs(hapi_backup_dir());
-            _hap_eputs("\n  choose one outside it; nothing was changed\n");
+            hapi_eputs("hapi: the --backup-to directory is in the package: ");
+            hapi_eputs(hapi_backup_dir());
+            hapi_eputs("\n  choose one outside it; nothing was changed\n");
             return 1;
         }
         backup_path = hapi_backup_compose_path(bphys, pkg_name_for_backup, abs_target);
@@ -457,11 +387,11 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     # The manifest edit at the end would refuse a symlinked hapi.cyml
     # (F-058); refuse it here, before anything moves.
     if (hapi_mfw_manifest_is_symlink(manifest_path) == 1) {
-        _hap_eputs("hapi: ");
-        _hap_eputs(hapi_mfw_err_msg(HapiMfwManifestIsSymlink));
-        _hap_eputs("\n  (");
-        _hap_eputs(manifest_path);
-        _hap_eputs(")\n");
+        hapi_eputs("hapi: ");
+        hapi_eputs(hapi_mfw_err_msg(HapiMfwManifestIsSymlink));
+        hapi_eputs("\n  (");
+        hapi_eputs(manifest_path);
+        hapi_eputs(")\n");
         return 1;
     }
 
@@ -470,13 +400,7 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     # only then found the trail unwritable — "adopt succeeded but
     # audit-trail write failed", the adopt kept, and `rollback` later
     # reporting an empty trail with nothing to undo.
-    var pf_t, pf_v = audit_preflight_now_r();
-    if (is_err_result(pf_t) == 1) {
-        _hap_eputs("hapi: audit trail is not writable; refusing to adopt\n  ");
-        _hap_eputs(audit_trail_path_shown());
-        _hap_eputs("\n  every hapi write must be auditable; nothing was changed\n");
-        return 1;
-    }
+    if (audit_preflight_or_refuse("adopt") != 0) { return 1; }
 
     # 0. Refuse an unrepresentable name BEFORE any mutation. The
     # manifest write below would refuse it too, but only after the
@@ -485,29 +409,21 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     # Before the snapshot too (F-084): a refusal after it left a
     # snapshot no trail entry names.
     if (_hmw_representable(source_cstr) == 0 || _hmw_representable(target_cstr) == 0) {
-        _hap_eputs("hapi: cannot adopt ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n  ");
-        _hap_eputs(hapi_mfw_err_msg(HapiMfwUnrepresentable));
-        _hap_eputs("\n  (nothing was moved; rename the file and try again)\n");
+        hapi_eputs("hapi: cannot adopt ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n  ");
+        hapi_eputs(hapi_mfw_err_msg(HapiMfwUnrepresentable));
+        hapi_eputs("\n  (nothing was moved; rename the file and try again)\n");
         return 1;
     }
 
     # A dry run answers here, after every refusal the real run makes
     # (F-094): through 1.7.0 it returned before them and said `would adopt`.
     if (hapi_dry_run() == 1) {
-        _hap_puts("  ~ ");
-        _hap_puts(abs_target);
-        _hap_puts(" -> ");
-        _hap_puts(rel);
-        if (backup_path != 0) {
-            _hap_puts("  (backup -> ");
-            _hap_puts(backup_path);
-            _hap_puts(")");
-        }
-        _hap_puts("  (dry-run)\nwould adopt into ");
-        _hap_puts(manifest_path);
-        _hap_puts("\n");
+        hlnk_say_action("~", abs_target, rel, backup_path);
+        hapi_puts("  (dry-run)\nwould adopt into ");
+        hapi_puts(manifest_path);
+        hapi_puts("\n");
         return 0;
     }
 
@@ -515,11 +431,11 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     if (backup_path != 0) {
         var brc = hapi_backup_copy(abs_target, backup_path);
         if (brc < 0) {
-            _hap_eputs("hapi: backup-to copy failed (");
-            _hap_eputs(abs_target);
-            _hap_eputs(" -> ");
-            _hap_eputs(backup_path);
-            _hap_eputs(")\n");
+            hapi_eputs("hapi: backup-to copy failed (");
+            hapi_eputs(abs_target);
+            hapi_eputs(" -> ");
+            hapi_eputs(backup_path);
+            hapi_eputs(")\n");
             return 1;
         }
     }
@@ -529,27 +445,27 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     # every hapi writer holds the lock, and a non-hapi writer does not.
     # The target is checked again for the same reason.
     if (link_probe_kind(link_probe(abs_target)) != HAPI_LP_FILE) {
-        _hap_eputs("hapi: target changed before it could be moved: ");
-        _hap_eputs(abs_target);
-        _hap_eputs("\n  (nothing was moved)\n");
+        hapi_eputs("hapi: target changed before it could be moved: ");
+        hapi_eputs(abs_target);
+        hapi_eputs("\n  (nothing was moved)\n");
         if (backup_path != 0) { hapi_unlink(backup_path); }
         return 1;
     }
     var rrc = hapi_rename_noreplace(abs_target, abs_source);
     if (rrc < 0) {
         if (backup_path != 0) { hapi_unlink(backup_path); }
-        _hap_eputs("hapi: rename failed (");
-        _hap_eputs(abs_target);
-        _hap_eputs(" -> ");
-        _hap_eputs(abs_source);
-        if (rrc == 0 - 17) { _hap_eputs(": the package-side name now exists"); }
+        hapi_eputs("hapi: rename failed (");
+        hapi_eputs(abs_target);
+        hapi_eputs(" -> ");
+        hapi_eputs(abs_source);
+        if (rrc == 0 - 17) { hapi_eputs(": the package-side name now exists"); }
         if (rrc == 0 - 18) {
             # F-110: a bare "rename failed" said nothing of the cause.
-            _hap_eputs(": the file and the package are on different filesystems,");
-            _hap_eputs(" and a move cannot cross them; move the file to the package's");
-            _hap_eputs(" filesystem first");
+            hapi_eputs(": the file and the package are on different filesystems,");
+            hapi_eputs(" and a move cannot cross them; move the file to the package's");
+            hapi_eputs(" filesystem first");
         }
-        _hap_eputs(")\n  (nothing was moved)\n");
+        hapi_eputs(")\n  (nothing was moved)\n");
         return 1;
     }
 
@@ -557,8 +473,8 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     var crc = link_create(rel, abs_target);
     if (crc < 0) {
         # Move it back — never over something that appeared meanwhile.
-        _hap_eputs("hapi: symlink failed at ");
-        _hap_eputs(abs_target);
+        hapi_eputs("hapi: symlink failed at ");
+        hapi_eputs(abs_target);
         _hap_say_restored(abs_source, abs_target);
         return 1;
     }
@@ -575,14 +491,14 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
     if (mwrc >= 0 && _hap_row_read_back(manifest_path, old_rows, source_cstr, target_cstr) == 0) {
         if (old_buf != 0) { manifest_commit(manifest_path, old_buf, old_len); }
         mwrc = 0 - HapiMfwWriteFailed;
-        _hap_eputs("hapi: the manifest did not read back with the new row; it was put back\n");
+        hapi_eputs("hapi: the manifest did not read back with the new row; it was put back\n");
     }
     if (mwrc < 0) {
         # Undo symlink + move on failure to keep the world consistent.
         hapi_unlink(abs_target);
-        _hap_eputs("hapi: manifest edit failed (");
-        _hap_eputs(hapi_mfw_err_msg(0 - mwrc));
-        _hap_eputs(")");
+        hapi_eputs("hapi: manifest edit failed (");
+        hapi_eputs(hapi_mfw_err_msg(0 - mwrc));
+        hapi_eputs(")");
         _hap_say_restored(abs_source, abs_target);
         return 1;
     }
@@ -596,21 +512,13 @@ fn _hap_locked(manifest_path, pkg_dir_abs, abs_target, scope_root_abs): i64 {
       abs_source, abs_target,
       backup_path, fsl_shape_of(rel));
     if (is_err_result(ar_t) == 1) {
-        _hap_eputs("hapi: adopt succeeded but audit-trail write failed\n");
+        hapi_eputs("hapi: adopt succeeded but audit-trail write failed\n");
         return 1;
     }
 
-    _hap_puts("  ~ ");
-    _hap_puts(abs_target);
-    _hap_puts(" -> ");
-    _hap_puts(rel);
-    if (backup_path != 0) {
-        _hap_puts("  (backup -> ");
-        _hap_puts(backup_path);
-        _hap_puts(")");
-    }
-    _hap_puts("\nadopted into ");
-    _hap_puts(manifest_path);
-    _hap_puts("\n");
+    hlnk_say_action("~", abs_target, rel, backup_path);
+    hapi_puts("\nadopted into ");
+    hapi_puts(manifest_path);
+    hapi_puts("\n");
     return 0;
 }

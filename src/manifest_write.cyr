@@ -8,8 +8,8 @@
 # (manifest_lock … manifest_commit): the same lock, read, body delimiter
 # and atomic commit, so its rewrite keeps the body byte for byte too.
 #
-# Atomicity: write the new content to `<path>.tmp` in the same
-# directory, fsync, then rename(2) over the original. Crash
+# Atomicity: write the new content to `<path>.<pid>.tmp` in the same
+# directory (F-012), fsync, then rename(2) over the original. Crash
 # windows produce either the original or the new — never a
 # corrupt file.
 #
@@ -22,6 +22,8 @@ include "lib/string.cyr"
 include "lib/alloc.cyr"
 include "lib/syscalls.cyr"
 include "src/agnos_compat.cyr"   # hapi_open_regular
+include "src/fs_link.cyr"        # _fsl_path_dirname, link_probe
+include "src/out.cyr"            # hapi_itoa
 
 enum HapiMfWriteError {
     HapiMfwReadFailed = 1;
@@ -88,25 +90,6 @@ fn hapi_mfw_err_msg(code): i64 {
     return "unknown manifest-write error";
 }
 
-# Directory portion of `path` (no trailing slash), or "." when there is
-# no `/`. Local rather than fs_link.cyr's, to keep this module's include
-# set minimal.
-fn _hmw_dirname(path): i64 {
-    var n = strlen(path);
-    var last = 0 - 1;
-    var i = 0;
-    while (i < n) {
-        if (load8(path + i) == 47) { last = i; }
-        i = i + 1;
-    }
-    if (last < 0) { return "."; }
-    if (last == 0) { return "/"; }
-    var out = alloc(last + 1);
-    memcpy(out, path, last);
-    store8(out + last, 0);
-    return out;
-}
-
 # Serialize the manifest read-modify-write across processes.
 #
 # The lock is taken on the PACKAGE DIRECTORY, not the manifest. The
@@ -119,7 +102,7 @@ fn _hmw_dirname(path): i64 {
 # LOCK_EX blocks, which is what we want: an adopt that arrives mid-write
 # should wait its turn, not fail. Returns the held fd, or -1.
 fn _hmw_lock(manifest_path): i64 {
-    var dir = _hmw_dirname(manifest_path);
+    var dir = _fsl_path_dirname(manifest_path);
     var fd = file_open(dir, O_RDONLY, 0);
     if (fd < 0) { return 0 - 1; }
     if (xflock(fd, LOCK_EX) < 0) { file_close(fd); return 0 - 1; }
@@ -130,28 +113,6 @@ fn _hmw_unlock(fd): i64 {
     if (fd < 0) { return 0; }
     xflock(fd, LOCK_UN);
     return file_close(fd);
-}
-
-# Render a non-negative integer as a heap cstring (for the tmp name).
-fn _hmw_itoa(n): i64 {
-    if (n <= 0) { return "0"; }
-    var digits[24];
-    var i = 0;
-    var v = n;
-    while (v > 0) {
-        var d = v - (v / 10) * 10;
-        store8(&digits + i, 48 + d);
-        v = v / 10;
-        i = i + 1;
-    }
-    var out = alloc(i + 1);
-    var j = 0;
-    while (j < i) {
-        store8(out + j, load8(&digits + i - 1 - j));
-        j = j + 1;
-    }
-    store8(out + i, 0);
-    return out;
 }
 
 # Read the entire file into a freshly-allocated buffer. Returns
@@ -223,7 +184,7 @@ fn _hmw_slurp(path, out_len): i64 {
 fn _hmw_write_atomic(path, buf, n): i64 {
     var plen = strlen(path);
     var pid = sys_getpid();
-    var pids = _hmw_itoa(pid);
+    var pids = hapi_itoa(pid);
     var pl = strlen(pids);
     # path + "." + pid + ".tmp" + NUL
     var tmp = alloc(plen + 1 + pl + 5);
@@ -262,7 +223,7 @@ fn _hmw_write_atomic(path, buf, n): i64 {
     var wrc = file_write(fd, buf, n);
     if (wrc != n) { file_close(fd); hapi_unlink(tmp); return 0 - HapiMfwWriteFailed; }
     # The fsync's answer counts (F-105): it was discarded.
-    if (hapi_fsync(fd) < 0) { file_close(fd); hapi_unlink(tmp); return 0 - HapiMfwWriteFailed; }
+    if (xfsync(fd) < 0) { file_close(fd); hapi_unlink(tmp); return 0 - HapiMfwWriteFailed; }
     var crc = file_close(fd);
     if (crc < 0) { hapi_unlink(tmp); return 0 - HapiMfwWriteFailed; }
 
@@ -313,6 +274,19 @@ fn _hmw_find_separator(buf, n): i64 {
     return 0 - 1;
 }
 
+# 1 when the manifest at `path` is a symlink. The rewrite is a rename of a
+# staging file over `path`, which replaces a symlink with a regular file
+# (F-058): through 1.1.0 adopting into a package whose hapi.cyml linked to
+# a shared manifest turned it into a private copy holding the new row,
+# while the shared file — the one every other checkout reads — never got
+# it. It asks link_probe, whose 4096-byte readlink buffer is agnos's
+# longest link body: a shorter one answers -1 there and would miss the
+# link.
+fn hapi_mfw_manifest_is_symlink(path): i64 {
+    if (link_probe_kind(link_probe(path)) == HAPI_LP_SYMLINK) { return 1; }
+    return 0;
+}
+
 # Append a [[link]] row to `manifest_path`. Inserted just before
 # the body separator if one exists, else at EOF (with leading
 # blank-line padding either way for readability).
@@ -322,19 +296,6 @@ fn _hmw_find_separator(buf, n): i64 {
 # filesystem mutation committed while the row recording it vanished.
 # Measured on a 3 MB manifest with 16 concurrent adopts: 16 files moved,
 # 16 symlinks planted, 16 trail entries — and ONE manifest row (F-012).
-# 1 when the manifest at `path` is a symlink. The rewrite is a rename of a
-# staging file over `path`, which replaces a symlink with a regular file
-# (F-058): through 1.1.0 adopting into a package whose hapi.cyml linked to
-# a shared manifest turned it into a private copy holding the new row,
-# while the shared file — the one every other checkout reads — never got
-# it. 4096 is the readlink buffer link_probe uses; on agnos a shorter one
-# answers -1 for a longer body and would miss the link.
-fn hapi_mfw_manifest_is_symlink(path): i64 {
-    var buf = alloc(4096);
-    if (hapi_readlink(path, buf, 4096) > 0) { return 1; }
-    return 0;
-}
-
 fn manifest_append_link_row(manifest_path, source, target): i64 {
     # Refuse before taking the lock: a row we cannot represent must
     # never reach the file (F-021).
@@ -468,14 +429,21 @@ fn _hmw_starts(buf, end, pos, lit): i64 {
 
 # Skip horizontal whitespace (space/tab) at *pos in buf.
 fn _hmw_skip_hws(buf, end, pos_ptr): i64 {
-    var p = load64(pos_ptr);
-    var go = 1;
-    while (p < end && go == 1) {
-        var c = load8(buf + p);
-        if (c == 32 || c == 9) { p = p + 1; }
-        else { go = 0; }
-    }
-    store64(pos_ptr, p);
+    store64(pos_ptr, _hapi_mf_skip_hws(buf, load64(pos_ptr), end));
+    return 0;
+}
+
+# After a six-byte `source` or `target` key at buf[p]: the offset just past
+# `= "<want>"` when the value is exactly `want`, else 0. The two keys had
+# a copy each (finding 163).
+fn _hmw_value_end(buf, end, p, want): i64 {
+    var q = p + 6;
+    _hmw_skip_hws(buf, end, &q);
+    if (q >= end || load8(buf + q) != 61) { return 0; }
+    q = q + 1;
+    _hmw_skip_hws(buf, end, &q);
+    var ml = _hmw_match_quoted(buf, end, q, want);
+    if (ml > 0) { return q + ml; }
     return 0;
 }
 
@@ -513,31 +481,14 @@ fn _hmw_scan_link_block(buf, end, block_start, want_src, want_tgt, match_ptr): i
                 # Comment — skip to EOL.
                 while (p < end && load8(buf + p) != 10) { p = p + 1; }
                 if (p < end) { p = p + 1; }
-            } elif (_hmw_starts(buf, end, p, "source") == 1) {
-                p = p + 6;
-                _hmw_skip_hws(buf, end, &p);
-                if (p < end && load8(buf + p) == 61) {
-                    p = p + 1;
-                    _hmw_skip_hws(buf, end, &p);
-                    var ml = _hmw_match_quoted(buf, end, p, want_src);
-                    if (ml > 0) { src_match = 1; p = p + ml; }
-                }
-                while (p < end && load8(buf + p) != 10) { p = p + 1; }
-                if (p < end) { p = p + 1; }
-                _hmw_block_content_end = p;
-            } elif (_hmw_starts(buf, end, p, "target") == 1) {
-                p = p + 6;
-                _hmw_skip_hws(buf, end, &p);
-                if (p < end && load8(buf + p) == 61) {
-                    p = p + 1;
-                    _hmw_skip_hws(buf, end, &p);
-                    var ml = _hmw_match_quoted(buf, end, p, want_tgt);
-                    if (ml > 0) { tgt_match = 1; p = p + ml; }
-                }
-                while (p < end && load8(buf + p) != 10) { p = p + 1; }
-                if (p < end) { p = p + 1; }
-                _hmw_block_content_end = p;
             } else {
+                if (_hmw_starts(buf, end, p, "source") == 1) {
+                    var se = _hmw_value_end(buf, end, p, want_src);
+                    if (se > 0) { src_match = 1; p = se; }
+                } elif (_hmw_starts(buf, end, p, "target") == 1) {
+                    var te = _hmw_value_end(buf, end, p, want_tgt);
+                    if (te > 0) { tgt_match = 1; p = te; }
+                }
                 while (p < end && load8(buf + p) != 10) { p = p + 1; }
                 if (p < end) { p = p + 1; }
                 _hmw_block_content_end = p;

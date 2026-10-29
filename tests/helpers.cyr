@@ -1,0 +1,86 @@
+# helpers.cyr — the test helpers both suites share (2026-10-29 audit,
+# finding 165).
+#
+# Target-neutral: absolute paths, no environment, nothing agnos lacks,
+# so tests/agnos.tcyr includes it as tests/hapi.tcyr does. Through 1.7.0
+# each suite, and several tiers within hapi.tcyr, kept its own copy of
+# these: three string joins, two file writers, two manifest-row counters,
+# two scratch makers and seven manifest builders.
+
+include "src/agnos_compat.cyr"
+include "src/fs_link.cyr"
+include "src/manifest.cyr"
+include "tests/scratch.cyr"
+
+# `a` then `b`, as a fresh cstring.
+fn _test_cat(a, b): i64 {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    store8(out + la + lb, 0);
+    return out;
+}
+
+# Write `content` to `path`, created or truncated, 0644. The byte count,
+# or <0.
+fn _test_write_file(path, content): i64 {
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) { return fd; }
+    var n = file_write(fd, content, strlen(content));
+    file_close(fd);
+    return n;
+}
+
+# How many rows the manifest at `path` parses to, or -1 when it does not.
+fn _test_links(path): i64 {
+    var t, v = hapi_mf_parse_file_r(path);
+    if (is_err_result(t) == 1) { return 0 - 1; }
+    return vec_len(hapi_mf_links(v));
+}
+
+# A fresh directory under /tmp, unique per run and call:
+# /tmp/hapi-test-<pid>-<ns>-<n>. The pid alone is not enough: under mirshi
+# every agnos child is pid 1. Recorded, and removed when the run ends
+# (tests/scratch.cyr).
+var _test_scratch_counter = 0;
+fn _test_scratch_dir(): i64 {
+    _test_scratch_counter = _test_scratch_counter + 1;
+    var buf[128];
+    var prefix = "/tmp/hapi-test-";
+    var p = strlen(prefix);
+    memcpy(&buf, prefix, p);
+    p = p + fmt_int_buf(sys_getpid(), &buf + p);
+    store8(&buf + p, 45); p = p + 1;
+    p = p + fmt_int_buf(clock_now_ns(), &buf + p);
+    store8(&buf + p, 45); p = p + 1;
+    p = p + fmt_int_buf(_test_scratch_counter, &buf + p);
+    store8(&buf + p, 0);
+    var out = alloc(p + 1);
+    memcpy(out, &buf, p + 1);
+    hapi_mkdir(out, 0x1C0);
+    _ts_track(out);
+    return out;
+}
+
+# The manifest header for package `name`, version `version`.
+fn _test_hdr_v(name, version): i64 {
+    return _test_cat(_test_cat(_test_cat(_test_cat("[package]\nname = \"", name), "\"\nversion = \""),
+      version), "\"\n");
+}
+
+# The header the builders use: version 1.0.0.
+fn _test_hdr(name): i64 { return _test_hdr_v(name, "1.0.0"); }
+
+# One `[[link]]` row, as manifest text.
+fn _test_row(src, tgt): i64 {
+    return _test_cat(_test_cat(_test_cat(_test_cat("\n[[link]]\nsource = \"", src), "\"\ntarget = \""),
+      tgt), "\"\n");
+}
+
+# Write `text` as `<dir>/hapi.cyml`. Returns `dir`.
+fn _test_manifest_at(dir, text): i64 {
+    _test_write_file(_fsl_path_join(dir, "hapi.cyml"), text);
+    return dir;
+}

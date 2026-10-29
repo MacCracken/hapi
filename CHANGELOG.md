@@ -192,10 +192,28 @@ _Nothing yet._
     its `op:unlink` is recorded, not after the whole loop. A run stopped partway no
     longer leaves directories that no later verb removes.
 - **Tier 3, refactors, test gaps and CI.**
-  - Refactors, with every golden case byte-identical: the four manifest-argument
-    resolvers, and the seven string comparators, each became one shared function.
-    The dead functions and the identity helper went, and `checkpoint.cyr`'s helpers
-    no longer share `check.cyr`'s prefix.
+  - Refactors (findings 156–165), with every golden case byte-identical:
+    - one copy of each primitive: the print pairs, cstring comparators and
+      itoa (`src/out.cyr`), the manifest-argument resolvers, path containment,
+      dirname and basename, `..` detection, mkdir-parents and fsync;
+    - one copy of each refusal: an unreadable trail, an unwritable trail, a
+      manifest that will not parse, an unknowable cwd, and the scope root;
+    - one removal primitive for unlink, prune and rollback, and one record or
+      take-back for a new link, each with one return convention; the live set
+      uses lib's `vec_remove`;
+    - link's refusal loops, the action line link and adopt print, the parser's
+      section headers and unknown keys, the canonical value escape, the
+      writer's key scan and the hex encoder each became one function. cli
+      names `--steps` whole instead of sniffing its third byte;
+    - comments that contradicted the code, or sat on the wrong function, were
+      corrected. The dead functions and the identity helper went, and
+      `checkpoint.cyr`'s helpers no longer share `check.cyr`'s prefix.
+  - Tests: both suites share `tests/helpers.cyr`, the seven manifest builders
+    are built from one core, and the hash oracle sizes its buffer. The fuzz tier
+    now fuzzes the parser and `fmt`'s canonical form, the bench tier times
+    hapi's hot paths, and `src/test.cyr` checks the example manifests. Through
+    1.7.0 all three ran nothing of hapi's.
+  - adopt's refusal of a directory no longer says "at v0.5.0".
   - The guards the audit found unpinned are pinned.
   - F-112: CI verifies `cyrius.lock`, runs lint, fuzz, bench and the DCE release
     build, and gives the release's CI gate read-only permissions. The agnos smoke's

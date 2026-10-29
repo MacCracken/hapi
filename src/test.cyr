@@ -1,9 +1,53 @@
-# hapi — top-level test entry (referenced by cyrius.cyml [build].test).
-# For unit tests, prefer adding cases to tests/hapi.tcyr.
+# hapi — top-level test entry (cyrius.cyml [build].test). `cyrius test`
+# runs it before tests/*.tcyr.
+#
+# It builds the binary's whole module set, as src/main.cyr does, without
+# running a verb, and checks that the example manifests the docs point
+# users at stay valid: each parses, `fmt` proves its canonical form, and
+# it hashes. Through 1.7.0 it returned 0 and touched nothing of hapi's
+# (2026-10-29 audit, finding 165). Unit tests belong in tests/hapi.tcyr.
 
-include "lib/syscalls.cyr"
+include "src/agnos_compat.cyr"
+include "src/cli.cyr"
 
-fn main() {
+var _tst_fail = 0;
+
+fn _tst_check(ok, what, path): i64 {
+    if (ok == 1) { return 0; }
+    hapi_eputs("FAIL: ");
+    hapi_eputs(what);
+    hapi_eputs(": ");
+    hapi_eputs(path);
+    hapi_eputs("\n");
+    _tst_fail = _tst_fail + 1;
+    return 0;
+}
+
+fn _tst_example(path): i64 {
+    var t, v = hapi_mf_parse_file_r(path);
+    _tst_check(is_err_result(t) == 0, "the example parses", path);
+    if (is_err_result(t) == 1) { return 0; }
+    _tst_check(audit_manifest_hash_of(v) != 0, "the example hashes", path);
+    var n = 0;
+    var buf = manifest_read(path, &n);
+    _tst_check(buf != 0, "the example reads", path);
+    if (buf == 0) { return 0; }
+    var hlen = n;
+    var sep = manifest_body_start(buf, n);
+    if (sep >= 0) { hlen = sep; }
+    var f_t, f_v = hapi_mf_format_r(buf, hlen, manifest_uses_crlf(buf, n));
+    _tst_check(is_err_result(f_t) == 0, "fmt parses the example", path);
+    if (is_err_result(f_t) == 0) {
+        _tst_check(hapi_fmt_proven(f_v) == 1, "fmt proves its canonical form", path);
+    }
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    _tst_example("docs/examples/dotfiles-zsh/hapi.cyml");
+    if (_tst_fail > 0) { return 1; }
+    print("examples: ok\n", 13);
     return 0;
 }
 

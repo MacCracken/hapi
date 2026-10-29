@@ -1,21 +1,21 @@
 # backup.cyr — opt-in pre-`--force` file snapshots.
 #
-# When `--backup-to <dir>` is set on the command line, the
-# mutating verbs (link --force, sync --force, adopt) snapshot
-# the existing on-disk file content to a timestamped path under
-# <dir> *before* the destructive step (unlink / rename). The
-# audit-trail entry gains an additive `backup_path` field per
-# ADR 0002's growth contract.
+# When `--backup-to <dir>` is set on the command line, `link --force`
+# and `adopt` snapshot the existing on-disk file content to a
+# timestamped path under <dir> *before* the destructive step (the
+# replace, or the move). `sync` takes the flag but never overwrites, so
+# it is inert there (F-026). The audit-trail entry gains an additive
+# `backup_path` field per ADR 0002's growth contract.
 #
-# Filename shape: <YYYYMMDD-HHMMSS>-<pkg>-<basename>. The
-# timestamp is the local wall clock at snapshot time; the pkg
-# tag disambiguates concurrent backups across packages; the
-# basename keeps human reviewers oriented.
+# Filename shape: <YYYYMMDD-HHMMSS>-<pkg>-<basename>. The timestamp is
+# UTC at snapshot time, the trail's `ts` clock; the pkg tag
+# disambiguates concurrent backups across packages; the basename keeps
+# human reviewers oriented.
 #
-# Process-wide state mirrors the dry-run setter/getter pattern
-# in `cli.cyr`. Tests flip `_hapi_backup_dir` via the setter;
-# the dispatcher sets it from `--backup-to <path>` in main();
-# nobody else.
+# Process-wide state mirrors the dry-run setter/getter pattern in
+# `dry_run.cyr`. Tests flip `_hapi_backup_dir` via the setter; the
+# dispatcher sets it from `--backup-to <path>` in _hapi_run_verb
+# (src/cli.cyr); nobody else.
 
 include "lib/string.cyr"
 include "lib/alloc.cyr"
@@ -58,24 +58,6 @@ fn _hbk_ts(): i64 {
     store8(out + 13, 48 + sc / 10);
     store8(out + 14, 48 + sc % 10);
     store8(out + 15, 0);
-    return out;
-}
-
-# Basename of `path` (everything after the last `/`). Returns a
-# heap-allocated cstring. "/foo" → "foo"; "x" → "x"; "/a/" → "".
-fn _hbk_basename(path): i64 {
-    var n = strlen(path);
-    var last = 0 - 1;
-    var i = 0;
-    while (i < n) {
-        if (load8(path + i) == 47) { last = i; }
-        i = i + 1;
-    }
-    var start = last + 1;
-    var len = n - start;
-    var out = alloc(len + 1);
-    memcpy(out, path + start, len);
-    store8(out + len, 0);
     return out;
 }
 
@@ -129,7 +111,7 @@ fn _hbk_safe_tag(pkg): i64 {
 
 fn _hbk_compose_base(dir, pkg, src_path): i64 {
     var ts = _hbk_ts();
-    var bn = _hbk_basename(src_path);
+    var bn = _fsl_path_basename(src_path);
     var tag = _hbk_safe_tag(pkg);
     var dl = strlen(dir);
     var tl = strlen(ts);
@@ -250,8 +232,9 @@ fn hapi_backup_copy(src, dst): i64 {
     # directory that already existed.
     var mkrc = fsl_mkdir_parents(dst);
     if (mkrc < 0) { return mkrc; }
-    # Via the shim: Linux/macOS get atomic O_NOFOLLOW, agnos gets a
-    # readlink pre-check because it has no no-follow flag at all (F-031).
+    # Via the shim: the open refuses a symlink with O_NOFOLLOW, which agnos
+    # has had since 1.56.53 (F-039); its readlink pre-check stays for older
+    # agnos kernels, which ignore the flag (F-031).
     # A FIFO's open does not block with O_NONBLOCK; its read would
     # (F-091). Only a regular file has bytes to keep. agnos has neither
     # the flag nor fstat here: it asks stat before the open.

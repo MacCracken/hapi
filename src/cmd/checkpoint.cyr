@@ -5,9 +5,8 @@
 # at — every subsequent link / unlink / adopt is in scope for
 # the next rollback; everything before is sealed.
 #
-# Per-entry machinery (audit_append_rollback_marker_r) shipped
-# in M3 alongside rollback's walk-to-marker logic. This is the
-# user-facing surface the M5 roadmap calls out.
+# The entry is written by audit_append_marker_r, which rollback's
+# closing marker uses too.
 #
 # `hapi checkpoint --label <name>` (1.5.0) names the marker, so that
 # `hapi rollback --to <name>` can find it (ADR 0002, 1.5.0 addendum). The
@@ -19,9 +18,7 @@
 
 include "src/audit.cyr"
 include "src/dry_run.cyr"
-
-fn _hcp_puts(s): i64 { print(s, strlen(s)); return 0; }
-fn _hcp_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+include "src/out.cyr"
 
 fn cmd_checkpoint(): i64 { return cmd_checkpoint_label(0); }
 
@@ -31,29 +28,29 @@ fn cmd_checkpoint_label(label): i64 {
         # As the real run would answer (F-094).
         var pf_t, pf_v = audit_preflight_dry_r();
         if (is_err_result(pf_t) == 1) {
-            _hcp_eputs("hapi: audit-trail write failed (could not append checkpoint)\n");
+            hapi_eputs("hapi: audit-trail write failed (could not append checkpoint)\n");
             return 1;
         }
-        _hcp_puts("checkpoint");
+        hapi_puts("checkpoint");
         _hcp_say_label(label);
-        _hcp_puts(" (dry-run; no entry written)\n");
+        hapi_puts(" (dry-run; no entry written)\n");
         return 0;
     }
     var r_t, r_v = audit_append_marker_r(label, 0);
     if (is_err_result(r_t) == 1) {
-        _hcp_eputs("hapi: audit-trail write failed (could not append checkpoint)\n");
+        hapi_eputs("hapi: audit-trail write failed (could not append checkpoint)\n");
         return 1;
     }
-    _hcp_puts("checkpoint");
+    hapi_puts("checkpoint");
     _hcp_say_label(label);
-    _hcp_puts(" written\n");
+    hapi_puts(" written\n");
     return 0;
 }
 
 fn _hcp_say_label(label): i64 {
     if (label == 0) { return 0; }
-    _hcp_puts(" `");
-    _hcp_puts(label);
-    _hcp_puts("`");
+    hapi_puts(" `");
+    hapi_puts(label);
+    hapi_puts("`");
     return 0;
 }

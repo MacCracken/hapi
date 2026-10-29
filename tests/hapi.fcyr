@@ -1,14 +1,168 @@
-# hapi fuzz harness
+# hapi fuzz harness — the manifest parser and `fmt`'s canonical form.
+#
+# Every input is a mutation of a seed manifest: bytes replaced, inserted
+# and deleted, drawn from the ones the parser branches on. For each:
+#   - the parse never crashes;
+#   - a strict parse accepts nothing the lenient parse refuses, and both
+#     give one canonical form;
+#   - for a manifest that parses with no backslash in a value, `fmt`'s own
+#     proof holds, formatting its output again changes nothing, and the
+#     sha1c: hash is the one the input had (ADR 0002, ADR 0008).
+# Deterministic: a fixed seed, so a failure reproduces. Through 1.7.0 this
+# tier ignored its input (2026-10-29 audit, finding 165).
 
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
+include "src/manifest.cyr"
+include "src/audit.cyr"
+
+var _hfz_seed = 20261029;
+var _hfz_fail = 0;
+var _hfz_parsed = 0;
+var _hfz_formatted = 0;
+
+fn _hfz_next(n): i64 {
+    _hfz_seed = (_hfz_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return (_hfz_seed >> 8) % n;
+}
+
+fn _hfz_bad(what, data, len): i64 {
+    _hfz_fail = _hfz_fail + 1;
+    if (_hfz_fail <= 5) {
+        eprint("FAIL: ", 6);
+        eprint(what, strlen(what));
+        eprint("\n--- input ---\n", 15);
+        eprint(data, len);
+        eprint("\n-------------\n", 15);
+    }
     return 0;
 }
 
-fn main() {
+# The canonical bytes of the parse of data[0..len), or 0.
+fn _hfz_canon(m, n_out): i64 {
+    var cap = hapi_mf_canonical_size(m);
+    var buf = alloc(cap);
+    var n = hapi_mf_canonicalize(m, buf, cap);
+    if (n <= 0) { return 0; }
+    store64(n_out, n);
+    return buf;
+}
+
+fn _hfz_cat(a, b): i64 {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    store8(out + la + lb, 0);
+    return out;
+}
+
+fn _hfz_same(a, an, b, bn): i64 {
+    if (an != bn) { return 0; }
+    return memeq(a, b, an);
+}
+
+fn fuzz_main(data, len): i64 {
+    hapi_mf_set_strict(1);
+    var s_t, s_v = hapi_mf_parse_header_r(data, len);
+    hapi_mf_set_strict(0);
+    var l_t, l_v = hapi_mf_parse_header_r(data, len);
+    if (is_err_result(l_t) == 1) {
+        if (is_err_result(s_t) == 0) { _hfz_bad("strict accepts what lenient refuses", data, len); }
+        return 0;
+    }
+    _hfz_parsed = _hfz_parsed + 1;
+    var ln = 0;
+    var lc = _hfz_canon(l_v, &ln);
+    if (lc == 0) { _hfz_bad("a parsed manifest has no canonical form", data, len); return 0; }
+    if (is_err_result(s_t) == 0) {
+        var sn = 0;
+        var sc = _hfz_canon(s_v, &sn);
+        if (sc == 0 || _hfz_same(sc, sn, lc, ln) == 0) {
+            _hfz_bad("strict and lenient parses differ", data, len);
+        }
+    }
+    var f_t, f_v = hapi_mf_format_r(data, len, 0);
+    if (is_err_result(f_t) == 1) { _hfz_bad("fmt refuses what the parser accepts", data, len); return 0; }
+    if (hapi_fmt_backslash(f_v) != 0) { return 0; }
+    _hfz_formatted = _hfz_formatted + 1;
+    if (hapi_fmt_proven(f_v) == 0) { _hfz_bad("fmt's proof fails", data, len); return 0; }
+    var out = hapi_fmt_out(f_v);
+    var on = hapi_fmt_out_len(f_v);
+    var g_t, g_v = hapi_mf_format_r(out, on, 0);
+    if (is_err_result(g_t) == 1) { _hfz_bad("fmt's output does not parse", data, len); return 0; }
+    if (_hfz_same(hapi_fmt_out(g_v), hapi_fmt_out_len(g_v), out, on) == 0) {
+        _hfz_bad("formatting fmt's output changes it", data, len);
+    }
+    if (vec_len(hapi_fmt_drops(g_v)) != 0) { _hfz_bad("fmt's output has drops", data, len); }
+    var o_t, o_v = hapi_mf_parse_header_r(out, on);
+    if (is_err_result(o_t) == 0) {
+        var h1 = audit_manifest_hash_of(l_v);
+        var h2 = audit_manifest_hash_of(o_v);
+        if (h1 == 0 || h2 == 0 || memeq(h1, h2, 46) == 0) { _hfz_bad("fmt changes the hash", data, len); }
+    }
+    return 0;
+}
+
+fn main(): i64 {
     alloc_init();
-    fuzz_main("test", 4);
-    println("fuzz: ok");
+    var seeds = vec_new();
+    # Three seeds: a full header (a backslash in its description, so fmt's
+    # refusal is exercised too), one with comments, unknown keys and an
+    # unknown section, and a CR LF one.
+    var s1 = "[package]\nname = \"zsh\"\nversion = \"1.0.0\"\ndescription = \"shell \\\"rc\\\"\"\n";
+    vec_push(seeds, _hfz_cat(_hfz_cat(s1,
+      "ignore = [\"*.md\", \"x\"]\n\n[[link]]\nsource = \"zshrc\"\ntarget = \".zshrc\""),
+      "\n\n[[link]]\nsource = \"p10k\"\ntarget = \".config/p10k.zsh\"\n"));
+    vec_push(seeds, _hfz_cat("# a comment\n[package]\nversion = \"2\"\nname = \"git\"\nmode = \"x\"\n\n",
+      "[[link]] # trailing\nsource = \"gitconfig\"\ntarget = \".gitconfig\"\n[extra]\nk = \"v\"\n"));
+    vec_push(seeds, _hfz_cat("[package]\r\nname = \"crlf\"\r\nversion = \"1.0.0\"\r\n\r\n",
+      "[[link]]\r\nsource = \"a\"\r\ntarget = \".a\"\r\n"));
+    var alph = "[]\"\\=\n\r#- \t,./a0";
+    var an = strlen(alph);
+    var buf = alloc(4096);
+    var iters = 20000;
+    var it = 0;
+    while (it < iters) {
+        var seed = vec_get(seeds, it % vec_len(seeds));
+        var n = strlen(seed);
+        memcpy(buf, seed, n);
+        var muts = 1 + _hfz_next(4);
+        var k = 0;
+        while (k < muts) {
+            var op = _hfz_next(3);
+            var at = 0;
+            if (n > 0) { at = _hfz_next(n); }
+            var c = load8(alph + _hfz_next(an));
+            if (_hfz_next(16) == 0) { c = _hfz_next(256); }
+            if (op == 0 && n > 0) { store8(buf + at, c); }
+            elif (op == 1 && n < 4000) {
+                var j = n;
+                while (j > at) { store8(buf + j, load8(buf + j - 1)); j = j - 1; }
+                store8(buf + at, c);
+                n = n + 1;
+            } elif (n > 0) {
+                var j = at;
+                while (j < n - 1) { store8(buf + j, load8(buf + j + 1)); j = j + 1; }
+                n = n - 1;
+            }
+            k = k + 1;
+        }
+        fuzz_main(buf, n);
+        it = it + 1;
+    }
+    print("fuzz: ", 6);
+    fmt_int(iters);
+    print(" inputs, ", 9);
+    fmt_int(_hfz_parsed);
+    print(" parsed, ", 9);
+    fmt_int(_hfz_formatted);
+    print(" formatted\n", 11);
+    if (_hfz_fail > 0) {
+        fmt_int(_hfz_fail);
+        print(" failed\n", 8);
+        return 1;
+    }
+    print("fuzz: ok\n", 9);
     return 0;
 }
 

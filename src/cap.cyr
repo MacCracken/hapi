@@ -34,35 +34,6 @@ var _cap_home_override = 0;
 fn cap_set_allowlist(s): i64 { _cap_allowlist_override = s; return 0; }
 fn cap_set_home(s): i64 { _cap_home_override = s; return 0; }
 
-# 1 iff `path` and `prefix` share a path-component boundary at
-# `prefix`'s end. Concretely: path == prefix, OR
-# path[len(prefix)] == '/'. Strips a trailing '/' on the prefix
-# so the comparison stays symmetric.
-fn _cap_path_within(path, prefix): i64 {
-    var pn = strlen(path);
-    var fn_ = strlen(prefix);
-    if (fn_ == 0) { return 0; }
-    # The root contains every absolute path (F-047). Without this arm the
-    # trailing-slash strip below is skipped for "/" (it must be, or the
-    # prefix would be empty) and the boundary test then asked for a
-    # second '/' at path[1], so `--root /` and HAPI_ALLOWED_ROOTS=/
-    # contained nothing — and agnos, which stages HOME=/, refused every
-    # row of every verb.
-    if (fn_ == 1 && load8(prefix) == 47) {
-        if (pn > 0 && load8(path) == 47) { return 1; }
-        return 0;
-    }
-    # Drop a trailing slash on the prefix (treat
-    # "/etc/myproject/" as "/etc/myproject").
-    if (fn_ > 1 && load8(prefix + fn_ - 1) == 47) { fn_ = fn_ - 1; }
-    if (pn < fn_) { return 0; }
-    if (memeq(path, prefix, fn_) == 0) { return 0; }
-    if (pn == fn_) { return 1; }
-    # path is longer — must split on '/' immediately after the prefix.
-    if (load8(path + fn_) == 47) { return 1; }
-    return 0;
-}
-
 # Walk HAPI_ALLOWED_ROOTS (colon-separated). Returns 1 if
 # `path` falls within any entry, 0 otherwise. Each allowlist
 # entry is lexically normalized before the prefix-match so a
@@ -93,7 +64,7 @@ fn _cap_in_allowlist(path): i64 {
                 if (load8(seg) == 47) {
                     var norm = fsl_resolve_path(seg);
                     if (norm != 0) {
-                        if (_cap_path_within(path, norm) == 1) { hit = 1; }
+                        if (_fsl_within(path, norm) == 1) { hit = 1; }
                     }
                 }
             }
@@ -126,7 +97,7 @@ fn cap_within_scope(path, scope_root): i64 {
     if (strlen(path) == 0 || strlen(scope_root) == 0) { return 0; }
     var np = fsl_lexical_normalize(fsl_to_absolute(path));
     var ns = fsl_lexical_normalize(fsl_to_absolute(scope_root));
-    return _cap_path_within(np, ns);
+    return _fsl_within(np, ns);
 }
 
 # May hapi write at `path`, given `scope_root`?
@@ -149,7 +120,7 @@ fn cap_target_allowed(path, scope_root): i64 {
     if (rp == 0) { return 0; }              # unprovable => refuse
     var rs = fsl_resolve_path(scope_root);
     if (rs != 0) {
-        if (_cap_path_within(rp, rs) == 1) { return 1; }
+        if (_fsl_within(rp, rs) == 1) { return 1; }
     }
     return _cap_in_allowlist(rp);
 }
@@ -180,7 +151,7 @@ fn cap_check_root_r(root_arg): Result {
     if (home != 0 && strlen(home) > 0) {
         var phys_home = fsl_resolve_path(home);
         if (phys_home != 0) {
-            if (_cap_path_within(phys_root, phys_home) == 1) {
+            if (_fsl_within(phys_root, phys_home) == 1) {
                 return Ok(abs_root);
             }
         }

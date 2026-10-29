@@ -2,7 +2,8 @@
 #
 # Set by the dispatcher (src/cli.cyr) when a verb's command line has
 # `--dry-run`; read by every mutating command (link, unlink, adopt,
-# sync, rollback, checkpoint) before its first syscall / audit write.
+# sync, rollback, checkpoint, fmt) before its first syscall / audit
+# write.
 #
 # Its own leaf so a command never includes the command line: 1.2.0
 # kept the flag in src/cli.cyr, which by then held the dispatcher, so

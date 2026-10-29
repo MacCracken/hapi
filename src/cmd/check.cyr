@@ -2,7 +2,8 @@
 #
 # Like `hapi inspect`, but with an opt-in `--strict` mode that
 # rejects unknown [section] headers and unknown keys inside
-# the known sections. Targets CI / lint use — the default
+# the known sections, and since 1.7.1 anything else the parser
+# skips but a comment (F-107). Targets CI / lint use — the default
 # parser is lenient by design (ADR 0001 leaves schema headroom
 # for additive growth), and the strict surface is the one that
 # guards against typos and stale schema drift.
@@ -23,35 +24,13 @@
 # ADR 0004 revision, not a patch; this is the half a patch can carry.
 
 include "src/manifest.cyr"
-include "src/cmd/inspect.cyr"   # reuse _hapi_inspect_print_manifest / _hi_eputs
+include "src/cmd/inspect.cyr"   # reuse _hapi_inspect_print_manifest
 include "src/fs_link.cyr"
 include "lib/fs.cyr"            # dir_list_checked — portable across the dirent layouts
-include "src/audit_reader.cyr"   # _har_itoa
+include "src/audit_reader.cyr"
+include "src/out.cyr"
 
-# Same resolver as inspect; keeping it inline so check stays
-# decoupled from the inspect module's private helpers.
-fn _hck_resolve_manifest(arg): i64 {
-    var n = strlen(arg);
-    if (n >= 5) {
-        if (load8(arg + n - 5) == 46 && load8(arg + n - 4) == 99
-            && load8(arg + n - 3) == 121 && load8(arg + n - 2) == 109
-            && load8(arg + n - 1) == 108) {
-            var out = alloc(n + 1);
-            memcpy(out, arg, n);
-            store8(out + n, 0);
-            return out;
-        }
-    }
-    var trim = n;
-    if (trim > 0 && load8(arg + trim - 1) == 47) { trim = trim - 1; }
-    var suffix = "/hapi.cyml";
-    var slen = 10;
-    var out = alloc(trim + slen + 1);
-    memcpy(out, arg, trim);
-    memcpy(out + trim, suffix, slen);
-    store8(out + trim + slen, 0);
-    return out;
-}
+fn _hck_resolve_manifest(arg): i64 { return fsl_manifest_as_given(arg); }
 
 # Does `name` correspond to manifest row source `src`? True when they
 # are equal, or when `src` lives beneath `name` (a row source of
@@ -63,13 +42,7 @@ fn _hck_covers(src, name): i64 {
         src = src + 2;
         while (load8(src) == 47) { src = src + 1; }
     }
-    var sn = strlen(src);
-    var nn = strlen(name);
-    if (nn > sn) { return 0; }
-    if (memeq(src, name, nn) == 0) { return 0; }
-    if (sn == nn) { return 1; }
-    if (load8(src + nn) == 47) { return 1; }
-    return 0;
+    return _fsl_within(src, name);   # a directory entry's name has no '/'
 }
 
 # Is `name` a staging file from an interrupted write, rather than
@@ -115,10 +88,10 @@ fn _hck_report_divergence(mpath, m): i64 {
         # file (`f/sub`, ENOTDIR), which `link` then refused — while
         # telling the user that `check` lists every such row.
         if (fsl_source_present(abs_src) == 0) {
-            if (bad == 0) { _hi_eputs("\ndivergence between the manifest and the package:\n"); }
-            _hi_eputs("  row source is missing: ");
-            _hi_eputs(src);
-            _hi_eputs("\n");
+            if (bad == 0) { hapi_eputs("\ndivergence between the manifest and the package:\n"); }
+            hapi_eputs("  row source is missing: ");
+            hapi_eputs(src);
+            hapi_eputs("\n");
             bad = bad + 1;
         }
         i = i + 1;
@@ -135,9 +108,9 @@ fn _hck_report_divergence(mpath, m): i64 {
     # failed has not shown the package agrees; it is an error.
     var names = vec_new();
     if (dir_list_checked(str_from(pkg_dir), names) < 0) {
-        _hi_eputs("hapi: could not list the package directory (");
-        _hi_eputs(pkg_dir);
-        _hi_eputs(")\n");
+        hapi_eputs("hapi: could not list the package directory (");
+        hapi_eputs(pkg_dir);
+        hapi_eputs(")\n");
         return 0 - 1;
     }
     var nn = vec_len(names);
@@ -149,15 +122,15 @@ fn _hck_report_divergence(mpath, m): i64 {
         # package content (F-095): checked as `pkg/zsh.cyml`, check
         # reported zsh.cyml itself as an orphan and always exited 1.
         var nml = strlen(nm);
-        if (_hck_cstr_eq(nm, mbase) == 1) { skip = 1; }
+        if (hapi_cstr_eq(nm, mbase) == 1) { skip = 1; }
         if (nml > 5 && memeq(nm + nml - 5, ".cyml", 5) == 1) { skip = 1; }
         if (_hck_is_staging(nm, mbase) == 1) {
             # Not package content, so not a divergence — but it is not
             # harmless either: it refuses every later manifest write by a
             # process that draws the same pid (F-038). Name it.
-            _hi_eputs("note: staging file from an interrupted write: ");
-            _hi_eputs(nm);
-            _hi_eputs(" (delete it once no hapi is running)\n");
+            hapi_eputs("note: staging file from an interrupted write: ");
+            hapi_eputs(nm);
+            hapi_eputs(" (delete it once no hapi is running)\n");
             skip = 1;
         }
         if (skip == 0) {
@@ -169,10 +142,10 @@ fn _hck_report_divergence(mpath, m): i64 {
                 k = k + 1;
             }
             if (claimed == 0) {
-                if (bad == 0) { _hi_eputs("\ndivergence between the manifest and the package:\n"); }
-                _hi_eputs("  file in the package with no [[link]] row: ");
-                _hi_eputs(nm);
-                _hi_eputs("\n");
+                if (bad == 0) { hapi_eputs("\ndivergence between the manifest and the package:\n"); }
+                hapi_eputs("  file in the package with no [[link]] row: ");
+                hapi_eputs(nm);
+                hapi_eputs("\n");
                 bad = bad + 1;
                 orphans = orphans + 1;
             }
@@ -181,17 +154,15 @@ fn _hck_report_divergence(mpath, m): i64 {
     }
 
     if (orphans > 0) {
-        _hi_eputs("  (an unclaimed file is the signature of an `adopt` that was\n");
-        _hi_eputs("   interrupted after the move and before the manifest write)\n");
+        hapi_eputs("  (an unclaimed file is the signature of an `adopt` that was\n");
+        hapi_eputs("   interrupted after the move and before the manifest write)\n");
     }
     return bad;
 }
 
-fn _hck_cstr_eq(a, b): i64 { return hapi_cstr_eq(a, b); }
-
 fn cmd_check(path, strict): i64 {
     if (path == 0) {
-        _hi_eputs("usage: hapi check <package-dir|hapi.cyml> [--strict]\n");
+        hapi_eputs("usage: hapi check <package-dir|hapi.cyml> [--strict]\n");
         return 2;
     }
     var mpath = _hck_resolve_manifest(path);
@@ -217,13 +188,13 @@ fn cmd_check(path, strict): i64 {
         var di = 0;
         while (di < vec_len(drops)) {
             var dd = vec_get(drops, di);
-            if (_hck_cstr_eq(hapi_mf_drop_what(dd), "a comment") == 0) {
-                if (bad == 0) { _hi_eputs("hapi: the manifest has what the parser skips (strict mode):\n"); }
-                _hi_eputs("  line ");
-                _hi_eputs(_har_itoa(hapi_mf_drop_line(dd)));
-                _hi_eputs(": ");
-                _hi_eputs(hapi_mf_drop_what(dd));
-                _hi_eputs("\n");
+            if (hapi_cstr_eq(hapi_mf_drop_what(dd), "a comment") == 0) {
+                if (bad == 0) { hapi_eputs("hapi: the manifest has what the parser skips (strict mode):\n"); }
+                hapi_eputs("  line ");
+                hapi_eputs(hapi_itoa(hapi_mf_drop_line(dd)));
+                hapi_eputs(": ");
+                hapi_eputs(hapi_mf_drop_what(dd));
+                hapi_eputs("\n");
                 bad = bad + 1;
             }
             di = di + 1;
@@ -232,13 +203,7 @@ fn cmd_check(path, strict): i64 {
     }
 
     if (is_err_result(res_t) == 1) {
-        var code = res_v;
-        var msg = hapi_mf_err_msg(code);
-        _hi_eputs("hapi: ");
-        eprint(msg, strlen(msg));
-        _hi_eputs(" (");
-        eprint(mpath, strlen(mpath));
-        _hi_eputs(")\n");
+        hapi_mf_report_err(res_v, mpath);
         return 1;
     }
     var m = res_v;

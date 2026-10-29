@@ -1,0 +1,36 @@
+# out.cyr — the one copy of hapi's output and cstring helpers.
+#
+# Every verb printed through its own `print(s, strlen(s))` pair and
+# compared cstrings with its own null-guarded copy: eleven pairs and seven
+# copies, some borrowed across modules (2026-10-29 audit, finding 157).
+# A leaf: it includes nothing of hapi's, so any module may include it.
+#
+# Print a literal with hapi_puts, not `print(lit, N)`: a hand-counted
+# length is a footgun, and one byte off writes the adjacent rodata to the
+# terminal.
+
+include "lib/string.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+
+fn hapi_puts(s): i64 { print(s, strlen(s)); return 0; }
+fn hapi_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+
+# 1 when the cstrings `a` and `b` are equal; 0 when either is 0. lib's
+# streq has no null guard, and hapi compares fields that may be absent.
+fn hapi_cstr_eq(a, b): i64 {
+    if (a == 0 || b == 0) { return 0; }
+    var n = strlen(a);
+    if (strlen(b) != n) { return 0; }
+    return memeq(a, b, n);
+}
+
+# `n` in decimal, as a fresh cstring; "0" for n <= 0, which no caller
+# passes but line numbers and counts start at. audit_reader and
+# manifest_write each had a byte-identical copy (finding 158).
+fn hapi_itoa(n): i64 {
+    if (n <= 0) { return "0"; }
+    var out = alloc(24);
+    fmt_int_buf(n, out);
+    return out;
+}

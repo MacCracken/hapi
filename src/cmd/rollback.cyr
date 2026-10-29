@@ -11,6 +11,8 @@
 #                  and append a fresh op=unlink entry.
 #   unlink entry → if the abs_target is currently absent,
 #                  recreate the symlink and append op=link.
+#   adopt entry  → remove the link, move the file back, remove its
+#                  manifest row, and append op=unadopt (ADR 0004).
 #   marker       → stop (we've reached the boundary).
 #
 # Each reversal is conditional: if the user already
@@ -33,12 +35,9 @@ include "src/fs_link.cyr"
 include "src/manifest_write.cyr"
 include "src/dry_run.cyr"
 include "src/manifest.cyr"     # _hrb_manifest_of parses the candidates
+include "src/cmd/unlink.cyr"   # hul_remove_recorded
 include "lib/fs.cyr"           # dir_list_checked
-
-fn _hrb_puts(s): i64 { print(s, strlen(s)); return 0; }
-fn _hrb_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
-
-fn _hrb_cstr_eq(a, b): i64 { return hapi_cstr_eq(a, b); }
+include "src/out.cyr"
 
 # Find the index of the most recent rollback-marker, walking
 # backward from `start` toward 0. Returns -1 if none (meaning
@@ -49,7 +48,7 @@ fn _hrb_find_marker(trail, start): i64 {
     var go = 1;
     while (i >= 0 && go == 1) {
         var e = vec_get(trail, i);
-        if (_hrb_cstr_eq(hae_op(e), "rollback-marker") == 1) {
+        if (hapi_cstr_eq(hae_op(e), "rollback-marker") == 1) {
             found = i;
             go = 0;
         }
@@ -79,18 +78,9 @@ fn _hrb_reverse_link(entry): i64 {
 
     if (fsl_link_text_matches(link_probe_target(probe), abs_tgt, abs_src) == 0) { return 0; }
 
-    if (hapi_dry_run() == 1) { return 1; }
-    var urc = hapi_unlink(abs_tgt);
-    if (urc < 0) { return 0 - 1; }
-    var ar_t, ar_v = audit_append_unlink_shaped_r(
-        hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
-        hae_source(entry), hae_target(entry),
-        hae_abs_source(entry), hae_abs_target(entry), fsl_shape_of(link_probe_target(probe)));
-    if (is_err_result(ar_t) == 1) {
-        if (hapi_symlink(link_probe_target(probe), abs_tgt) < 0) { return 0 - 3; }
-        return 0 - 2;
-    }
-    return 1;
+    var rc = hul_remove_recorded(entry, link_probe_target(probe));
+    if (rc == 0) { return 1; }
+    return rc;
 }
 
 # Reverse one unlink entry: if abs_target is absent, recreate
@@ -116,9 +106,9 @@ fn _hrb_reverse_unlink(entry): i64 {
     # A link to a source that is gone would dangle (F-110): `link`
     # refuses that row, and rollback re-created it anyway.
     if (fsl_source_present(abs_src) == 0) {
-        _hrb_eputs("  ! ");
-        _hrb_eputs(hae_shown(abs_tgt));
-        _hrb_eputs("  (its source is gone: not re-created)\n");
+        hapi_eputs("  ! ");
+        hapi_eputs(hae_shown(abs_tgt));
+        hapi_eputs("  (its source is gone: not re-created)\n");
         return 0;
     }
 
@@ -131,15 +121,11 @@ fn _hrb_reverse_unlink(entry): i64 {
     var made = 0;
     var crc = link_create_r(rel, abs_tgt, &made);
     if (crc < 0) { return 0 - 1; }
-    var ar_t, ar_v = audit_append_link_full_r(
+    var rr = audit_record_link_or_take_back(
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         hae_source(entry), hae_target(entry),
-        hae_abs_source(entry), hae_abs_target(entry), 0, made, fsl_shape_of(rel));
-    if (is_err_result(ar_t) == 1) {
-        if (hapi_unlink(abs_tgt) < 0) { return 0 - 3; }
-        if (made != 0) { fsl_rmdir_created(abs_tgt, made, 0); }
-        return 0 - 2;
-    }
+        hae_abs_source(entry), hae_abs_target(entry), 0, made, rel);
+    if (rr < 0) { return rr; }
     return 1;
 }
 
@@ -179,17 +165,17 @@ fn _hrb_reverse_adopt(entry): i64 {
     var pkg_dir = _fsl_path_dirname(abs_src);
     var manifest_path = _hrb_manifest_of(pkg_dir, source, target);
     if (manifest_path == 0) {
-        _hrb_eputs("  ! ");
-        _hrb_eputs(abs_tgt);
-        _hrb_eputs("  (two manifests in its package hold this row; nothing was changed)\n");
+        hapi_eputs("  ! ");
+        hapi_eputs(abs_tgt);
+        hapi_eputs("  (two manifests in its package hold this row; nothing was changed)\n");
         return 0 - 1;
     }
     # The rewrite would refuse a symlinked manifest (F-058) after the file
     # had moved: 2 of 3 steps. Refused first, so it is all or none.
     if (hapi_mfw_manifest_is_symlink(manifest_path) == 1) {
-        _hrb_eputs("  ! ");
-        _hrb_eputs(abs_tgt);
-        _hrb_eputs("  (its manifest is a symlink, which the rewrite would replace; nothing was changed)\n");
+        hapi_eputs("  ! ");
+        hapi_eputs(abs_tgt);
+        hapi_eputs("  (its manifest is a symlink, which the rewrite would replace; nothing was changed)\n");
         return 0 - 1;
     }
 
@@ -207,12 +193,12 @@ fn _hrb_reverse_adopt(entry): i64 {
         # Re-attach what we just broke so the world is at least
         # consistent with the trail again — byte for byte what was there.
         if (link_create(found, abs_tgt) < 0) {
-            _hrb_eputs("  ! ");
-            _hrb_eputs(abs_tgt);
-            _hrb_eputs("  (the file could not be moved back, and its link could not be put\n");
-            _hrb_eputs("    back either; the file is in the package at ");
-            _hrb_eputs(abs_src);
-            _hrb_eputs(")\n");
+            hapi_eputs("  ! ");
+            hapi_eputs(abs_tgt);
+            hapi_eputs("  (the file could not be moved back, and its link could not be put\n");
+            hapi_eputs("    back either; the file is in the package at ");
+            hapi_eputs(abs_src);
+            hapi_eputs(")\n");
         }
         return 0 - 1;
     }
@@ -223,20 +209,20 @@ fn _hrb_reverse_adopt(entry): i64 {
     if (mrc == 0 - HapiMfwRowNotFound) {
         # Manifest row already gone or never present. Filesystem
         # changes already committed; treat as warning-level.
-        _hrb_eputs("  ! ");
-        _hrb_eputs(abs_tgt);
-        _hrb_eputs("  (manifest row not found; filesystem reverted)\n");
+        hapi_eputs("  ! ");
+        hapi_eputs(abs_tgt);
+        hapi_eputs("  (manifest row not found; filesystem reverted)\n");
     } elif (mrc < 0) {
         # The row IS there and the rewrite failed (F-038). Through 1.1.0
         # this branch printed "manifest row not found" and the verb exited
         # 0, leaving a row whose source had just been moved out of the
         # package. The filesystem revert is real, so it is still recorded
         # below; the row is the user's to remove, and the exit says so.
-        _hrb_eputs("  ! ");
-        _hrb_eputs(abs_tgt);
-        _hrb_eputs("  (file restored, but its manifest row was NOT removed: ");
-        _hrb_eputs(hapi_mfw_err_msg(0 - mrc));
-        _hrb_eputs(")\n");
+        hapi_eputs("  ! ");
+        hapi_eputs(abs_tgt);
+        hapi_eputs("  (file restored, but its manifest row was NOT removed: ");
+        hapi_eputs(hapi_mfw_err_msg(0 - mrc));
+        hapi_eputs(")\n");
         row_left = 1;
     }
 
@@ -282,8 +268,8 @@ fn _hrb_manifest_of(pkg_dir, source, target): i64 {
                 var has = 0;
                 while (k < vec_len(links)) {
                     var l = vec_get(links, k);
-                    if (_hrb_cstr_eq(_fsl_str_to_cstr(hapi_link_source(l)), source) == 1
-                        && _hrb_cstr_eq(_fsl_str_to_cstr(hapi_link_target(l)), target) == 1) { has = 1; }
+                    if (hapi_cstr_eq(_fsl_str_to_cstr(hapi_link_source(l)), source) == 1
+                        && hapi_cstr_eq(_fsl_str_to_cstr(hapi_link_target(l)), target) == 1) { has = 1; }
                     k = k + 1;
                 }
                 if (has == 1) { hit = mp; hits = hits + 1; }
@@ -323,12 +309,12 @@ fn _hrb_from_line(e): i64 {
 # The ops a rollback reverses.
 fn _hrb_reversible(e): i64 {
     var op = hae_op(e);
-    if (_hrb_cstr_eq(op, "link") == 1) { return 1; }
+    if (hapi_cstr_eq(op, "link") == 1) { return 1; }
     # An op:unlink that retired a link already gone (F-078) changed
     # nothing on disk, so there is nothing to undo: the link was gone
     # before that run.
-    if (_hrb_cstr_eq(op, "unlink") == 1) { return 1 - hae_absent(e); }
-    if (_hrb_cstr_eq(op, "adopt") == 1) { return 1; }
+    if (hapi_cstr_eq(op, "unlink") == 1) { return 1 - hae_absent(e); }
+    if (hapi_cstr_eq(op, "adopt") == 1) { return 1; }
     return 0;
 }
 
@@ -357,8 +343,8 @@ fn _hrb_select(trail, steps, label, live, windows_out): i64 {
         var q = vec_len(trail) - 1;
         while (q >= 0 && newest < 0) {
             var eq = vec_get(trail, q);
-            if (_hrb_cstr_eq(hae_op(eq), "rollback-marker") == 1
-                && _hrb_cstr_eq(hae_label(eq), label) == 1) { newest = q; }
+            if (hapi_cstr_eq(hae_op(eq), "rollback-marker") == 1
+                && hapi_cstr_eq(hae_label(eq), label) == 1) { newest = q; }
             q = q - 1;
         }
     }
@@ -367,14 +353,14 @@ fn _hrb_select(trail, steps, label, live, windows_out): i64 {
         var e = vec_get(trail, i);
         var op = hae_op(e);
         var next = i - 1;
-        if (_hrb_cstr_eq(op, "rollback-marker") == 1) {
+        if (hapi_cstr_eq(op, "rollback-marker") == 1) {
             var f = _hrb_from_line(e);
             if (f > 0) {
                 while (next >= 0 && hae_lineno(vec_get(trail, next)) >= f) { next = next - 1; }
             } elif (steps > 0) {
                 if (in_window > 0) { windows = windows + 1; in_window = 0; }
                 if (windows == steps) { boundary = i; }
-            } elif (_hrb_cstr_eq(hae_label(e), label) == 1) {
+            } elif (hapi_cstr_eq(hae_label(e), label) == 1) {
                 if (i == newest) { boundary = i; } else { give_up = 1; }
             }
         } elif (_hrb_reversible(e) == 1) {
@@ -397,8 +383,8 @@ fn _hrb_label_anywhere(trail, label): i64 {
     var i = 0;
     while (i < vec_len(trail)) {
         var e = vec_get(trail, i);
-        if (_hrb_cstr_eq(hae_op(e), "rollback-marker") == 1
-            && _hrb_cstr_eq(hae_label(e), label) == 1) { return 1; }
+        if (hapi_cstr_eq(hae_op(e), "rollback-marker") == 1
+            && hapi_cstr_eq(hae_label(e), label) == 1) { return 1; }
         i = i + 1;
     }
     return 0;
@@ -420,20 +406,20 @@ fn _hrb_printable(s): i64 {
 # \u001b), so each is printed only in a shape hapi itself writes: a label
 # that passes the label rule, a ts that is printable.
 fn _hrb_say_boundary(trail, b): i64 {
-    if (b < 0) { _hrb_puts("the start of the trail"); return 0; }
+    if (b < 0) { hapi_puts("the start of the trail"); return 0; }
     var e = vec_get(trail, b);
     if (audit_label_ok(hae_label(e)) == 1) {
-        _hrb_puts("checkpoint `");
-        _hrb_puts(hae_label(e));
-        _hrb_puts("` on line ");
+        hapi_puts("checkpoint `");
+        hapi_puts(hae_label(e));
+        hapi_puts("` on line ");
     } else {
-        _hrb_puts("the checkpoint on line ");
+        hapi_puts("the checkpoint on line ");
     }
-    _hrb_puts(_har_itoa(hae_lineno(e)));
+    hapi_puts(hapi_itoa(hae_lineno(e)));
     if (hae_ts(e) != 0 && _hrb_printable(hae_ts(e)) == 1) {
-        _hrb_puts(" (");
-        _hrb_puts(hae_ts(e));
-        _hrb_puts(")");
+        hapi_puts(" (");
+        hapi_puts(hae_ts(e));
+        hapi_puts(")");
     }
     return 0;
 }
@@ -443,27 +429,27 @@ fn _hrb_say_boundary(trail, b): i64 {
 fn _hrb_report_unreached(trail, steps, label, windows): i64 {
     if (steps > 0) {
         if (windows == 0) {
-            _hrb_puts("nothing to roll back (every entry is already rolled back)\n");
+            hapi_puts("nothing to roll back (every entry is already rolled back)\n");
             return 0;
         }
-        _hrb_eputs("hapi: --steps ");
-        _hrb_eputs(_har_itoa(steps));
-        _hrb_eputs(" asks for more than the trail holds: ");
-        _hrb_eputs(_har_itoa(windows));
-        if (windows == 1) { _hrb_eputs(" step to roll back\n"); }
-        else { _hrb_eputs(" steps to roll back\n"); }
-        _hrb_eputs("  nothing was changed\n");
+        hapi_eputs("hapi: --steps ");
+        hapi_eputs(hapi_itoa(steps));
+        hapi_eputs(" asks for more than the trail holds: ");
+        hapi_eputs(hapi_itoa(windows));
+        if (windows == 1) { hapi_eputs(" step to roll back\n"); }
+        else { hapi_eputs(" steps to roll back\n"); }
+        hapi_eputs("  nothing was changed\n");
         return 1;
     }
     if (_hrb_label_anywhere(trail, label) == 1) {
-        _hrb_puts("nothing to roll back (checkpoint `");
-        _hrb_puts(label);
-        _hrb_puts("` is in a range already rolled back)\n");
+        hapi_puts("nothing to roll back (checkpoint `");
+        hapi_puts(label);
+        hapi_puts("` is in a range already rolled back)\n");
         return 0;
     }
-    _hrb_eputs("hapi: no checkpoint labelled `");
-    _hrb_eputs(label);
-    _hrb_eputs("` in the trail\n  nothing was changed\n");
+    hapi_eputs("hapi: no checkpoint labelled `");
+    hapi_eputs(label);
+    hapi_eputs("` in the trail\n  nothing was changed\n");
     return 1;
 }
 
@@ -475,23 +461,12 @@ fn cmd_rollback_run(steps, to_label): i64 {
     # interior line, is a conflict with the user's own history — surface
     # it rather than acting on a partial view. An ABSENT trail is still
     # Ok(empty): that is the first-run case, not a failure.
-    var tr_t, tr_v = audit_read_default_r();
-    if (is_err_result(tr_t) == 1) {
-        var trc = tr_v;
-        _hrb_eputs("hapi: ");
-        _hrb_eputs(hapi_ar_err_msg(trc));
-        if (trc == HapiArCorrupt) {
-            _hrb_eputs(" (line ");
-            _hrb_eputs(_har_itoa(audit_corrupt_line()));
-            _hrb_eputs(")");
-        }
-        _hrb_eputs("\n  refusing to act on a partial view of the trail\n");
-        return 1;
-    }
+    var tr_t, tr_v = audit_read_or_refuse("act");
+    if (is_err_result(tr_t) == 1) { return 1; }
     var trail = tr_v;
     var n = vec_len(trail);
     if (n == 0) {
-        _hrb_eputs("hapi: audit trail is empty — nothing to roll back\n");
+        hapi_eputs("hapi: audit trail is empty — nothing to roll back\n");
         return 0;
     }
 
@@ -504,13 +479,13 @@ fn cmd_rollback_run(steps, to_label): i64 {
         var marker = _hrb_find_marker(trail, n - 1);
         var start = marker + 1;
         if (start >= n) {
-            _hrb_puts("nothing to roll back (already at most recent marker)\n");
+            hapi_puts("nothing to roll back (already at most recent marker)\n");
             return 0;
         }
         var k = n - 1;
         while (k >= start) {
             var ek = vec_get(trail, k);
-            if (_hrb_cstr_eq(hae_op(ek), "unlink") == 0 || hae_absent(ek) == 0) { vec_push(idxs, k); }
+            if (hapi_cstr_eq(hae_op(ek), "unlink") == 0 || hae_absent(ek) == 0) { vec_push(idxs, k); }
             k = k - 1;
         }
         first = start;
@@ -521,9 +496,9 @@ fn cmd_rollback_run(steps, to_label): i64 {
         # Only --to gets here: a --steps boundary is counted only past a
         # window that holds a live entry, so its range is never empty.
         if (vec_len(idxs) == 0) {
-            _hrb_puts("nothing to roll back (already at checkpoint `");
-            _hrb_puts(to_label);
-            _hrb_puts("`)\n");
+            hapi_puts("nothing to roll back (already at checkpoint `");
+            hapi_puts(to_label);
+            hapi_puts("`)\n");
             return 0;
         }
         first = b + 1;
@@ -531,27 +506,20 @@ fn cmd_rollback_run(steps, to_label): i64 {
 
     # Prove the trail takes a write before reversing anything (F-055) —
     # the reversals append after they mutate, as `link` once did.
-    if (1 == 1) {                 # a dry run checks it too (F-094)
-        var pf_t, pf_v = audit_preflight_now_r();
-        if (is_err_result(pf_t) == 1) {
-            _hrb_eputs("hapi: audit trail is not writable; refusing to roll back\n  ");
-            _hrb_eputs(audit_trail_path_shown());
-            _hrb_eputs("\n  every hapi write must be auditable; nothing was changed\n");
-            return 1;
-        }
-    }
+    # A dry run checks it too (F-094).
+    if (audit_preflight_or_refuse("roll back") != 0) { return 1; }
 
     if (steps > 0 || to_label != 0) {
-        _hrb_puts("rolling back ");
+        hapi_puts("rolling back ");
         if (steps > 0) {
-            _hrb_puts(_har_itoa(steps));
-            if (steps == 1) { _hrb_puts(" step, to "); }
-            else { _hrb_puts(" steps, to "); }
+            hapi_puts(hapi_itoa(steps));
+            if (steps == 1) { hapi_puts(" step, to "); }
+            else { hapi_puts(" steps, to "); }
         } else {
-            _hrb_puts("to ");
+            hapi_puts("to ");
         }
         _hrb_say_boundary(trail, b);
-        _hrb_puts("\n");
+        hapi_puts("\n");
     }
 
     var applied = 0;
@@ -567,7 +535,7 @@ fn cmd_rollback_run(steps, to_label): i64 {
         var dr_suffix = "";
         if (hapi_dry_run() == 1) { dr_suffix = "; dry-run"; }
 
-        if (_hrb_cstr_eq(op, "link") == 1) {
+        if (hapi_cstr_eq(op, "link") == 1) {
             rc = _hrb_reverse_link(entry);
             if (rc < 0 - 1) {
                 _hrb_report_unwritten(entry, rc,
@@ -575,17 +543,17 @@ fn cmd_rollback_run(steps, to_label): i64 {
                 errored = errored + 1;
                 stop = 1;
             } elif (rc == 1) {
-                _hrb_puts("  - ");
-                _hrb_puts(hae_shown(hae_abs_target(entry)));
-                _hrb_puts("  (was link");
+                hapi_puts("  - ");
+                hapi_puts(hae_shown(hae_abs_target(entry)));
+                hapi_puts("  (was link");
                 # The file a --force replaced is not restored; say where
                 # its snapshot is (F-110).
                 if (hae_backup_path(entry) != 0) {
-                    _hrb_puts("; the file it replaced is in ");
-                    _hrb_puts(hae_shown(hae_backup_path(entry)));
+                    hapi_puts("; the file it replaced is in ");
+                    hapi_puts(hae_shown(hae_backup_path(entry)));
                 }
-                _hrb_puts(dr_suffix);
-                _hrb_puts(")\n");
+                hapi_puts(dr_suffix);
+                hapi_puts(")\n");
                 applied = applied + 1;
                 # The directories this link's creation made (1.4.0). Per
                 # entry is enough here: rollback runs newest first, so a
@@ -600,12 +568,12 @@ fn cmd_rollback_run(steps, to_label): i64 {
             } elif (rc == 0) {
                 skipped = skipped + 1;
             } else {
-                _hrb_eputs("  ! ");
-                _hrb_eputs(hae_shown(hae_abs_target(entry)));
-                _hrb_eputs("  (IO error reversing link)\n");
+                hapi_eputs("  ! ");
+                hapi_eputs(hae_shown(hae_abs_target(entry)));
+                hapi_eputs("  (IO error reversing link)\n");
                 errored = errored + 1;
             }
-        } elif (_hrb_cstr_eq(op, "unlink") == 1) {
+        } elif (hapi_cstr_eq(op, "unlink") == 1) {
             rc = _hrb_reverse_unlink(entry);
             if (rc < 0 - 1) {
                 _hrb_report_unwritten(entry, rc,
@@ -613,21 +581,21 @@ fn cmd_rollback_run(steps, to_label): i64 {
                 errored = errored + 1;
                 stop = 1;
             } elif (rc == 1) {
-                _hrb_puts("  + ");
-                _hrb_puts(hae_shown(hae_abs_target(entry)));
-                _hrb_puts("  (was unlink");
-                _hrb_puts(dr_suffix);
-                _hrb_puts(")\n");
+                hapi_puts("  + ");
+                hapi_puts(hae_shown(hae_abs_target(entry)));
+                hapi_puts("  (was unlink");
+                hapi_puts(dr_suffix);
+                hapi_puts(")\n");
                 applied = applied + 1;
             } elif (rc == 0) {
                 skipped = skipped + 1;
             } else {
-                _hrb_eputs("  ! ");
-                _hrb_eputs(hae_shown(hae_abs_target(entry)));
-                _hrb_eputs("  (IO error reversing unlink)\n");
+                hapi_eputs("  ! ");
+                hapi_eputs(hae_shown(hae_abs_target(entry)));
+                hapi_eputs("  (IO error reversing unlink)\n");
                 errored = errored + 1;
             }
-        } elif (_hrb_cstr_eq(op, "adopt") == 1) {
+        } elif (hapi_cstr_eq(op, "adopt") == 1) {
             rc = _hrb_reverse_adopt(entry);
             if (rc == 0 - 4) {
                 # Not "its row removed": that is the case above (F-083).
@@ -643,18 +611,18 @@ fn cmd_rollback_run(steps, to_label): i64 {
             }
             if (rc == 2) { errored = errored + 1; }
             if (rc == 1 || rc == 2) {
-                _hrb_puts("  ~ ");
-                _hrb_puts(hae_shown(hae_abs_target(entry)));
-                _hrb_puts("  (was adopt; file restored");
-                _hrb_puts(dr_suffix);
-                _hrb_puts(")\n");
+                hapi_puts("  ~ ");
+                hapi_puts(hae_shown(hae_abs_target(entry)));
+                hapi_puts("  (was adopt; file restored");
+                hapi_puts(dr_suffix);
+                hapi_puts(")\n");
                 applied = applied + 1;
             } elif (rc == 0) {
                 skipped = skipped + 1;
             } elif (rc == 0 - 1) {
-                _hrb_eputs("  ! ");
-                _hrb_eputs(hae_shown(hae_abs_target(entry)));
-                _hrb_eputs("  (IO error reversing adopt)\n");
+                hapi_eputs("  ! ");
+                hapi_eputs(hae_shown(hae_abs_target(entry)));
+                hapi_eputs("  (IO error reversing adopt)\n");
                 errored = errored + 1;
             }
         }
@@ -668,17 +636,17 @@ fn cmd_rollback_run(steps, to_label): i64 {
         x = x + 1;
     }
 
-    _hrb_puts("rolled back ");
+    hapi_puts("rolled back ");
     fmt_int(applied);
-    _hrb_puts(" / ");
+    hapi_puts(" / ");
     fmt_int(vec_len(idxs));
-    _hrb_puts(" entries");
+    hapi_puts(" entries");
     if (skipped > 0) {
-        _hrb_puts(" (");
+        hapi_puts(" (");
         fmt_int(skipped);
-        _hrb_puts(" already at expected state)");
+        hapi_puts(" already at expected state)");
     }
-    _hrb_puts("\n");
+    hapi_puts("\n");
 
     # Seal the window (F-056). With no marker the window is the whole
     # trail — including the entries a previous rollback appended — so a
@@ -699,11 +667,11 @@ fn cmd_rollback_run(steps, to_label): i64 {
         if (steps > 0 || to_label != 0) { seal = 1; }
     }
     if (seal == 1) {
-        var from = _har_itoa(hae_lineno(vec_get(trail, first)));
+        var from = hapi_itoa(hae_lineno(vec_get(trail, first)));
         var mk_t, mk_v = audit_append_marker_r(0, from);
         if (is_err_result(mk_t) == 1) {
-            _hrb_eputs("hapi: rolled back, but could not append the closing marker\n");
-            _hrb_eputs("  (a later rollback would re-reverse this run's entries)\n");
+            hapi_eputs("hapi: rolled back, but could not append the closing marker\n");
+            hapi_eputs("  (a later rollback would re-reverse this run's entries)\n");
             return 1;
         }
     }

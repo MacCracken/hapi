@@ -28,22 +28,18 @@ include "src/audit_reader.cyr"
 include "src/fs_link.cyr"
 include "src/dry_run.cyr"
 include "src/manifest.cyr"     # hapi_mf_parse_file_r, for a path given as a name
-
-fn _hul_puts(s): i64 { print(s, strlen(s)); return 0; }
-fn _hul_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+include "src/out.cyr"
 
 # Walk the trail; for the named package, build a vec of
 # "live" HapiAuditEntry pointers — those whose `target` has
 # a link entry not superseded by a later unlink entry for the
-# same target. Returns vec (possibly empty).
+# same target, or by another package's link or adopt of it
+# (F-079). Returns vec (possibly empty).
 fn _hul_live_entries_for(trail, pkg_cstr): i64 {
-    # Two-pass: walk forward, last-write-wins per target.
-    # We tag each entry's slot by absorbing "unlink" into a
-    # sentinel; final pass collects non-sentinel entries.
-    #
-    # Implementation: a parallel vec of "target -> entry-or-0".
-    # Small N (typical user has < 100 links per package), so
-    # linear search per target is fine.
+    # Walk forward, last write wins per target: a parallel pair of vecs,
+    # each target and its live entry. A user has < 100 links per package,
+    # so a linear search per target is fine. Removal keeps the order, so
+    # unlink's lines come out in trail order.
     var live_targets = vec_new();
     var live_entries = vec_new();
 
@@ -52,96 +48,45 @@ fn _hul_live_entries_for(trail, pkg_cstr): i64 {
     while (i < n) {
         var e = vec_get(trail, i);
         var ep = hae_pkg(e);
-        # Another package's later link or adopt of a target this one holds
-        # takes it over (F-079): `link --force B` over A's link. Through
-        # 1.7.0 A's entry stayed live, and A's unlink and prune then
-        # refused it as user-mutated, forever.
-        if (_har_cstr_eq(ep, pkg_cstr) == 0 && ep != 0) {
-            var top = hae_op(e);
-            var ttg = hae_abs_target(e);
-            if (ttg != 0 && (_har_cstr_eq(top, "link") == 1 || _har_cstr_eq(top, "adopt") == 1)) {
-                var tf = 0 - 1;
-                var tj = 0;
-                while (tj < vec_len(live_targets) && tf < 0) {
-                    if (_har_cstr_eq(vec_get(live_targets, tj), ttg) == 1) { tf = tj; }
-                    tj = tj + 1;
+        var op = hae_op(e);
+        var tgt = hae_abs_target(e);
+        if (ep != 0 && tgt != 0) {
+            var found = _hul_slot(live_targets, tgt);
+            if (hapi_cstr_eq(ep, pkg_cstr) == 0) {
+                # Another package's later link or adopt of a target this one
+                # holds takes it over (F-079): `link --force B` over A's link.
+                # Through 1.7.0 A's entry stayed live, and A's unlink and prune
+                # then refused it as user-mutated, forever.
+                if (found >= 0 && (hapi_cstr_eq(op, "link") == 1 || hapi_cstr_eq(op, "adopt") == 1)) {
+                    vec_remove(live_targets, found);
+                    vec_remove(live_entries, found);
                 }
-                if (tf >= 0) {
-                    var kt = vec_new();
-                    var ke = vec_new();
-                    var tk = 0;
-                    while (tk < vec_len(live_targets)) {
-                        if (tk != tf) {
-                            vec_push(kt, vec_get(live_targets, tk));
-                            vec_push(ke, vec_get(live_entries, tk));
-                        }
-                        tk = tk + 1;
-                    }
-                    live_targets = kt;
-                    live_entries = ke;
+            } elif (hapi_cstr_eq(op, "link") == 1) {
+                # A re-link of the same target replaces the earlier entry.
+                if (found >= 0) {
+                    vec_remove(live_targets, found);
+                    vec_remove(live_entries, found);
                 }
-            }
-        }
-        if (_har_cstr_eq(ep, pkg_cstr) == 1) {
-            var op = hae_op(e);
-            var tgt = hae_abs_target(e);
-            if (tgt != 0) {
-                # Find existing slot for this target
-                var found = 0 - 1;
-                var j = 0;
-                while (j < vec_len(live_targets) && found < 0) {
-                    if (_har_cstr_eq(vec_get(live_targets, j), tgt) == 1) { found = j; }
-                    j = j + 1;
-                }
-                if (_har_cstr_eq(op, "link") == 1) {
-                    if (found < 0) {
-                        vec_push(live_targets, tgt);
-                        vec_push(live_entries, e);
-                    } else {
-                        # Overwrite — re-link of the same target.
-                        # vec doesn't expose set; we mark + clean later.
-                        # Simpler: just leave the old, append the new,
-                        # filter on collection. But that requires uniq.
-                        # Actually: a fresh link entry overrides the
-                        # previous one; remove the previous from both
-                        # vecs by re-creating. Cheap given the small
-                        # N expected.
-                        var nt = vec_new();
-                        var ne = vec_new();
-                        var k = 0;
-                        while (k < vec_len(live_targets)) {
-                            if (k != found) {
-                                vec_push(nt, vec_get(live_targets, k));
-                                vec_push(ne, vec_get(live_entries, k));
-                            }
-                            k = k + 1;
-                        }
-                        vec_push(nt, tgt);
-                        vec_push(ne, e);
-                        live_targets = nt;
-                        live_entries = ne;
-                    }
-                } elif (_har_cstr_eq(op, "unlink") == 1) {
-                    if (found >= 0) {
-                        var nt = vec_new();
-                        var ne = vec_new();
-                        var k = 0;
-                        while (k < vec_len(live_targets)) {
-                            if (k != found) {
-                                vec_push(nt, vec_get(live_targets, k));
-                                vec_push(ne, vec_get(live_entries, k));
-                            }
-                            k = k + 1;
-                        }
-                        live_targets = nt;
-                        live_entries = ne;
-                    }
-                }
+                vec_push(live_targets, tgt);
+                vec_push(live_entries, e);
+            } elif (hapi_cstr_eq(op, "unlink") == 1 && found >= 0) {
+                vec_remove(live_targets, found);
+                vec_remove(live_entries, found);
             }
         }
         i = i + 1;
     }
     return live_entries;
+}
+
+# The slot of `tgt` in `targets`, or -1.
+fn _hul_slot(targets, tgt): i64 {
+    var j = 0;
+    while (j < vec_len(targets)) {
+        if (hapi_cstr_eq(vec_get(targets, j), tgt) == 1) { return j; }
+        j = j + 1;
+    }
+    return 0 - 1;
 }
 
 # Is `current` a symlink text `hapi link` wrote for this audit entry?
@@ -185,9 +130,18 @@ fn _hul_remove_one(entry): i64 {
     if (_hul_is_ours(entry, current) == 0) {
         return 1;
     }
+    return hul_remove_recorded(entry, current);
+}
+
+# Remove the link at the entry's abs_target, whose text is `current`, and
+# record its op:unlink. 0 removed (or, under --dry-run, would be); -1 the
+# unlink(2) failed; -2 the trail refused the entry and the link was put
+# back; -3 it could not be put back (F-061). unlink, prune and rollback
+# share it: rollback had its own copy (finding 162).
+fn hul_remove_recorded(entry, current): i64 {
     if (hapi_dry_run() == 1) { return 0; }
-    var urc = hapi_unlink(abs_tgt);
-    if (urc < 0) { return 0 - 1; }
+    var abs_tgt = hae_abs_target(entry);
+    if (hapi_unlink(abs_tgt) < 0) { return 0 - 1; }
     # The entry says which shape it removed (1.6.0), so reversing it
     # re-creates the same one.
     var ar_t, ar_v = audit_append_unlink_shaped_r(
@@ -216,12 +170,12 @@ fn _hul_adopted_live(trail, pkg): i64 {
     while (i < vec_len(trail)) {
         var e = vec_get(trail, i);
         var tg = hae_abs_target(e);
-        if (tg != 0 && _har_cstr_eq(hae_pkg(e), pkg) == 1) {
+        if (tg != 0 && hapi_cstr_eq(hae_pkg(e), pkg) == 1) {
             var op = hae_op(e);
             var f = 0 - 1;
             var j = 0;
             while (j < vec_len(tgts) && f < 0) {
-                if (_har_cstr_eq(vec_get(tgts, j), tg) == 1) { f = j; }
+                if (hapi_cstr_eq(vec_get(tgts, j), tg) == 1) { f = j; }
                 j = j + 1;
             }
             if (f < 0) { vec_push(tgts, tg); vec_push(ops, op); }
@@ -232,7 +186,7 @@ fn _hul_adopted_live(trail, pkg): i64 {
     var n = 0;
     var k = 0;
     while (k < vec_len(ops)) {
-        if (_har_cstr_eq(vec_get(ops, k), "adopt") == 1) { n = n + 1; }
+        if (hapi_cstr_eq(vec_get(ops, k), "adopt") == 1) { n = n + 1; }
         k = k + 1;
     }
     return n;
@@ -278,11 +232,9 @@ fn hul_report_unwritten(entry, rc): i64 {
       "the link is removed and the trail still calls it live");
 }
 
-fn _hul_cstr_eq(a, b): i64 { return hapi_cstr_eq(a, b); }
-
 fn cmd_unlink(pkg_arg): i64 {
     if (pkg_arg == 0) {
-        _hul_eputs("usage: hapi unlink <package-name>\n");
+        hapi_eputs("usage: hapi unlink <package-name>\n");
         return 2;
     }
 
@@ -290,22 +242,11 @@ fn cmd_unlink(pkg_arg): i64 {
     # interior line, is a conflict with the user's own history — surface
     # it rather than acting on a partial view. An ABSENT trail is still
     # Ok(empty): that is the first-run case, not a failure.
-    var tr_t, tr_v = audit_read_default_r();
-    if (is_err_result(tr_t) == 1) {
-        var trc = tr_v;
-        _hul_eputs("hapi: ");
-        _hul_eputs(hapi_ar_err_msg(trc));
-        if (trc == HapiArCorrupt) {
-            _hul_eputs(" (line ");
-            _hul_eputs(_har_itoa(audit_corrupt_line()));
-            _hul_eputs(")");
-        }
-        _hul_eputs("\n  refusing to act on a partial view of the trail\n");
-        return 1;
-    }
+    var tr_t, tr_v = audit_read_or_refuse("act");
+    if (is_err_result(tr_t) == 1) { return 1; }
     var trail = tr_v;
     if (vec_len(trail) == 0) {
-        _hul_eputs("hapi: audit trail is empty — nothing to unlink\n");
+        hapi_eputs("hapi: audit trail is empty — nothing to unlink\n");
         return 0;
     }
 
@@ -320,27 +261,27 @@ fn cmd_unlink(pkg_arg): i64 {
         if (nl > 5 && memeq(pkg_arg + nl - 5, ".cyml", 5) == 1) { mp = pkg_arg; }
         if (fsl_is_regular(mp) == 1) {
             var mt, mv = hapi_mf_parse_file_r(mp);
-            if (is_ok(mt) == 1 && _har_cstr_eq(_fsl_str_to_cstr(hapi_mf_name(mv)), pkg_arg) == 0) {
-                _hul_eputs("hapi: unlink takes a package's name, not its path: `");
-                _hul_eputs(pkg_arg);
-                _hul_eputs("` holds package `");
-                _hul_eputs(_fsl_str_to_cstr(hapi_mf_name(mv)));
-                _hul_eputs("`\n  run: hapi unlink ");
-                _hul_eputs(_fsl_str_to_cstr(hapi_mf_name(mv)));
-                _hul_eputs("\n");
+            if (is_ok(mt) == 1 && hapi_cstr_eq(_fsl_str_to_cstr(hapi_mf_name(mv)), pkg_arg) == 0) {
+                hapi_eputs("hapi: unlink takes a package's name, not its path: `");
+                hapi_eputs(pkg_arg);
+                hapi_eputs("` holds package `");
+                hapi_eputs(_fsl_str_to_cstr(hapi_mf_name(mv)));
+                hapi_eputs("`\n  run: hapi unlink ");
+                hapi_eputs(_fsl_str_to_cstr(hapi_mf_name(mv)));
+                hapi_eputs("\n");
                 return 1;
             }
         }
-        _hul_puts("no live links for `");
-        _hul_puts(hae_shown(pkg_arg));
-        _hul_puts("` in the audit trail\n");
+        hapi_puts("no live links for `");
+        hapi_puts(hae_shown(pkg_arg));
+        hapi_puts("` in the audit trail\n");
         # Links an adopt made are rollback's to reverse (ADR 0004); list
         # counts them, so say where they went (F-106).
         var adopted = _hul_adopted_live(trail, pkg_arg);
         if (adopted > 0) {
-            _hul_puts("  (");
+            hapi_puts("  (");
             fmt_int(adopted);
-            _hul_puts(" of its links came from `hapi adopt`; `hapi rollback` reverses an adopt)\n");
+            hapi_puts(" of its links came from `hapi adopt`; `hapi rollback` reverses an adopt)\n");
         }
         return 0;
     }
@@ -349,15 +290,8 @@ fn cmd_unlink(pkg_arg): i64 {
     # Through 1.1.0 only `link` checked; unlink removed each symlink and
     # THEN appended, so a torn tail or an unwritable trail left every link
     # gone and none recorded — "unlinked 0 / 3", the links deleted anyway.
-    if (1 == 1) {                 # a dry run checks it too (F-094)
-        var pf_t, pf_v = audit_preflight_now_r();
-        if (is_err_result(pf_t) == 1) {
-            _hul_eputs("hapi: audit trail is not writable; refusing to unlink\n  ");
-            _hul_eputs(audit_trail_path_shown());
-            _hul_eputs("\n  every hapi write must be auditable; nothing was changed\n");
-            return 1;
-        }
-    }
+    # A dry run checks it too (F-094).
+    if (audit_preflight_or_refuse("unlink") != 0) { return 1; }
 
     var removed = 0;
     var absent = 0;
@@ -380,11 +314,11 @@ fn cmd_unlink(pkg_arg): i64 {
             # wrote nothing, and the entry stayed live: every later unlink
             # "removed" it again and `list` counted it forever. It is
             # retired now, with an op:unlink rollback will not reverse.
-            _hul_puts("  = ");
-            _hul_puts(hae_shown(abs_tgt));
-            _hul_puts("  (already absent");
-            if (hapi_dry_run() == 1) { _hul_puts("; dry-run"); }
-            _hul_puts(")\n");
+            hapi_puts("  = ");
+            hapi_puts(hae_shown(abs_tgt));
+            hapi_puts("  (already absent");
+            if (hapi_dry_run() == 1) { hapi_puts("; dry-run"); }
+            hapi_puts(")\n");
             absent = absent + 1;
             if (hapi_dry_run() == 0) {
                 var ab_t, ab_v = hul_retire(entry);
@@ -395,10 +329,10 @@ fn cmd_unlink(pkg_arg): i64 {
                 }
             }
         } elif (rc == 0) {
-            _hul_puts("  - ");
-            _hul_puts(hae_shown(abs_tgt));
-            if (hapi_dry_run() == 1) { _hul_puts("  (dry-run)"); }
-            _hul_puts("\n");
+            hapi_puts("  - ");
+            hapi_puts(hae_shown(abs_tgt));
+            if (hapi_dry_run() == 1) { hapi_puts("  (dry-run)"); }
+            hapi_puts("\n");
             removed = removed + 1;
             if (hapi_dry_run() == 0) {
                 vec_push(gone_tgts, abs_tgt);
@@ -406,35 +340,35 @@ fn cmd_unlink(pkg_arg): i64 {
                 hul_remove_created_dirs_of(abs_tgt, hae_created_dir(entry));
             }
         } elif (rc == 1) {
-            _hul_eputs("  ! ");
-            _hul_eputs(hae_shown(abs_tgt));
-            _hul_eputs("  (user-mutated; skipped)\n");
+            hapi_eputs("  ! ");
+            hapi_eputs(hae_shown(abs_tgt));
+            hapi_eputs("  (user-mutated; skipped)\n");
             refused = refused + 1;
         } else {
-            _hul_eputs("  ! ");
-            _hul_eputs(hae_shown(abs_tgt));
-            _hul_eputs("  (IO error)\n");
+            hapi_eputs("  ! ");
+            hapi_eputs(hae_shown(abs_tgt));
+            hapi_eputs("  (IO error)\n");
             errored = errored + 1;
         }
         i = i + 1;
     }
     hul_remove_created_dirs(gone_tgts, gone_dirs);
 
-    _hul_puts("unlinked ");
+    hapi_puts("unlinked ");
     fmt_int(removed);
-    _hul_puts(" / ");
+    hapi_puts(" / ");
     fmt_int(nlive);
     if (absent > 0) {
-        _hul_puts(" (");
+        hapi_puts(" (");
         fmt_int(absent);
-        _hul_puts(" already absent)");
+        hapi_puts(" already absent)");
     }
     if (refused > 0) {
-        _hul_puts(" (");
+        hapi_puts(" (");
         fmt_int(refused);
-        _hul_puts(" refused)");
+        hapi_puts(" refused)");
     }
-    _hul_puts("\n");
+    hapi_puts("\n");
     if (refused > 0 || errored > 0) { return 1; }
     return 0;
 }

@@ -312,6 +312,9 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   `[package].version` = `${file:VERSION}`, so `VERSION` is the only
   place the number lives). Nothing under `src/cmd/` includes it: the
   dispatcher depends on the commands, not the reverse.
+- `src/out.cyr` — the one copy of `hapi_puts`, `hapi_eputs`,
+  `hapi_cstr_eq` and `hapi_itoa` (1.7.1). Through 1.7.0 eleven modules
+  had their own print pair and seven their own comparator. A leaf.
 - `src/dry_run.cyr` — owns the process-wide `_hapi_dry_run` flag
   (`hapi_set_dry_run(0|1)` / `hapi_dry_run()`), which every mutating
   cmd checks before its first syscall / audit write. A leaf since
@@ -397,6 +400,19 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   scratch directory). `cyrius test` runs it on x86_64 and aarch64; the agnos
   smoke builds it with `--agnos` and runs it under mirshi. Absolute
   paths only, no chmod, no environment — what an agnos run allows.
+  Both suites take their shared helpers from `tests/helpers.cyr` (1.7.1).
+- `src/test.cyr` — `cyrius test` runs it first (`[build] test`): the
+  binary's module set, and each example manifest parsed, hashed and
+  proven by `fmt`.
+- `tests/hapi.fcyr` — `cyrius fuzz`: 20,000 deterministic mutations of
+  three seed manifests. A strict parse accepts nothing the lenient one
+  refuses; for each manifest fmt can format, its proof holds, a second
+  pass changes nothing, and the hash stays. A canonicalizer that writes
+  one stray byte fails it.
+- `tests/hapi.bcyr` — `cyrius bench`: a 100-row parse (~280 µs), its
+  hash (~275 µs), a lexical normalize (~0.6 µs), and the warm run's
+  trail search over 150 KB (~75 µs). Through 1.7.0 the fuzz and bench
+  tiers and `src/test.cyr` ran nothing of hapi's.
 
 ### Harnesses
 

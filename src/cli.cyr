@@ -43,6 +43,7 @@ include "src/cmd/sync.cyr"
 include "src/cmd/fmt.cyr"
 include "src/cap.cyr"
 include "src/backup.cyr"
+include "src/out.cyr"
 
 # Verb ids. cmdit hands them out in registration order, so a new verb (`fmt`
 # at 1.7.0) goes at the END: inserting one anywhere else renumbers every verb
@@ -126,28 +127,30 @@ fn hapi_print_usage(): i64 {
 # strlen-based so the length cannot drift from the literal — the
 # hand-counted eprints this replaces were one byte long and wrote a
 # stray NUL to stderr (F-060 was the last of them).
-fn _hapi_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
 
 fn _hapi_missing_value(flag, kind): i64 {
-    _hapi_eputs("hapi: ");
-    _hapi_eputs(flag);
-    _hapi_eputs(" requires a ");
-    _hapi_eputs(kind);
-    _hapi_eputs(" argument (a value starting with `-` must be spelled `./-name`)\n");
+    hapi_eputs("hapi: ");
+    hapi_eputs(flag);
+    hapi_eputs(" requires a ");
+    hapi_eputs(kind);
+    hapi_eputs(" argument (a value starting with `-` must be spelled `./-name`)\n");
     return 0;
 }
 
 # The one message for a missing or unusable --steps / --to / --label value
 # (1.5.0). Unlike --root's, it gives no `./-name` advice: these are not paths.
+# `flag` is named whole: through 1.7.0 its third byte was sniffed for the
+# `s` of --steps, which any later flag starting with `s` would match
+# (finding 163).
 fn _hapi_bad_value(flag): i64 {
-    _hapi_eputs("hapi: ");
-    _hapi_eputs(flag);
-    if (load8(flag + 2) == 115) {    # --steps
-        _hapi_eputs(" takes a whole number from 1 to 999999999\n");
+    hapi_eputs("hapi: ");
+    hapi_eputs(flag);
+    if (hapi_cstr_eq(flag, "--steps") == 1) {
+        hapi_eputs(" takes a whole number from 1 to 999999999\n");
         return 0;
     }
-    _hapi_eputs(" takes a label: 1 to 64 characters from A-Z a-z 0-9 . _ -,\n");
-    _hapi_eputs("  not starting with -\n");
+    hapi_eputs(" takes a label: 1 to 64 characters from A-Z a-z 0-9 . _ -,\n");
+    hapi_eputs("  not starting with -\n");
     return 0;
 }
 
@@ -174,7 +177,7 @@ fn _hapi_values_fit(vh, idx, flag): i64 {
     while (i < n) {
         var v = cmdit_repeat_get(vh, idx, i);
         var ok = 0;
-        if (load8(flag + 2) == 115) {
+        if (hapi_cstr_eq(flag, "--steps") == 1) {
             if (_hapi_steps_value(v) > 0) { ok = 1; }
         } else {
             ok = audit_label_ok(v);
@@ -191,28 +194,28 @@ fn _hapi_values_fit(vh, idx, flag): i64 {
 # reversed the ENTIRE visible trail at exit 0, and `hapi link A B`
 # reported complete success having linked only A (F-013).
 fn _hapi_extra_arg(verb, arg): i64 {
-    _hapi_eputs("hapi: unexpected argument for `");
-    _hapi_eputs(verb);
-    _hapi_eputs("`: ");
-    _hapi_eputs(arg);
-    _hapi_eputs("\n");
+    hapi_eputs("hapi: unexpected argument for `");
+    hapi_eputs(verb);
+    hapi_eputs("`: ");
+    hapi_eputs(arg);
+    hapi_eputs("\n");
     return 0;
 }
 
 # Print a stock "unexpected flag for this verb" error.
 fn _hapi_unexpected_flag(verb, flag): i64 {
-    _hapi_eputs("hapi: unexpected flag for `");
-    _hapi_eputs(verb);
-    _hapi_eputs("`: ");
-    _hapi_eputs(flag);
-    _hapi_eputs("\n");
+    hapi_eputs("hapi: unexpected flag for `");
+    hapi_eputs(verb);
+    hapi_eputs("`: ");
+    hapi_eputs(flag);
+    hapi_eputs("\n");
     return 0;
 }
 
 fn _hapi_unknown_command(word): i64 {
-    _hapi_eputs("hapi: unknown command: ");
-    _hapi_eputs(word);
-    _hapi_eputs("\n");
+    hapi_eputs("hapi: unknown command: ");
+    hapi_eputs(word);
+    hapi_eputs("\n");
     hapi_print_usage();
     return 2;
 }
@@ -223,16 +226,16 @@ fn _hapi_unknown_command(word): i64 {
 # (F-051).
 fn _hapi_apply_root(value): i64 {
     if (strlen(value) == 0) {
-        _hapi_eputs("hapi: --root requires a path argument\n");
+        hapi_eputs("hapi: --root requires a path argument\n");
         return 2;
     }
     var cr_t, cr_v = cap_check_root_r(value);
     if (is_err_result(cr_t) == 1) {
         var code = cr_v;
         var msg = hapi_cap_err_msg(code);
-        _hapi_eputs("hapi: ");
-        _hapi_eputs(msg);
-        _hapi_eputs("\n");
+        hapi_eputs("hapi: ");
+        hapi_eputs(msg);
+        hapi_eputs("\n");
         return 1;
     }
     var abs_root = cr_v;
@@ -392,14 +395,14 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     if (_hapi_values_fit(vh, f_to, "--to") == 0) { return 2; }
     if (_hapi_values_fit(vh, f_label, "--label") == 0) { return 2; }
     if (cmdit_repeat_count(vh, f_steps) > 0 && cmdit_repeat_count(vh, f_to) > 0) {
-        _hapi_eputs("hapi: `rollback` takes --steps or --to, not both\n");
+        hapi_eputs("hapi: `rollback` takes --steps or --to, not both\n");
         return 2;
     }
     # On sync, --force only lifts --prune's limit; alone it would read as
     # link's "overwrite", which sync never does.
     if (v == HAPI_V_SYNC && cmdit_get_bool(vh, f_force) == 1 && cmdit_get_bool(vh, f_prune) == 0) {
-        _hapi_eputs("hapi: `sync --force` needs `--prune`: on sync it only lifts prune's limit,\n");
-        _hapi_eputs("  and sync never overwrites a conflict (that is `hapi link --force`)\n");
+        hapi_eputs("hapi: `sync --force` needs `--prune`: on sync it only lifts prune's limit,\n");
+        hapi_eputs("  and sync never overwrites a conflict (that is `hapi link --force`)\n");
         return 2;
     }
 
@@ -418,12 +421,12 @@ fn _hapi_run_verb(h, argc, argv): i64 {
         # relative one is made absolute here, once — agnos, with no cwd,
         # failed it only after 999 probes, under a made-up `-999` name.
         if (strlen(backup) == 0) {
-            _hapi_eputs("hapi: --backup-to needs a directory, not an empty value\n");
+            hapi_eputs("hapi: --backup-to needs a directory, not an empty value\n");
             return 2;
         }
         var babs = fsl_to_absolute(backup);
         if (babs == 0) {
-            _hapi_eputs("hapi: cannot resolve a relative --backup-to here; pass an absolute path\n");
+            hapi_eputs("hapi: cannot resolve a relative --backup-to here; pass an absolute path\n");
             return 1;
         }
         hapi_set_backup_dir(babs);
@@ -436,7 +439,7 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     while (pi < 2) {
         var pv = cmdit_positional(vh, pi);
         if (pv != 0 && strlen(pv) == 0) {
-            _hapi_eputs("hapi: an empty argument is not a path or a package name\n");
+            hapi_eputs("hapi: an empty argument is not a path or a package name\n");
             return 2;
         }
         pi = pi + 1;

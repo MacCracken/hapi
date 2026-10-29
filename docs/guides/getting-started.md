@@ -6,7 +6,7 @@
 cyrius deps                            # resolve stdlib
 cyrius build src/main.cyr build/hapi   # compile
 ./build/hapi --help                    # see the verb set
-cyrius test                            # run tests/*.tcyr
+cyrius test                            # run src/test.cyr, then tests/*.tcyr
 ```
 
 ## Layout
@@ -15,6 +15,8 @@ cyrius test                            # run tests/*.tcyr
 - `src/cli.cyr` — the command line: verb dispatch and each verb's
   flags (cmdit), and the usage text. No command includes it.
 - `src/dry_run.cyr` — the process-wide `--dry-run` flag the commands read
+- `src/out.cyr` — `hapi_puts` / `hapi_eputs` / `hapi_cstr_eq` / `hapi_itoa`,
+  the one copy every module prints and compares with (1.7.1)
 - `src/absolute.cyr` — the process-wide `--absolute` flag (1.6.0)
 - `src/cmd/{link,unlink,adopt,list,sync,status,rollback,checkpoint,check,inspect,fmt}.cyr` —
   one module per verb
@@ -26,8 +28,16 @@ cyrius test                            # run tests/*.tcyr
 - `src/fs_link.cyr` — symlink primitives + path resolution
 - `src/cap.cyr` — `--root` capability check
 - `src/backup.cyr` — `--backup-to` pre-`--force` snapshots
-- `tests/hapi.{tcyr,bcyr,fcyr}` — tests / benchmarks / fuzz
+- `tests/hapi.tcyr` — the main suite
+- `tests/hapi.fcyr` — `cyrius fuzz`: 20,000 mutated manifests through the
+  parser and `fmt`'s canonical form (1.7.1)
+- `tests/hapi.bcyr` — `cyrius bench`: parsing, hashing, normalizing and
+  the trail search, in process; the whole-`sync` harness is in
+  `docs/benchmarks.md`
+- `src/test.cyr` — `cyrius test` runs it first: the binary's module set,
+  and the example manifests checked (1.7.1)
 - `tests/agnos.tcyr` — the target-neutral suite, also built for agnos
+- `tests/helpers.cyr` — the helpers both suites share (1.7.1)
 - `tests/scratch.cyr` — records each suite's scratch directories under
   `/tmp` and removes them when the run ends (1.7.1)
 

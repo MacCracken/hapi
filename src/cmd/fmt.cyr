@@ -28,9 +28,7 @@ include "src/manifest.cyr"
 include "src/manifest_write.cyr"
 include "src/fs_link.cyr"
 include "src/dry_run.cyr"
-
-fn _hfm_puts(s): i64 { print(s, strlen(s)); return 0; }
-fn _hfm_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
+include "src/out.cyr"
 
 # Same resolver as status / check — a *.cyml path or a package directory.
 fn _hfm_resolve_manifest(arg): i64 { return fsl_manifest_of_arg(arg); }
@@ -42,17 +40,17 @@ fn _hfm_print_drops(drops, to_err, tail): i64 {
         var d = vec_get(drops, i);
         var line = "  line ";
         if (to_err == 1) {
-            _hfm_eputs(line);
+            hapi_eputs(line);
             fmt_int_fd(2, hapi_mf_drop_line(d));
-            _hfm_eputs(": ");
-            _hfm_eputs(hapi_mf_drop_what(d));
-            _hfm_eputs(tail);
+            hapi_eputs(": ");
+            hapi_eputs(hapi_mf_drop_what(d));
+            hapi_eputs(tail);
         } else {
-            _hfm_puts(line);
+            hapi_puts(line);
             fmt_int(hapi_mf_drop_line(d));
-            _hfm_puts(": ");
-            _hfm_puts(hapi_mf_drop_what(d));
-            _hfm_puts(tail);
+            hapi_puts(": ");
+            hapi_puts(hapi_mf_drop_what(d));
+            hapi_puts(tail);
         }
         i = i + 1;
     }
@@ -63,14 +61,12 @@ fn cmd_fmt(pkg_arg): i64 { return cmd_fmt_run(pkg_arg, 0, 0); }
 
 fn cmd_fmt_run(pkg_arg, check, force): i64 {
     if (pkg_arg == 0) {
-        _hfm_eputs("usage: hapi fmt <package-dir|hapi.cyml> [--check] [--force]\n");
+        hapi_eputs("usage: hapi fmt <package-dir|hapi.cyml> [--check] [--force]\n");
         return 2;
     }
     var path = _hfm_resolve_manifest(pkg_arg);
     if (path == 0) {
-        _hfm_eputs("hapi: cannot resolve a relative package path — the working\n");
-        _hfm_eputs("  directory is not knowable on this target. Pass an absolute\n");
-        _hfm_eputs("  path, or set PWD.\n");
+        hapi_refuse_unknown_cwd();
         return 1;
     }
 
@@ -78,11 +74,11 @@ fn cmd_fmt_run(pkg_arg, check, force): i64 {
     # manifest with a private copy (F-058). --dry-run answers as the real
     # run would; --check only reads, so it may look through the link.
     if (check == 0 && hapi_mfw_manifest_is_symlink(path) == 1) {
-        _hfm_eputs("hapi: ");
-        _hfm_eputs(hapi_mfw_err_msg(HapiMfwManifestIsSymlink));
-        _hfm_eputs(" (");
-        _hfm_eputs(path);
-        _hfm_eputs(")\n");
+        hapi_eputs("hapi: ");
+        hapi_eputs(hapi_mfw_err_msg(HapiMfwManifestIsSymlink));
+        hapi_eputs(" (");
+        hapi_eputs(path);
+        hapi_eputs(")\n");
         return 1;
     }
 
@@ -92,9 +88,9 @@ fn cmd_fmt_run(pkg_arg, check, force): i64 {
     if (writing == 1) {
         lk = manifest_lock(path);
         if (lk < 0) {
-            _hfm_eputs("hapi: could not lock the package directory of ");
-            _hfm_eputs(path);
-            _hfm_eputs("\n");
+            hapi_eputs("hapi: could not lock the package directory of ");
+            hapi_eputs(path);
+            hapi_eputs("\n");
             return 1;
         }
     }
@@ -108,11 +104,11 @@ fn _hfm_locked(path, check, force, writing): i64 {
     var len = 0;
     var buf = manifest_read(path, &len);
     if (buf == 0) {
-        _hfm_eputs("hapi: ");
-        _hfm_eputs(hapi_mfw_err_msg(HapiMfwReadFailed));
-        _hfm_eputs(" (");
-        _hfm_eputs(path);
-        _hfm_eputs(")\n");
+        hapi_eputs("hapi: ");
+        hapi_eputs(hapi_mfw_err_msg(HapiMfwReadFailed));
+        hapi_eputs(" (");
+        hapi_eputs(path);
+        hapi_eputs(")\n");
         return 1;
     }
     var sep = manifest_body_start(buf, len);
@@ -122,28 +118,24 @@ fn _hfm_locked(path, check, force, writing): i64 {
 
     var f_t, f_v = hapi_mf_format_r(buf, hlen, crlf);
     if (is_err_result(f_t) == 1) {
-        _hfm_eputs("hapi: ");
-        _hfm_eputs(hapi_mf_err_msg(f_v));
-        _hfm_eputs(" (");
-        _hfm_eputs(path);
-        _hfm_eputs(")\n");
+        hapi_mf_report_err(f_v, path);
         return 1;
     }
     var f = f_v;
     if (hapi_fmt_backslash(f) != 0) {
-        _hfm_eputs("hapi: ");
-        _hfm_eputs(hapi_fmt_backslash(f));
-        _hfm_eputs(" holds a backslash, which formatting would escape again,\n");
-        _hfm_eputs("  changing the value and the manifest's hash; nothing was changed (");
-        _hfm_eputs(path);
-        _hfm_eputs(")\n");
+        hapi_eputs("hapi: ");
+        hapi_eputs(hapi_fmt_backslash(f));
+        hapi_eputs(" holds a backslash, which formatting would escape again,\n");
+        hapi_eputs("  changing the value and the manifest's hash; nothing was changed (");
+        hapi_eputs(path);
+        hapi_eputs(")\n");
         return 1;
     }
     if (hapi_fmt_proven(f) == 0) {
-        _hfm_eputs("hapi: the formatted header would not read back as this manifest;\n");
-        _hfm_eputs("  nothing was changed (");
-        _hfm_eputs(path);
-        _hfm_eputs(")\n");
+        hapi_eputs("hapi: the formatted header would not read back as this manifest;\n");
+        hapi_eputs("  nothing was changed (");
+        hapi_eputs(path);
+        hapi_eputs(")\n");
         return 1;
     }
 
@@ -165,48 +157,48 @@ fn _hfm_locked(path, check, force, writing): i64 {
     }
 
     if (pos == len && memeq(next, buf, len) == 1) {
-        _hfm_puts(path);
-        _hfm_puts(": already formatted\n");
+        hapi_puts(path);
+        hapi_puts(": already formatted\n");
         return 0;
     }
     if (check == 1) {
-        _hfm_puts(path);
-        _hfm_puts(": not formatted\n");
+        hapi_puts(path);
+        hapi_puts(": not formatted\n");
         return 1;
     }
 
     var drops = hapi_fmt_drops(f);
     if (vec_len(drops) > 0 && force == 0) {
-        _hfm_eputs("hapi: formatting ");
-        _hfm_eputs(path);
-        _hfm_eputs(" would drop what its canonical form has no place for:\n");
+        hapi_eputs("hapi: formatting ");
+        hapi_eputs(path);
+        hapi_eputs(" would drop what its canonical form has no place for:\n");
         _hfm_print_drops(drops, 1, "\n");
-        _hfm_eputs("  (rerun with --force to drop them; nothing was changed)\n");
+        hapi_eputs("  (rerun with --force to drop them; nothing was changed)\n");
         return 1;
     }
 
     if (writing == 0) {
         print(out, on);
         if (vec_len(drops) > 0) { _hfm_print_drops(drops, 0, "  (would drop)\n"); }
-        _hfm_puts("would format ");
-        _hfm_puts(path);
-        if (sep >= 0) { _hfm_puts(", keeping its body"); }
-        _hfm_puts("  (dry-run)\n");
+        hapi_puts("would format ");
+        hapi_puts(path);
+        if (sep >= 0) { hapi_puts(", keeping its body"); }
+        hapi_puts("  (dry-run)\n");
         return 0;
     }
 
     var wrc = manifest_commit(path, next, pos);
     if (wrc < 0) {
-        _hfm_eputs("hapi: ");
-        _hfm_eputs(hapi_mfw_err_msg(0 - wrc));
-        _hfm_eputs(" (");
-        _hfm_eputs(path);
-        _hfm_eputs(")\n");
+        hapi_eputs("hapi: ");
+        hapi_eputs(hapi_mfw_err_msg(0 - wrc));
+        hapi_eputs(" (");
+        hapi_eputs(path);
+        hapi_eputs(")\n");
         return 1;
     }
     if (vec_len(drops) > 0) { _hfm_print_drops(drops, 0, "  (dropped)\n"); }
-    _hfm_puts("formatted ");
-    _hfm_puts(path);
-    _hfm_puts("\n");
+    hapi_puts("formatted ");
+    hapi_puts(path);
+    hapi_puts("\n");
     return 0;
 }

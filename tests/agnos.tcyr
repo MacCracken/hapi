@@ -26,38 +26,7 @@ include "src/cmd/rollback.cyr"
 include "src/cmd/checkpoint.cyr"
 include "src/cmd/fmt.cyr"
 include "tests/scratch.cyr"
-
-var _ta_counter = 0;
-
-# A fresh directory under /tmp, unique per run and call. The pid alone is
-# not enough: under mirshi every agnos child is pid 1. Recorded, and
-# removed when the run ends (tests/scratch.cyr).
-fn _ta_scratch(): i64 {
-    _ta_counter = _ta_counter + 1;
-    var buf[128];
-    var prefix = "/tmp/hapi-agnos-test-";
-    var p = strlen(prefix);
-    memcpy(&buf, prefix, p);
-    p = p + fmt_int_buf(sys_getpid(), &buf + p);
-    store8(&buf + p, 45); p = p + 1;
-    p = p + fmt_int_buf(clock_now_ns(), &buf + p);
-    store8(&buf + p, 45); p = p + 1;
-    p = p + fmt_int_buf(_ta_counter, &buf + p);
-    store8(&buf + p, 0);
-    var out = alloc(p + 1);
-    memcpy(out, &buf, p + 1);
-    hapi_mkdir(out, 0x1C0);
-    _ts_track(out);
-    return out;
-}
-
-fn _ta_write(path, content): i64 {
-    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
-    if (fd < 0) { return fd; }
-    var n = file_write(fd, content, strlen(content));
-    file_close(fd);
-    return n;
-}
+include "tests/helpers.cyr"
 
 # 1 when the file at `path` holds exactly `content`.
 fn _ta_holds(path, content): i64 {
@@ -71,12 +40,6 @@ fn _ta_holds(path, content): i64 {
     return memeq(buf, content, want);
 }
 
-fn _ta_links(manifest_path): i64 {
-    var r_t, r_v = hapi_mf_parse_file_r(manifest_path);
-    if (is_err_result(r_t) == 1) { return 0 - 1; }
-    return vec_len(hapi_mf_links(r_v));
-}
-
 # F-031 / F-039. The agnos arm used to pre-check with readlink and open
 # without the flag; it now does both, and the flag is what makes the refusal
 # atomic where the kernel honours AO_NOFOLLOW (agnos ≥ 1.56.53, and mirshi
@@ -85,10 +48,10 @@ fn _ta_links(manifest_path): i64 {
 fn test_nofollow_open() {
     test_group("agnos_compat: no-follow open refuses a symlink");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var real = _fsl_path_join(d, "real");
     var lnk = _fsl_path_join(d, "lnk");
-    _ta_write(real, "x");
+    _test_write_file(real, "x");
     assert_eq(hapi_symlink(real, lnk), 0, "symlink planted");
 
     var fd = hapi_open_nofollow(real, O_RDONLY);
@@ -122,9 +85,9 @@ fn test_nofollow_open() {
 fn test_exclusive_create() {
     test_group("O_CREAT|O_EXCL refuses an existing name and leaves it intact");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var p = _fsl_path_join(d, "precious");
-    _ta_write(p, "precious");
+    _test_write_file(p, "precious");
 
     var fd = file_open(p, O_WRONLY | O_CREAT | O_EXCL, 0x1A4);
     assert(fd < 0, "an existing name is refused");
@@ -146,7 +109,7 @@ fn test_exclusive_create() {
 fn test_absent_trail_is_empty() {
     test_group("audit_reader: an absent trail is empty on every target");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var path = _fsl_path_join(d, "audit.jsonl");
     var fd = file_open(path, O_RDONLY, 0);
     assert(fd < 0, "the trail is absent");
@@ -165,11 +128,11 @@ fn test_absent_trail_is_empty() {
 
 # The trail's append path on this target: file_append_locked (LOCK_EX plus an
 # explicit SEEK_END on agnos, which does not honour AO_APPEND), the torn-tail
-# probe, and hapi_fsync (a global sync on agnos).
+# probe, and xfsync (a global sync on agnos).
 fn test_trail_roundtrip() {
     test_group("audit: append then read back");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var path = _fsl_path_join(d, "audit.jsonl");
     audit_set_trail_path(path);
     var a_t, a_v = audit_append_link_r("pkgA", "1.0", "sha1:aaa",
@@ -187,21 +150,21 @@ fn test_trail_roundtrip() {
 }
 
 # The manifest writer on this target: the package-dir flock, a pid-named
-# O_EXCL staging file, hapi_fsync, hapi_rename — and F-038's leftover check,
+# O_EXCL staging file, xfsync, hapi_rename — and F-038's leftover check,
 # which on agnos has to ask stat because the open's -1 carries no errno.
 fn test_manifest_roundtrip() {
     test_group("manifest_write: append, remove, and a staging leftover");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var m = _fsl_path_join(d, "hapi.cyml");
-    _ta_write(m, "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"f\"\ntarget = \".f\"\n");
-    assert_eq(_ta_links(m), 1, "the manifest parses");
+    _test_write_file(m, "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"f\"\ntarget = \".f\"\n");
+    assert_eq(_test_links(m), 1, "the manifest parses");
     assert_eq(manifest_append_link_row(m, "n", ".n"), 0, "append succeeds");
-    assert_eq(_ta_links(m), 2, "the appended row is read");
+    assert_eq(_test_links(m), 2, "the appended row is read");
     assert_eq(manifest_remove_link_row(m, "n", ".n"), 0, "remove succeeds");
-    assert_eq(_ta_links(m), 1, "the row is gone");
+    assert_eq(_test_links(m), 1, "the row is gone");
 
-    var pids = _hmw_itoa(sys_getpid());
+    var pids = hapi_itoa(sys_getpid());
     var ml = strlen(m);
     var pl = strlen(pids);
     var stage = alloc(ml + pl + 6);
@@ -209,11 +172,11 @@ fn test_manifest_roundtrip() {
     store8(stage + ml, 46);
     memcpy(stage + ml + 1, pids, pl);
     memcpy(stage + ml + 1 + pl, ".tmp\x00", 5);
-    _ta_write(stage, "left by a crashed run");
+    _test_write_file(stage, "left by a crashed run");
     assert_eq(manifest_append_link_row(m, "n", ".n"), 0 - HapiMfwStagingExists,
         "a staging leftover is named, not reported as a bare write failure");
     assert_eq(_ta_holds(stage, "left by a crashed run"), 1, "and is not clobbered");
-    assert_eq(_ta_links(m), 1, "the manifest is unchanged");
+    assert_eq(_test_links(m), 1, "the manifest is unchanged");
     hapi_unlink(stage);
     return 0;
 }
@@ -223,18 +186,18 @@ fn test_manifest_roundtrip() {
 fn test_backup_copy() {
     test_group("backup: copy, refuse a symlink source, refuse an existing destination");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var src = _fsl_path_join(d, "src");
     var dst = _fsl_path_join(d, "snap/dst");
     var lnk = _fsl_path_join(d, "lnk");
-    _ta_write(src, "the bytes --force would delete");
+    _test_write_file(src, "the bytes --force would delete");
     assert_eq(hapi_backup_copy(src, dst), 0, "a regular file copies");
     assert_eq(_ta_holds(dst, "the bytes --force would delete"), 1, "byte for byte");
 
     hapi_symlink(src, lnk);
     assert(hapi_backup_copy(lnk, _fsl_path_join(d, "snap/via-link")) < 0, "a symlink source is refused");
 
-    _ta_write(src, "newer");
+    _test_write_file(src, "newer");
     assert(hapi_backup_copy(src, dst) < 0, "an existing destination is refused");
     assert_eq(_ta_holds(dst, "the bytes --force would delete"), 1, "and keeps the first snapshot");
     return 0;
@@ -245,7 +208,7 @@ fn test_backup_copy() {
 fn test_fs_shims() {
     test_group("agnos_compat: mkdir / symlink / readlink / rename / unlink");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     # The callers' contract (fsl_mkdir_parents, audit_ensure_dir): success,
     # or Linux's -EEXIST. agnos has no errno, so its shim confirms the
     # directory with stat and answers 0.
@@ -263,7 +226,7 @@ fn test_fs_shims() {
 
     var a = _fsl_path_join(d, "a");
     var b = _fsl_path_join(d, "b");
-    _ta_write(a, "moved");
+    _test_write_file(a, "moved");
     assert_eq(hapi_rename(a, b), 0, "rename succeeds");
     assert_eq(_ta_holds(b, "moved"), 1, "the content moved");
     assert(file_open(a, O_RDONLY, 0) < 0, "the old name is gone");
@@ -276,7 +239,7 @@ fn test_fs_shims() {
     # F-050: a path through a regular file is not "absent" — agnos used to
     # say ABSENT for every failed stat.
     var f = _fsl_path_join(d, "plain");
-    _ta_write(f, "x");
+    _test_write_file(f, "x");
     assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "plain/sub"))), HAPI_LP_ERROR,
         "a path through a regular file probes as an error");
     assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "nope/deeper"))), HAPI_LP_ABSENT,
@@ -291,10 +254,10 @@ fn test_fs_shims() {
 fn test_verbs_with_root_scope() {
     test_group("link / status / unlink round trip with the scope at /");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var pkg = _fsl_path_join(d, "pkg");
     hapi_mkdir(pkg, 0x1C0);
-    _ta_write(_fsl_path_join(pkg, "rc"), "rc-content");
+    _test_write_file(_fsl_path_join(pkg, "rc"), "rc-content");
     var tgt = _fsl_path_join(d, "home-rc");
     var hdr = "[package]\nname = \"agnos-p\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"rc\"\ntarget = \"";
     var hl = strlen(hdr);
@@ -303,7 +266,7 @@ fn test_verbs_with_root_scope() {
     memcpy(m, hdr, hl);
     memcpy(m + hl, tgt + 1, tl);
     memcpy(m + hl + tl, "\"\n\x00", 3);
-    _ta_write(_fsl_path_join(pkg, "hapi.cyml"), m);
+    _test_write_file(_fsl_path_join(pkg, "hapi.cyml"), m);
 
     link_set_scope_root("/");
     audit_set_trail_path(_fsl_path_join(d, "audit.jsonl"));
@@ -321,30 +284,17 @@ fn test_verbs_with_root_scope() {
 # A manifest for package `name` whose rows link `src` files in `pkg` to
 # absolute targets under `d`, spelled relative to a scope at "/".
 fn _ta_sync_manifest(pkg, name, d, rows): i64 {
-    var m = alloc(2048);
-    var hdr = "[package]\nversion = \"1.0.0\"\nname = \"";
-    var mp = strlen(hdr);
-    memcpy(m, hdr, mp);
-    memcpy(m + mp, name, strlen(name)); mp = mp + strlen(name);
-    memcpy(m + mp, "\"\n", 2); mp = mp + 2;
+    var text = _test_hdr(name);
     var i = 0;
     while (load8(rows + i) != 0) {
         var w = alloc(2);
         store8(w, load8(rows + i));
         store8(w + 1, 0);
-        _ta_write(_fsl_path_join(pkg, w), w);
-        var tgt = _fsl_path_join(d, w);
-        var r1 = "\n[[link]]\nsource = \"";
-        memcpy(m + mp, r1, strlen(r1)); mp = mp + strlen(r1);
-        memcpy(m + mp, w, 1); mp = mp + 1;
-        var r2 = "\"\ntarget = \"";
-        memcpy(m + mp, r2, strlen(r2)); mp = mp + strlen(r2);
-        memcpy(m + mp, tgt + 1, strlen(tgt) - 1); mp = mp + strlen(tgt) - 1;
-        memcpy(m + mp, "\"\n", 2); mp = mp + 2;
+        _test_write_file(_fsl_path_join(pkg, w), w);
+        text = _test_cat(text, _test_row(w, _fsl_path_join(d, w) + 1));
         i = i + 1;
     }
-    store8(m + mp, 0);
-    _ta_write(_fsl_path_join(pkg, "hapi.cyml"), m);
+    _test_manifest_at(pkg, text);
     return 0;
 }
 
@@ -353,7 +303,7 @@ fn _ta_sync_manifest(pkg, name, d, rows): i64 {
 fn test_sync_scan_and_prune() {
     test_group("sync: scan a package root, then prune, with the scope at /");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var root = _fsl_path_join(d, "root");
     hapi_mkdir(root, 0x1C0);
     var pkg = _fsl_path_join(root, "p");
@@ -384,10 +334,10 @@ fn test_sync_scan_and_prune() {
 fn test_made_dirs_round_trip() {
     test_group("created_dir: link makes and records directories, unlink removes them");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var pkg = _fsl_path_join(d, "pkg");
     hapi_mkdir(pkg, 0x1C0);
-    _ta_write(_fsl_path_join(pkg, "a"), "a");
+    _test_write_file(_fsl_path_join(pkg, "a"), "a");
     var tgt = _fsl_path_join(d, "made/deep/a");
     var hdr = "[package]\nname = \"agnos-d\"\nversion = \"1.0.0\"\n\n[[link]]\nsource = \"a\"\ntarget = \"";
     var hl = strlen(hdr);
@@ -396,7 +346,7 @@ fn test_made_dirs_round_trip() {
     memcpy(m, hdr, hl);
     memcpy(m + hl, tgt + 1, tl);
     memcpy(m + hl + tl, "\"\n\x00", 3);
-    _ta_write(_fsl_path_join(pkg, "hapi.cyml"), m);
+    _test_write_file(_fsl_path_join(pkg, "hapi.cyml"), m);
 
     var trail = _fsl_path_join(d, "audit.jsonl");
     link_set_scope_root("/");
@@ -404,7 +354,7 @@ fn test_made_dirs_round_trip() {
     assert_eq(cmd_link(pkg, 0), 0, "link into two new directories");
     assert_eq(_ta_holds(tgt, "a"), 1, "the link resolves");
     var entries = audit_read(trail);
-    assert(vec_len(entries) == 1 && _har_cstr_eq(hae_created_dir(vec_get(entries, 0)),
+    assert(vec_len(entries) == 1 && hapi_cstr_eq(hae_created_dir(vec_get(entries, 0)),
       _fsl_path_join(d, "made")) == 1, "the entry records the outermost made directory");
     assert_eq(cmd_unlink("agnos-d"), 0, "unlink");
     assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "made"))), HAPI_LP_ABSENT,
@@ -421,7 +371,7 @@ fn test_made_dirs_round_trip() {
 fn test_rollback_steps_and_to() {
     test_group("rollback: --to a labelled checkpoint, then --steps, with the scope at /");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var pa = _fsl_path_join(d, "pa");
     var pb = _fsl_path_join(d, "pb");
     hapi_mkdir(pa, 0x1C0);
@@ -440,8 +390,8 @@ fn test_rollback_steps_and_to() {
     assert_eq(_ta_holds(_fsl_path_join(d, "a"), "a"), 1, "a stays");
     var t = audit_read(trail);
     var m = vec_get(t, vec_len(t) - 1);
-    assert_eq(_har_cstr_eq(hae_from(m), "3"), 1, "the closing marker records `from` 3");
-    assert_eq(_har_cstr_eq(hae_label(vec_get(t, 1)), "mid"), 1, "the label reads back");
+    assert_eq(hapi_cstr_eq(hae_from(m), "3"), 1, "the closing marker records `from` 3");
+    assert_eq(hapi_cstr_eq(hae_label(vec_get(t, 1)), "mid"), 1, "the label reads back");
     assert_eq(cmd_rollback_run(1, 0), 0, "rollback --steps 1");
     assert_eq(link_probe_kind(link_probe(_fsl_path_join(d, "a"))), HAPI_LP_ABSENT,
       "steps over the undone range to a");
@@ -455,7 +405,7 @@ fn test_rollback_steps_and_to() {
 fn test_absolute_round_trip() {
     test_group("--absolute: link, unlink and rollback an absolute link, with the scope at /");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var pkg = _fsl_path_join(d, "pa");
     hapi_mkdir(pkg, 0x1C0);
     _ta_sync_manifest(pkg, "agnos-abs", d, "a");
@@ -469,14 +419,14 @@ fn test_absolute_round_trip() {
     hapi_set_absolute(0);
     var probe = link_probe(tgt);
     assert(link_probe_kind(probe) == HAPI_LP_SYMLINK
-      && _har_cstr_eq(link_probe_target(probe), src) == 1, "the link text is the absolute source");
+      && hapi_cstr_eq(link_probe_target(probe), src) == 1, "the link text is the absolute source");
     assert_eq(_ta_holds(tgt, "a"), 1, "...and it resolves");
     assert_eq(cmd_checkpoint(), 0, "checkpoint");
     assert_eq(cmd_unlink("agnos-abs"), 0, "unlink removes it");
     assert_eq(cmd_rollback(), 0, "rollback the unlink");
     probe = link_probe(tgt);
     assert(link_probe_kind(probe) == HAPI_LP_SYMLINK
-      && _har_cstr_eq(link_probe_target(probe), src) == 1, "the link comes back absolute");
+      && hapi_cstr_eq(link_probe_target(probe), src) == 1, "the link comes back absolute");
     link_set_scope_root(0);
     audit_set_trail_path(0);
     return 0;
@@ -489,9 +439,9 @@ fn test_absolute_round_trip() {
 fn test_fmt_round_trip() {
     test_group("fmt: format a manifest and keep its body, with absolute paths");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var mp = _fsl_path_join(d, "hapi.cyml");
-    _ta_write(mp, "[package]\nversion = \"1\"\nname = \"agnos-fmt\"\n---\nbody\n");
+    _test_write_file(mp, "[package]\nversion = \"1\"\nname = \"agnos-fmt\"\n---\nbody\n");
     assert_eq(cmd_fmt_run(d, 1, 0), 1, "fmt --check: not formatted");
     assert_eq(cmd_fmt(d), 0, "fmt");
     assert_eq(_ta_holds(mp, "[package]\nname = \"agnos-fmt\"\nversion = \"1\"\n\n---\nbody\n"), 1,
@@ -508,9 +458,9 @@ fn test_fmt_round_trip() {
 fn test_trail_under_a_file_is_an_error() {
     test_group("audit: a trail under a regular file is an error, not empty (F-089)");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var f = _fsl_path_join(d, "file");
-    _ta_write(f, "x");
+    _test_write_file(f, "x");
     var t, v = audit_read_r(_fsl_path_join(f, "audit.jsonl"));
     assert_eq(is_err_result(t), 1, "reading it is an error");
     var t2, v2 = audit_read_r(_fsl_path_join(d, "none/audit.jsonl"));
@@ -521,11 +471,11 @@ fn test_trail_under_a_file_is_an_error() {
 fn test_rename_noreplace() {
     test_group("adopt's move never replaces what is at the package-side name (F-071)");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var a = _fsl_path_join(d, "a");
     var b = _fsl_path_join(d, "b");
-    _ta_write(a, "AAA");
-    _ta_write(b, "BB");
+    _test_write_file(a, "AAA");
+    _test_write_file(b, "BB");
     assert_eq(hapi_rename_noreplace(a, b), 0 - 17, "an existing file refuses the move");
     assert_eq(link_probe_kind(link_probe(a)), HAPI_LP_FILE, "the file stays where it was");
     assert_eq(link_probe_kind(link_probe(b)), HAPI_LP_FILE, "and so does the one in the way");
@@ -546,10 +496,10 @@ fn test_rename_noreplace() {
 fn test_scratch_cleanup(): i64 {
     test_group("scratch: the run leaves nothing in /tmp");
 
-    var d = _ta_scratch();
+    var d = _test_scratch_dir();
     var sub = _fsl_path_join(d, "sub");
     hapi_mkdir(sub, 0x1C0);
-    _ta_write(_fsl_path_join(sub, "f"), "f");
+    _test_write_file(_fsl_path_join(sub, "f"), "f");
     hapi_symlink(sub, _fsl_path_join(d, "link"));
 
     assert(_ts_tracked() > 1, "the run made scratch directories");
