@@ -18,6 +18,7 @@ include "src/cmd/check.cyr"
 include "src/cmd/sync.cyr"
 include "src/cap.cyr"
 include "src/cli.cyr"
+include "tests/scratch.cyr"
 
 # Convenience: parse a literal manifest string and assert it
 # returned Err(<expected>). `expected` is one of the HapiMf*
@@ -213,6 +214,7 @@ fn test_missing_file() {
 
 # Build a unique scratch directory under /tmp seeded by PID +
 # a counter so successive tests don't trip over each other.
+# Recorded, and removed when the run ends (tests/scratch.cyr).
 var _test_scratch_counter = 0;
 fn _test_scratch_dir(): i64 {
     _test_scratch_counter = _test_scratch_counter + 1;
@@ -229,6 +231,7 @@ fn _test_scratch_dir(): i64 {
     var out = alloc(p + 1);
     memcpy(out, &buf, p + 1);
     hapi_mkdir(out, 0x1C0);
+    _ts_track(out);
     return out;
 }
 
@@ -1048,9 +1051,11 @@ fn test_cmd_adopt_refuses_outside_scope() {
     var scope = load64(env);
     var pkg = _test_make_package(0, 0);
 
-    # A real regular file OUTSIDE the scope root. /tmp is never inside
-    # the per-test scratch scope, so this is a genuine escape attempt.
-    var outside = "/tmp/hapi-f011-outside.conf";
+    # A real regular file OUTSIDE the scope root: in a scratch directory
+    # of its own, never inside the per-test scope, so this is a genuine
+    # escape attempt. Through 1.7.0 it was a fixed /tmp name, which two
+    # runs at once shared.
+    var outside = _fsl_path_join(_test_scratch_dir(), "outside.conf");
     var fd = file_open(outside, 0x241, 0x180);      # O_WRONLY|O_CREAT|O_TRUNC, 0600
     assert(fd >= 0, "fixture file created outside the scope");
     file_write(fd, "secret\n", 7);
@@ -2692,8 +2697,9 @@ fn test_cap_target_allowed_resolves() {
     var scope = load64(env);
     cap_set_home(scope);
 
-    # An escape hatch OUTSIDE the scope root entirely.
-    var out = "/tmp/hapi-f015-outside";
+    # An escape hatch OUTSIDE the scope root entirely: a scratch
+    # directory of its own (a fixed /tmp name through 1.7.0).
+    var out = _test_scratch_dir();
     fsl_mkdir_parents(_fsl_path_join(out, "x"));
     var escape = _fsl_path_join(scope, "escape");
     assert_eq(hapi_symlink(out, escape), 0, "escaping symlink created");
@@ -2726,14 +2732,17 @@ fn test_link_refuses_symlinked_component_escape() {
     var scope = load64(env);
     cap_set_home(scope);
 
-    var out = "/tmp/hapi-f015-linkout";
+    # Outside the scope: a scratch directory of its own. Through 1.7.0
+    # it was a fixed /tmp name, so two runs at once removed each other's
+    # PRECIOUS file between its write and the check that it survived.
+    var out = _test_scratch_dir();
     fsl_mkdir_parents(_fsl_path_join(out, "x"));
     var precious = _fsl_path_join(out, "zshrc");
     var pf = file_open(precious, 0x241, 0x1A4);
     file_write(pf, "PRECIOUS", 8);
     file_close(pf);
 
-    # ~/.config -> /tmp/hapi-f015-linkout
+    # ~/.config -> that directory, outside the scope
     var cfg = _fsl_path_join(scope, ".config");
     assert_eq(hapi_symlink(out, cfg), 0, "convenience symlink created");
 
@@ -5536,6 +5545,80 @@ fn test_cli_fmt() {
     return 0;
 }
 
+# ============================================================
+# 1.7.1 — the run removes its scratch directories
+# ============================================================
+
+# Removal never follows a link: what a link in a scratch directory names
+# survives, a directory or a file. A directory left mode 000 is emptied.
+fn test_scratch_rmtree_never_follows() {
+    test_group("scratch: removal never follows a link");
+
+    var keep = _test_scratch_dir();
+    var kept = _fsl_path_join(keep, "keep");
+    _test_write_file(kept, "keep");
+
+    var gone = _test_scratch_dir();
+    assert_eq(hapi_symlink(keep, _fsl_path_join(gone, "dirlink")), 0, "a link to a directory");
+    assert_eq(hapi_symlink(kept, _fsl_path_join(gone, "filelink")), 0, "a link to a file");
+    var deep = _fsl_path_join(gone, "a/b");
+    fsl_mkdir_parents(_fsl_path_join(deep, "x"));
+    assert_eq(_test_write_file(_fsl_path_join(deep, "f"), "f"), 1, "a file two levels down");
+    var locked = _fsl_path_join(gone, "locked");
+    hapi_mkdir(locked, 0x1C0);
+    _test_write_file(_fsl_path_join(locked, "inner"), "inner");
+    assert_eq(sys_chmod(locked, 0), 0, "a directory left mode 000");
+
+    assert_eq(_ts_rmtree(gone), 0, "the tree is removed");
+    assert_eq(link_probe_kind(link_probe(gone)), HAPI_LP_ABSENT, "nothing of it is left");
+    assert_eq(link_probe_kind(link_probe(keep)), HAPI_LP_DIRECTORY,
+      "the directory a link named survives");
+    assert_eq(link_probe_kind(link_probe(kept)), HAPI_LP_FILE,
+      "the file a link named survives");
+
+    # A directory that cannot be removed is reported, not taken as gone.
+    var ro = _test_scratch_dir();
+    var stuck = _fsl_path_join(ro, "stuck");
+    hapi_mkdir(stuck, 0x1C0);
+    assert_eq(sys_chmod(ro, 0x140), 0, "its parent made read-only (0500)");
+    assert(_ts_rmtree(stuck) < 0, "a directory that stays is reported");
+    sys_chmod(ro, 0x1C0);
+
+    # Whatever is recorded, nothing outside /tmp/hapi-… is removed.
+    assert_eq(_ts_removable("/tmp/hapi-"), 0, "the bare prefix is refused");
+    assert_eq(_ts_removable("/home/x/hapi-test-1"), 0, "a path elsewhere is refused");
+    assert_eq(_ts_removable(0), 0, "no path is refused");
+    assert_eq(_ts_removable(keep), 1, "a scratch directory is removable");
+    return 0;
+}
+
+# The last group: every directory the run made is removed, and nothing
+# named for this run is left in /tmp, recorded or not.
+fn test_scratch_cleanup() {
+    test_group("scratch: the run leaves nothing in /tmp");
+
+    assert(_ts_tracked() > 0, "the run made scratch directories");
+    assert_eq(_ts_cleanup(), 0, "every directory it made is removed");
+
+    var buf[64];
+    var pre = "hapi-test-";
+    var p = strlen(pre);
+    memcpy(&buf, pre, p);
+    p = p + fmt_int_buf(syscall(SYS_GETPID), &buf + p);
+    store8(&buf + p, 45); p = p + 1;
+    var names = vec_new();
+    assert_eq(dir_list_checked(str_from("/tmp"), names), 0, "/tmp is listable");
+    var left = 0;
+    var i = 0;
+    while (i < vec_len(names)) {
+        var nm = vec_get(names, i);
+        if (str_len(nm) >= p && memeq(str_data(nm), &buf, p) == 1) { left = left + 1; }
+        i = i + 1;
+    }
+    assert_eq(left, 0, "no /tmp/hapi-test-<pid>-* is left");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -5692,6 +5775,8 @@ fn main() {
     test_fmt_refusals();
     test_fmt_crlf_and_dry_run();
     test_cli_fmt();
+    test_scratch_rmtree_never_follows();
+    test_scratch_cleanup();         # last: it removes every scratch directory
     return assert_summary();
 }
 

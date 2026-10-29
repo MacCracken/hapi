@@ -4,7 +4,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The test suites no longer leave their scratch directories in `/tmp` (F-064).**
+  Through 1.7.0 neither `tests/hapi.tcyr` nor `tests/agnos.tcyr` removed anything it
+  made, so each run left about 150 directories, around 2,600 inodes. `/tmp` is a tmpfs
+  with a fixed inode count. The 1.7.0 cycle's mutation, fuzz and audit runs (about
+  1,100 suites) left 273,948 directories and used every inode, so every process
+  writing to `/tmp` failed with ENOSPC while 54% of its bytes were free.
+  - Each suite now records the directories it makes and removes them when it ends
+    (`tests/scratch.cyr`), and the last group asserts that they are gone. On Linux it
+    also asserts that no `/tmp/hapi-test-<pid>-*` is left at all.
+  - The removal never follows a symlink (test scopes link into `docs/examples`). It
+    removes only `/tmp/hapi-…` paths, and empties a directory a failed test left
+    mode 000. A run that crashes before its last group still leaves its directories.
+  - Three tests used fixed `/tmp` names (`hapi-f011-outside.conf`, `hapi-f015-outside`,
+    `hapi-f015-linkout`), two of which were never removed. Two runs at once shared
+    them, so one run's cleanup could delete the file the other was about to check.
+    Each now uses a scratch directory of its own.
+  - `scripts/agnos-smoke.sh` removes its temporary package, home and log on any exit,
+    not only when it reaches the end.
 
 ## [1.7.0] - 2026-10-29
 

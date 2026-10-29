@@ -1,0 +1,87 @@
+# tests/scratch.cyr — the scratch directories a test run makes, and their
+# removal when it ends. Shared by tests/hapi.tcyr and tests/agnos.tcyr.
+#
+# Through 1.7.0 neither suite removed anything it made under /tmp: every
+# run left about 150 directories behind. /tmp is a tmpfs with a fixed
+# inode count, and the 1.7.0 cycle's mutation, fuzz and audit runs (some
+# 1,100 suites) filled all of it with 273,948 of them. Every process
+# writing to /tmp then failed with ENOSPC, at 46% of its bytes.
+#
+# So each suite records what it makes (_ts_track) and removes exactly
+# that at the end (_ts_cleanup), as an assertion: a leak fails the run.
+# A run that crashes before the end still leaves its directories; that is
+# the only case.
+#
+# The removal never follows a symlink. Test scopes hold links into the
+# repository (docs/examples) and into other scratch directories; a link is
+# removed as a link, and what it points to is never entered. It is test
+# code, single-process, with no one racing it: a directory swapped for a
+# link between the probe and the listing is not defended against, as
+# hapi's own verbs must be.
+
+include "src/agnos_compat.cyr"
+include "src/fs_link.cyr"
+include "lib/fs.cyr"
+
+var _ts_made = 0;
+
+# Only paths of this shape are ever removed, whatever is recorded.
+fn _ts_removable(path): i64 {
+    var pre = "/tmp/hapi-";
+    if (path == 0) { return 0; }
+    if (strlen(path) <= strlen(pre)) { return 0; }
+    if (memeq(path, pre, strlen(pre)) == 0) { return 0; }
+    return 1;
+}
+
+# Record a directory the run made, for _ts_cleanup.
+fn _ts_track(path): i64 {
+    if (_ts_made == 0) { _ts_made = vec_new(); }
+    vec_push(_ts_made, path);
+    return 0;
+}
+
+fn _ts_tracked(): i64 {
+    if (_ts_made == 0) { return 0; }
+    return vec_len(_ts_made);
+}
+
+# Remove `path` and, if it is a directory, everything under it. A symlink
+# is unlinked, never entered. Returns 0, or <0 when something stayed.
+fn _ts_rmtree(path): i64 {
+    var kind = link_probe_kind(link_probe(path));
+    if (kind == HAPI_LP_ABSENT) { return 0; }
+    if (kind != HAPI_LP_DIRECTORY) {
+        if (hapi_unlink(path) < 0) { return 0 - 1; }
+        return 0;
+    }
+    #ifndef CYRIUS_TARGET_AGNOS
+    # A test can leave a directory mode 000 or 0311 when it fails between
+    # its chmod and its restore. Owner rwx makes it listable and emptiable.
+    sys_chmod(path, 0x1C0);
+    #endif
+    var rc = 0;
+    var names = vec_new();
+    if (dir_list_checked(str_from(path), names) < 0) { rc = 0 - 1; }
+    var i = 0;
+    while (i < vec_len(names)) {
+        var child = _fsl_path_join(path, _fsl_str_to_cstr(vec_get(names, i)));
+        if (_ts_rmtree(child) < 0) { rc = 0 - 1; }
+        i = i + 1;
+    }
+    if (hapi_rmdir(path) < 0) { rc = 0 - 1; }
+    return rc;
+}
+
+# Remove every recorded directory. Returns how many are still there.
+fn _ts_cleanup(): i64 {
+    var left = 0;
+    var i = 0;
+    while (i < _ts_tracked()) {
+        var p = vec_get(_ts_made, i);
+        if (_ts_removable(p) == 1) { _ts_rmtree(p); }
+        if (link_probe_kind(link_probe(p)) != HAPI_LP_ABSENT) { left = left + 1; }
+        i = i + 1;
+    }
+    return left;
+}

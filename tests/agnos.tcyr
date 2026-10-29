@@ -25,11 +25,13 @@ include "src/cmd/sync.cyr"
 include "src/cmd/rollback.cyr"
 include "src/cmd/checkpoint.cyr"
 include "src/cmd/fmt.cyr"
+include "tests/scratch.cyr"
 
 var _ta_counter = 0;
 
 # A fresh directory under /tmp, unique per run and call. The pid alone is
-# not enough: under mirshi every agnos child is pid 1.
+# not enough: under mirshi every agnos child is pid 1. Recorded, and
+# removed when the run ends (tests/scratch.cyr).
 fn _ta_scratch(): i64 {
     _ta_counter = _ta_counter + 1;
     var buf[128];
@@ -45,6 +47,7 @@ fn _ta_scratch(): i64 {
     var out = alloc(p + 1);
     memcpy(out, &buf, p + 1);
     hapi_mkdir(out, 0x1C0);
+    _ts_track(out);
     return out;
 }
 
@@ -497,6 +500,25 @@ fn test_fmt_round_trip() {
     return 0;
 }
 
+# The last group: every directory the run made is removed, through the
+# target's own listing, unlink and rmdir. Only the recorded paths are
+# checked: under mirshi every run is pid 1, so a scan of /tmp by pid
+# would count another run's directories.
+fn test_scratch_cleanup(): i64 {
+    test_group("scratch: the run leaves nothing in /tmp");
+
+    var d = _ta_scratch();
+    var sub = _fsl_path_join(d, "sub");
+    hapi_mkdir(sub, 0x1C0);
+    _ta_write(_fsl_path_join(sub, "f"), "f");
+    hapi_symlink(sub, _fsl_path_join(d, "link"));
+
+    assert(_ts_tracked() > 1, "the run made scratch directories");
+    assert_eq(_ts_cleanup(), 0, "every directory it made is removed");
+    assert_eq(link_probe_kind(link_probe(d)), HAPI_LP_ABSENT, "a nested tree is gone");
+    return 0;
+}
+
 fn main(): i64 {
     test_nofollow_open();
     test_exclusive_create();
@@ -511,6 +533,7 @@ fn main(): i64 {
     test_rollback_steps_and_to();
     test_absolute_round_trip();
     test_fmt_round_trip();
+    test_scratch_cleanup();         # last: it removes every scratch directory
     return assert_summary();
 }
 

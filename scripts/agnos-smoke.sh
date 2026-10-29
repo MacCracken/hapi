@@ -47,6 +47,9 @@ if [ ! -x "$TESTS" ]; then
 fi
 
 FAIL=0
+# Everything this script makes in /tmp goes when it exits, however it exits.
+PKG=""; SMOKE_HOME=""; TLOG="${TMPDIR:-/tmp}/hapi-agnos-tests.$$"
+trap 'rm -rf "$PKG" "$SMOKE_HOME" "$TLOG"' EXIT
 run() { "$MIRSHI" "$ELF" "$@" 2>&1 | grep -v '^mirshi:' || true; }
 
 echo "agnos smoke — $ELF under $MIRSHI"
@@ -80,7 +83,7 @@ case "$out" in
         echo "  note  env reaches the child ('$out')"
         echo "        -> mirshi gained envp support; widen this harness" ;;
 esac
-rm -rf "$PKG" "$SMOKE_HOME"
+rm -rf "$PKG" "$SMOKE_HOME"; PKG=""; SMOKE_HOME=""
 
 # 3. F-027 — a relative package argument must never yield a non-absolute
 #    `abs_source`. agnos has no getcwd; hapi prefers PWD and REFUSES when
@@ -103,17 +106,16 @@ else echo "  FAIL  unknown verb exited $rc, expected 2"; FAIL=1; fi
 # 5. The agnos-conditional code paths, run on the target (tests/agnos.tcyr).
 #    The summary line must report zero failures AND the binary must exit 0;
 #    a crash mid-suite prints no summary, so neither alone is enough.
-"$MIRSHI" "$TESTS" > "${TMPDIR:-/tmp}/hapi-agnos-tests.$$" 2>&1 && trc=0 || trc=$?
-summary=$(grep -E '^[0-9]+ passed, [0-9]+ failed' "${TMPDIR:-/tmp}/hapi-agnos-tests.$$" | tail -1)
+"$MIRSHI" "$TESTS" > "$TLOG" 2>&1 && trc=0 || trc=$?
+summary=$(grep -E '^[0-9]+ passed, [0-9]+ failed' "$TLOG" | tail -1)
 case "$trc:$summary" in
     "0:"*" passed, 0 failed"*)
         echo "  ok    agnos-conditional paths on agnos: $summary" ;;
     *)
         echo "  FAIL  tests/agnos.tcyr under mirshi (exit $trc): '${summary:-no summary}'"
-        grep -E 'FAIL:' "${TMPDIR:-/tmp}/hapi-agnos-tests.$$" | sed 's/^/        /'
+        grep -E 'FAIL:' "$TLOG" | sed 's/^/        /'
         FAIL=1 ;;
 esac
-rm -f "${TMPDIR:-/tmp}/hapi-agnos-tests.$$"
 
 if [ $FAIL -eq 0 ]; then echo "PASS: agnos smoke"; else echo "FAIL: agnos smoke"; fi
 exit $FAIL
