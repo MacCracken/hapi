@@ -9,14 +9,14 @@
 
 ## Status
 
-- **Shipped: 1.2.1** — 1.2.0's fallout: the commands stopped depending on
-  the command line, and a 50,000-line differential fuzz against 1.1.1
-  found no behavioural change. 1.2.0 before it moved argument parsing to
-  cmdit, with every 1.1.1 message kept and the forms getopt adds
-  (`--root=PATH`, `--`, `<verb> --help`); its P(-1) is the *1.2.0
-  addendum* of [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md).
-- **Next: 1.3.0 — sync: no argument, and `--prune`** (below).
-- **1.4.0 → 1.7.0** — the rest of v1.x's additive work, one theme per
+- **Shipped: 1.3.0** — `hapi sync` with no package (every package under
+  `HAPI_PACKAGE_ROOTS`) and `sync --prune`, closing the two dogfood
+  issues on `sync` ([ADR 0006](../adr/0006-sync-package-roots-and-prune.md)).
+  Its P(-1), the *1.3.0 addendum* of
+  [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md), fixed
+  F-061. Before it, 1.2.0 / 1.2.1 moved argument parsing to cmdit.
+- **Next: 1.4.0 — `created_dirs` on `op:link`** (below).
+- **1.5.0 → 1.7.0** — the rest of v1.x's additive work, one theme per
   minor. The command surface, ADR 0001's schema and ADR 0002's line
   shape stay frozen throughout; everything here is additive.
 - **Gated** — work that waits on something outside hapi, scheduled when
@@ -30,9 +30,9 @@
   form, a flag, an additive trail field). Its `.x` patches carry fixes
   only: a `1.N.x` adds nothing.
 - **Order: dependency first, then dogfood pressure.** cmdit went first
-  (1.2.0) because every later flag registers through it. After that, sync
-  carries two open dogfood issues, so it goes next. The order of 1.4 –
-  1.7 is a proposal and can be swapped when pressure changes.
+  (1.2.0) because every later flag registers through it; sync's two
+  dogfood issues went next (1.3.0). The order of 1.4 – 1.7 is a proposal
+  and can be swapped when pressure changes.
 - **Standing obligations, per release** (CLAUDE.md, not repeated in each
   section): a P(-1) re-run when the release touches a path argument, a
   syscall, the capability surface or the trail format (each section
@@ -41,26 +41,6 @@
   suites run on x86_64, aarch64 and agnos.
 
 ---
-
-## 1.3.0 — sync: no argument, and `--prune`
-
-The two open dogfood issues, both on `sync`. **P(-1): yes** — no-arg sync turns a tree walk into
-write targets, and prune removes links.
-
-- **No-arg `hapi sync`** — sync every package hapi can find, so a recovery is one command, not a
-  loop. **Dogfood pressure (2026-05-24):** a drive-move recovery had to loop over packages by
-  hand, and the wiped trail proved trail-recovery fails closed exactly when recovery matters
-  most. So the **root scan is the primary mechanism**, and the trail only augments it (an additive
-  `manifest_path` field on `op:link` would let it name packages the scan misses). The signature
-  stays: cmdit already bounds `sync` at one positional and lets it have none (1.2.0), so no-arg
-  becomes legal inside `cmd_sync`, which prints its usage today (exit 2). What the
-  scan walks, how deep, and what it refuses to treat as a package are this release's design.
-  [`issues/2026-05-24-no-arg-sync-bootstrap-recovery.md`](issues/2026-05-24-no-arg-sync-bootstrap-recovery.md).
-- **`hapi sync --prune` (opt-in)** — emit `op:unlink` for trail rows no longer in the manifest.
-  Conservative: refuse when the prune count exceeds a threshold, unless `--force` is given. Prune is
-  a removal, so it runs F-055's trail preflight and the "we only remove what we created" text
-  check (`fsl_link_text_matches`).
-  [`issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md`](issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md).
 
 ## 1.4.0 — `created_dirs` on `op:link`
 

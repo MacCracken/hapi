@@ -2244,10 +2244,18 @@ fn test_reversal_verbs_preflight_the_trail() {
     file_write(fd, "{\"ts\":\"torn", 11);
     file_close(fd);
 
-    assert_eq(cmd_unlink("p"), 1, "unlink refuses on a torn tail");
+    # Through the CLI, so the refusal can be told apart: since 1.3.0 a
+    # removal whose append fails is put back (F-061), which on disk looks
+    # the same as never having been made. The pre-flight is what refuses
+    # BEFORE anything is touched, and only its message says so.
+    assert_eq(_cli_run(_cli_av("hapi unlink p")), 1, "unlink refuses on a torn tail");
     assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_SYMLINK, "and the link is still there");
-    assert_eq(cmd_rollback(), 1, "rollback refuses on a torn tail");
+    assert(_test_substr(_cli_err, _cli_err_n, "audit trail is not writable; refusing to unlink") >= 0,
+      "refused by the pre-flight, before the link was touched");
+    assert_eq(_cli_run(_cli_av("hapi rollback")), 1, "rollback refuses on a torn tail");
     assert_eq(link_probe_kind(link_probe(tgt)), HAPI_LP_SYMLINK, "and the link is still there");
+    assert(_test_substr(_cli_err, _cli_err_n, "audit trail is not writable; refusing to roll back") >= 0,
+      "refused by the pre-flight, before the link was touched");
 
     var dot = _fsl_path_join(scope, ".zz");
     _test_write_file(dot, "user content");
@@ -3603,7 +3611,8 @@ fn _cli_flag_probe(verb, flag, takes_value, accepted): i64 {
     return _cli_expect(av, 2, "", _cli_unexpected_flag(verb, flag), _cli_cat(label, " is refused"));
 }
 
-fn _cli_flag_row(verb, force, strict, dry, root, backup): i64 {
+fn _cli_flag_row(verb, force, strict, dry, root, backup, prune): i64 {
+    _cli_flag_probe(verb, "--prune", 0, prune);
     _cli_flag_probe(verb, "--force", 0, force);
     _cli_flag_probe(verb, "--strict", 0, strict);
     _cli_flag_probe(verb, "--dry-run", 0, dry);
@@ -3618,17 +3627,19 @@ fn test_cli_verbs_take_only_their_flags() {
     # The usage calls --root / --dry-run / --backup-to "global"; they are
     # per-verb subsets, and a verb outside the subset owes exit 2 (guides
     # dry-run.md, backup-to.md, capability.md). inspect takes none (F-033).
-    #              verb          force strict dry root backup
-    _cli_flag_row("inspect",       0,    0,    0,   0,   0);
-    _cli_flag_row("link",          1,    0,    1,   1,   1);
-    _cli_flag_row("unlink",        0,    0,    1,   0,   0);
-    _cli_flag_row("adopt",         0,    0,    1,   1,   1);
-    _cli_flag_row("rollback",      0,    0,    1,   0,   0);
-    _cli_flag_row("checkpoint",    0,    0,    1,   0,   0);
-    _cli_flag_row("status",        0,    0,    0,   1,   0);
-    _cli_flag_row("list",          0,    0,    0,   1,   0);
-    _cli_flag_row("check",         0,    1,    0,   0,   0);
-    _cli_flag_row("sync",          0,    0,    1,   1,   1);
+    # sync's --force (1.3.0) parses; it needs --prune, checked after the
+    # parse (test_sync_prune_cli).
+    #              verb          force strict dry root backup prune
+    _cli_flag_row("inspect",       0,    0,    0,   0,   0,     0);
+    _cli_flag_row("link",          1,    0,    1,   1,   1,     0);
+    _cli_flag_row("unlink",        0,    0,    1,   0,   0,     0);
+    _cli_flag_row("adopt",         0,    0,    1,   1,   1,     0);
+    _cli_flag_row("rollback",      0,    0,    1,   0,   0,     0);
+    _cli_flag_row("checkpoint",    0,    0,    1,   0,   0,     0);
+    _cli_flag_row("status",        0,    0,    0,   1,   0,     0);
+    _cli_flag_row("list",          0,    0,    0,   1,   0,     0);
+    _cli_flag_row("check",         0,    1,    0,   0,   0,     0);
+    _cli_flag_row("sync",          1,    0,    1,   1,   1,     1);
     return 0;
 }
 
@@ -3891,6 +3902,404 @@ fn test_cli_unexpected_flag_named_as_typed() {
     return 0;
 }
 
+# ------------------------------------------------------------
+# 1.3.0 — sync with no package, and `sync --prune` (ADR 0006)
+# ------------------------------------------------------------
+
+# Write `<dir>/hapi.cyml` naming package `name`, with one row per
+# space-separated word in `rows`: source <word>, target .<word>. Each
+# source file is created if absent. Rewriting with fewer words is how a
+# test drops a row. Returns `dir`.
+fn _sy_pkg(dir, name, rows): i64 {
+    hapi_mkdir(dir, 0x1C0);
+    var mf = alloc(4096);
+    var mp = 0;
+    var head = _cli_cat(_cli_cat("[package]\nname = \"", name), "\"\nversion = \"1.0.0\"\n");
+    memcpy(mf, head, strlen(head));
+    mp = strlen(head);
+    var words = _cli_av(rows);
+    var i = 0;
+    while (i < load64(words)) {
+        var w = load64(words + 8 + i * 8);
+        var row = _cli_cat(_cli_cat(_cli_cat(_cli_cat("\n[[link]]\nsource = \"", w), "\"\ntarget = \"."), w), "\"\n");
+        memcpy(mf + mp, row, strlen(row));
+        mp = mp + strlen(row);
+        var src = _fsl_path_join(dir, w);
+        if (link_probe_kind(link_probe(src)) == HAPI_LP_ABSENT) { _test_write_file(src, "x"); }
+        i = i + 1;
+    }
+    store8(mf + mp, 0);
+    _test_write_file(_fsl_path_join(dir, "hapi.cyml"), mf);
+    return dir;
+}
+
+fn _sy_kind(scope, name): i64 {
+    return link_probe_kind(link_probe(_fsl_path_join(scope, name)));
+}
+
+fn _sy_entries(audit_path): i64 { return vec_len(audit_read(audit_path)); }
+
+fn test_sync_prune_removes_the_dropped_row() {
+    test_group("sync --prune: removes only the row that left the manifest (1.3.0)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _sy_pkg(_test_scratch_dir(), "zsh", "a b c d e f");
+    assert_eq(cmd_sync_run(pkg, 0, 0), 0, "first sync links six rows");
+    assert_eq(_sy_entries(audit_path), 6, "six link entries");
+
+    # The 2026-05-20 dogfood case: one row of six dropped.
+    _sy_pkg(pkg, "zsh", "a b c d e");
+    hapi_set_dry_run(1);
+    assert_eq(cmd_sync_run(pkg, 1, 0), 0, "--prune --dry-run exits 0");
+    hapi_set_dry_run(0);
+    assert_eq(_sy_kind(scope, ".f"), HAPI_LP_SYMLINK, "dry-run removed nothing");
+    assert_eq(_sy_entries(audit_path), 6, "dry-run wrote no entry");
+
+    assert_eq(cmd_sync_run(pkg, 1, 0), 0, "--prune exits 0");
+    assert_eq(_sy_kind(scope, ".f"), HAPI_LP_ABSENT, "the dropped row's link is gone");
+    assert_eq(_sy_kind(scope, ".a"), HAPI_LP_SYMLINK, "a kept row's link stays");
+    assert_eq(_sy_kind(scope, ".e"), HAPI_LP_SYMLINK, "...every kept row's");
+    var trail = audit_read(audit_path);
+    assert_eq(vec_len(trail), 7, "exactly one new entry, not an 11-entry rotation");
+    var last = vec_get(trail, 6);
+    assert(_har_cstr_eq(hae_op(last), "unlink") == 1, "...an op:unlink");
+    assert(_har_cstr_eq(hae_abs_target(last), _fsl_path_join(scope, ".f")) == 1, "...for the dropped target");
+
+    assert_eq(cmd_sync_run(pkg, 1, 0), 0, "a second --prune exits 0");
+    assert_eq(_sy_entries(audit_path), 7, "...and writes nothing (idempotent)");
+    assert_eq(cmd_sync_run(pkg, 0, 0), 0, "plain sync ignores what --prune would see");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_sync_prune_limit() {
+    test_group("sync --prune: refused past half the package's links without --force");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _sy_pkg(_test_scratch_dir(), "two", "p q");
+    assert_eq(cmd_sync_run(pkg, 0, 0), 0, "link two rows");
+
+    # An emptied manifest is the accident the limit exists for.
+    _sy_pkg(pkg, "two", "");
+    assert_eq(cmd_sync_run(pkg, 1, 0), 1, "pruning 2 of 2 is refused");
+    assert_eq(_sy_kind(scope, ".p"), HAPI_LP_SYMLINK, "...and removes nothing");
+    assert_eq(_sy_kind(scope, ".q"), HAPI_LP_SYMLINK, "...of either");
+    assert_eq(_sy_entries(audit_path), 2, "...and writes nothing");
+    assert_eq(cmd_sync_run(pkg, 1, 1), 0, "--force lifts the limit");
+    assert_eq(_sy_kind(scope, ".p"), HAPI_LP_ABSENT, "both removed");
+    assert_eq(_sy_kind(scope, ".q"), HAPI_LP_ABSENT, "...both");
+    assert_eq(_sy_entries(audit_path), 4, "two op:unlink entries");
+
+    # Exactly half is not more than half.
+    var half = _sy_pkg(_test_scratch_dir(), "half", "h1 h2");
+    assert_eq(cmd_sync_run(half, 0, 0), 0, "link two more");
+    _sy_pkg(half, "half", "h1");
+    assert_eq(cmd_sync_run(half, 1, 0), 0, "pruning 1 of 2 goes through");
+    assert_eq(_sy_kind(scope, ".h2"), HAPI_LP_ABSENT, "...and removes it");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_sync_prune_refuses_what_is_not_ours() {
+    test_group("sync --prune: never removes what hapi did not make, --force or not");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var pkg = _sy_pkg(_test_scratch_dir(), "mut", "m1 m2 m3");
+    assert_eq(cmd_sync_run(pkg, 0, 0), 0, "link three rows");
+    var m3 = _fsl_path_join(scope, ".m3");
+    hapi_unlink(m3);
+    _test_write_file(m3, "the user's own file");
+    _sy_pkg(pkg, "mut", "m1");
+    assert_eq(cmd_sync_run(pkg, 1, 1), 1, "a replaced link refuses the package, even with --force");
+    assert_eq(_sy_kind(scope, ".m3"), HAPI_LP_FILE, "the user's file is untouched");
+    assert_eq(_sy_kind(scope, ".m2"), HAPI_LP_SYMLINK, "...and so is the link that was ours (whole refusal)");
+    assert_eq(_sy_entries(audit_path), 3, "...and nothing was written");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_sync_prune_is_scoped() {
+    test_group("sync --prune: only this package directory's links, in this scope");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    # Two directories, one package name: the trail cannot tell them apart.
+    var a = _sy_pkg(_test_scratch_dir(), "same", "sa");
+    var b = _sy_pkg(_test_scratch_dir(), "same", "sb");
+    assert_eq(cmd_sync_run(a, 0, 0), 0, "link package dir A");
+    assert_eq(cmd_sync_run(b, 0, 0), 0, "link package dir B, same name");
+    assert_eq(cmd_sync_run(a, 1, 0), 0, "--prune A");
+    assert_eq(_sy_kind(scope, ".sb"), HAPI_LP_SYMLINK, "B's link is not A's to prune");
+
+    # A link made under another scope is that scope's.
+    var alt = _test_scratch_dir();
+    var c = _sy_pkg(_test_scratch_dir(), "scoped", "s1 s2 s3");
+    link_set_scope_root(alt);
+    assert_eq(cmd_sync_run(c, 0, 0), 0, "link under another scope");
+    link_set_scope_root(scope);
+    assert_eq(cmd_sync_run(c, 0, 0), 0, "...and under this one");
+    _sy_pkg(c, "scoped", "s1 s2");
+    assert_eq(cmd_sync_run(c, 1, 0), 0, "--prune in this scope");
+    assert_eq(_sy_kind(scope, ".s3"), HAPI_LP_ABSENT, "this scope's dropped link is gone");
+    assert_eq(_sy_kind(alt, ".s3"), HAPI_LP_SYMLINK, "the other scope's is not touched");
+    assert(_sy_entries(audit_path) > 0, "trail written");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_sync_scans_package_roots() {
+    test_group("sync with no package: every package under HAPI_PACKAGE_ROOTS");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    var root = _test_scratch_dir();
+    _sy_pkg(_fsl_path_join(root, "git"), "git", "gitconfig");
+    _sy_pkg(_fsl_path_join(root, "zsh"), "zsh", "zshrc zshenv");
+    _sy_pkg(_fsl_path_join(root, ".hidden"), "hidden", "hid");      # dot-dirs are skipped
+    hapi_mkdir(_fsl_path_join(root, "scripts"), 0x1C0);              # no manifest: not a package
+    hapi_symlink(_fsl_path_join(root, "git"), _fsl_path_join(root, "gitlink"));   # not followed
+    var root2 = _test_scratch_dir();
+    _sy_pkg(_fsl_path_join(root2, "kitty"), "kitty", "kittyrc");
+    sync_set_package_roots(_cli_cat(_cli_cat(root, ":"), root2));
+
+    assert_eq(cmd_sync_run(0, 0, 0), 0, "no-arg sync exits 0");
+    assert_eq(_sy_kind(scope, ".gitconfig"), HAPI_LP_SYMLINK, "git synced");
+    assert_eq(_sy_kind(scope, ".zshenv"), HAPI_LP_SYMLINK, "zsh synced");
+    assert_eq(_sy_kind(scope, ".kittyrc"), HAPI_LP_SYMLINK, "a second root synced");
+    assert_eq(_sy_kind(scope, ".hid"), HAPI_LP_ABSENT, "a dot-directory is not scanned");
+    assert_eq(_sy_entries(audit_path), 4, "four links, the symlinked package not synced twice");
+    assert_eq(cmd_sync_run(0, 0, 0), 0, "a second no-arg sync exits 0");
+    assert_eq(_sy_entries(audit_path), 4, "...and writes nothing");
+
+    # A failing package does not stop the rest.
+    _sy_pkg(_fsl_path_join(root, "broken"), "broken", "gone");
+    hapi_unlink(_fsl_path_join(_fsl_path_join(root, "broken"), "gone"));
+    _sy_pkg(_fsl_path_join(root, "vim"), "vim", "vimrc");
+    assert_eq(cmd_sync_run(0, 0, 0), 1, "one failing package makes the run exit 1");
+    assert_eq(_sy_kind(scope, ".vimrc"), HAPI_LP_SYMLINK, "...and the packages after it still sync");
+
+    # --prune applies per package.
+    hapi_unlink(_fsl_path_join(root, "broken/hapi.cyml"));
+    _sy_pkg(_fsl_path_join(root, "zsh"), "zsh", "zshrc");
+    assert_eq(cmd_sync_run(0, 1, 0), 0, "no-arg --prune exits 0");
+    assert_eq(_sy_kind(scope, ".zshenv"), HAPI_LP_ABSENT, "zsh's dropped row is pruned");
+    assert_eq(_sy_kind(scope, ".gitconfig"), HAPI_LP_SYMLINK, "other packages keep theirs");
+
+    sync_set_package_roots(0);
+    _test_clear_env();
+    return 0;
+}
+
+fn test_sync_scan_refusals() {
+    test_group("sync with no package: configuration and refusals");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+    sync_set_package_roots("");
+    assert_eq(cmd_sync_run(0, 0, 0), 2, "no HAPI_PACKAGE_ROOTS is bad usage");
+    sync_set_package_roots("relative/dir");
+    assert_eq(cmd_sync_run(0, 0, 0), 2, "a relative root is refused");
+    sync_set_package_roots(_test_scratch_dir());
+    assert_eq(cmd_sync_run(0, 0, 0), 1, "a root with no packages exits 1");
+    sync_set_package_roots("/nonexistent-hapi-package-root");
+    assert_eq(cmd_sync_run(0, 0, 0), 1, "a root that cannot be listed exits 1");
+
+    var root = _test_scratch_dir();
+    _sy_pkg(_fsl_path_join(root, "one"), "twin", "t1");
+    _sy_pkg(_fsl_path_join(root, "two"), "twin", "t2");
+    _sy_pkg(_fsl_path_join(root, "solo"), "solo", "so");
+    sync_set_package_roots(root);
+    assert_eq(cmd_sync_run(0, 0, 0), 1, "two packages sharing a name exit 1");
+    assert_eq(_sy_kind(scope, ".t1"), HAPI_LP_ABSENT, "...neither is synced");
+    assert_eq(_sy_kind(scope, ".t2"), HAPI_LP_ABSENT, "...neither");
+    assert_eq(_sy_kind(scope, ".so"), HAPI_LP_SYMLINK, "...and the rest are");
+    assert_eq(_sy_entries(audit_path), 1, "only solo's link was recorded");
+
+    sync_set_package_roots(0);
+    _test_clear_env();
+    return 0;
+}
+
+fn test_sync_prune_guards_the_trail() {
+    test_group("sync --prune: a torn or corrupt trail refuses before any change (F-055)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var trail = load64(env + 8);
+    var pkg = _sy_pkg(_test_scratch_dir(), "guard", "g1 g2 g3");
+    assert_eq(cmd_sync_run(pkg, 0, 0), 0, "link three rows");
+    _sy_pkg(pkg, "guard", "g1 g2");
+
+    # A torn tail reads (the reader drops it) but must not be written onto.
+    var fd = file_open(trail, O_WRONLY | O_APPEND, 0);
+    file_write(fd, "{\"ts\":\"torn", 11);
+    file_close(fd);
+    var av = _cli_av("hapi sync --prune");
+    _cli_add(av, pkg);
+    assert_eq(_cli_run(av), 1, "--prune refuses on a torn tail");
+    assert_eq(_sy_kind(scope, ".g3"), HAPI_LP_SYMLINK, "...and the link is still there");
+    # Refused by the pre-flight, before anything changed — not removed and
+    # then put back when the append failed (F-061 would hide that on disk).
+    assert(_test_substr(_cli_err, _cli_err_n, "audit trail is not writable; refusing to sync") >= 0,
+      "...by the pre-flight");
+    assert(_test_substr(_cli_err, _cli_err_n, "audit-trail write failed") < 0,
+      "...without touching the link first");
+
+    # A malformed interior line is a partial view of the trail.
+    var buf = alloc(65536);
+    var n = file_read_all(trail, buf, 65535);
+    var fd2 = file_open(trail, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    file_write(fd2, "not a trail line\n", 17);
+    file_write(fd2, buf, n - 11);           # without the torn tail
+    file_close(fd2);
+    assert_eq(cmd_sync_run(pkg, 1, 0), 1, "--prune refuses a corrupt trail");
+    assert_eq(_sy_kind(scope, ".g3"), HAPI_LP_SYMLINK, "...and the link is still there");
+
+    _test_clear_env();
+    return 0;
+}
+
+# F-061: an append that fails AFTER the pre-flight passed (a full disk, a
+# file-size limit) left the mutation on disk and unrecorded — `unlink`
+# said "unlinked 0 / 2" over two links it had deleted. Every one-step
+# mutation is now taken back; the run stops there.
+fn test_unwritten_entries_are_taken_back() {
+    test_group("audit: a mutation whose entry the trail refuses is taken back (F-061)");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var audit_path = load64(env + 8);
+
+    # link — the F-018 take-back, never tested until the hook existed.
+    var pl = _sy_pkg(_test_scratch_dir(), "fl", "l1");
+    audit_test_fail_appends(1);
+    assert_eq(cmd_link(pl, 0), 1, "link: a refused entry exits 1");
+    audit_test_fail_appends(0);
+    assert_eq(_sy_kind(scope, ".l1"), HAPI_LP_ABSENT, "link: the new link is taken back");
+    assert_eq(_sy_entries(audit_path), 0, "link: nothing recorded, nothing left");
+
+    # unlink
+    var pu = _sy_pkg(_test_scratch_dir(), "fu", "u1 u2");
+    assert_eq(cmd_link(pu, 0), 0, "unlink: setup");
+    audit_test_fail_appends(1);
+    assert_eq(cmd_unlink("fu"), 1, "unlink: a refused entry exits 1");
+    audit_test_fail_appends(0);
+    assert_eq(_sy_kind(scope, ".u1"), HAPI_LP_SYMLINK, "unlink: the link is put back");
+    assert_eq(_sy_kind(scope, ".u2"), HAPI_LP_SYMLINK, "unlink: no link is left removed");
+    assert_eq(_sy_entries(audit_path), 2, "unlink: the trail is as it was");
+    # ...and the run stops at the first refusal rather than trying the rest.
+    audit_test_fail_appends(1);
+    assert_eq(_cli_run(_cli_av("hapi unlink fu")), 1, "unlink via the CLI exits 1");
+    audit_test_fail_appends(0);
+    var mark = "audit-trail write failed for ";
+    var first = _test_substr(_cli_err, _cli_err_n, mark);
+    assert(first >= 0, "unlink: the refusal is reported");
+    assert(_test_substr(_cli_err + first + 1, _cli_err_n - first - 1, mark) < 0,
+      "unlink: once — the run stopped at the first");
+
+    # sync --prune
+    var pp = _sy_pkg(_test_scratch_dir(), "fp", "p1 p2 p3");
+    assert_eq(cmd_link(pp, 0), 0, "prune: setup");
+    _sy_pkg(pp, "fp", "p1 p2");
+    audit_test_fail_appends(1);
+    assert_eq(cmd_sync_run(pp, 1, 0), 1, "prune: a refused entry exits 1");
+    audit_test_fail_appends(0);
+    assert_eq(_sy_kind(scope, ".p3"), HAPI_LP_SYMLINK, "prune: the link is put back");
+    assert_eq(_sy_entries(audit_path), 5, "prune: the trail is as it was");
+
+    _test_clear_env();
+
+    # rollback, reversing a link
+    env = _test_fresh_env();
+    scope = load64(env);
+    audit_path = load64(env + 8);
+    var pr = _sy_pkg(_test_scratch_dir(), "fr", "r1");
+    assert_eq(cmd_link(pr, 0), 0, "rollback link: setup");
+    audit_test_fail_appends(1);
+    assert_eq(cmd_rollback(), 1, "rollback link: a refused entry exits 1");
+    audit_test_fail_appends(0);
+    assert_eq(_sy_kind(scope, ".r1"), HAPI_LP_SYMLINK, "rollback link: the link is put back");
+    assert_eq(_sy_entries(audit_path), 1, "rollback link: the trail is as it was");
+
+    # rollback, reversing an unlink
+    assert_eq(cmd_unlink("fr"), 0, "rollback unlink: setup");
+    audit_test_fail_appends(1);
+    assert_eq(cmd_rollback(), 1, "rollback unlink: a refused entry exits 1");
+    audit_test_fail_appends(0);
+    assert_eq(_sy_kind(scope, ".r1"), HAPI_LP_ABSENT, "rollback unlink: the re-created link is taken back");
+    assert_eq(_sy_entries(audit_path), 2, "rollback unlink: the trail is as it was");
+    _test_clear_env();
+
+    # rollback, reversing an adopt: three steps, not taken back — reported.
+    env = _test_fresh_env();
+    scope = load64(env);
+    audit_path = load64(env + 8);
+    var pa = _sy_pkg(_test_scratch_dir(), "fa", "");
+    _test_write_file(_fsl_path_join(scope, ".zz"), "user content");
+    assert_eq(cmd_adopt(".zz", pa), 0, "rollback adopt: setup");
+    audit_test_fail_appends(1);
+    assert_eq(cmd_rollback(), 1, "rollback adopt: a refused entry exits 1");
+    audit_test_fail_appends(0);
+    assert_eq(_sy_kind(scope, ".zz"), HAPI_LP_FILE, "rollback adopt: the file is back, as reported");
+    assert_eq(_sy_entries(audit_path), 1, "rollback adopt: the trail still says adopted, as reported");
+
+    _test_clear_env();
+    return 0;
+}
+
+fn test_sync_prune_cli() {
+    test_group("cli: sync's --prune and --force (1.3.0)");
+
+    var msg = _cli_cat("hapi: `sync --force` needs `--prune`: on sync it only lifts prune's limit,\n",
+      "  and sync never overwrites a conflict (that is `hapi link --force`)\n");
+    _cli_expect(_cli_av("hapi sync pkg --force"), 2, "", msg, "sync --force alone is bad usage");
+    _cli_expect(_cli_av("hapi --help"), 0, _cli_usage, "", "the usage text is unchanged within a run");
+
+    var env = _test_fresh_env();
+    var scope = load64(env);
+    var pkg = _sy_pkg(_test_scratch_dir(), "clip", "c1 c2 c3");
+    var av = _cli_av("hapi sync");
+    _cli_add(av, pkg);
+    assert_eq(_cli_run(av), 0, "hapi sync <pkg>");
+    _sy_pkg(pkg, "clip", "c1 c2");
+    _cli_add(av, "--prune");
+    assert_eq(_cli_run(av), 0, "hapi sync <pkg> --prune");
+    assert_eq(_sy_kind(scope, ".c3"), HAPI_LP_ABSENT, "...pruned the dropped row");
+    var tail = "pruned 1 (no longer in the manifest)\n";
+    assert(_cli_out_n > strlen(tail) && memeq(_cli_out + _cli_out_n - strlen(tail), tail, strlen(tail)) == 1,
+      "...and said so");
+
+    var root = _test_scratch_dir();
+    _sy_pkg(_fsl_path_join(root, "nvim"), "nvim", "init");
+    sync_set_package_roots(root);
+    assert_eq(_cli_run(_cli_av("hapi sync")), 0, "hapi sync with no package");
+    assert_eq(_sy_kind(scope, ".init"), HAPI_LP_SYMLINK, "...synced the root's package");
+    var sum = "synced 1 / 1 packages\n";
+    assert(_cli_out_n > strlen(sum) && memeq(_cli_out + _cli_out_n - strlen(sum), sum, strlen(sum)) == 1,
+      "...and summed it up");
+    # `clip` was linked from outside the root: named, not synced.
+    var note = _cli_cat(_cli_cat("hapi: note: the trail has live links for `clip` from ", pkg),
+      ",\n  which no package root holds; not synced\n");
+    assert(_test_substr(_cli_err, _cli_err_n, note) >= 0, "a trail package outside the roots is named");
+
+    sync_set_package_roots(0);
+    _test_clear_env();
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_minimal_manifest();
@@ -4014,6 +4423,15 @@ fn main() {
     test_cli_flags_reach_the_command();
     test_cli_additive_forms();
     test_cli_unexpected_flag_named_as_typed();
+    test_sync_prune_removes_the_dropped_row();
+    test_sync_prune_limit();
+    test_sync_prune_refuses_what_is_not_ours();
+    test_sync_prune_is_scoped();
+    test_sync_scans_package_roots();
+    test_sync_scan_refusals();
+    test_sync_prune_guards_the_trail();
+    test_unwritten_entries_are_taken_back();
+    test_sync_prune_cli();
     return assert_summary();
 }
 

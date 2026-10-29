@@ -419,7 +419,38 @@ fn audit_preflight_r(): Result {
     return Ok(0);
 }
 
+# Test hook: when 1, every append is refused as a failed write, while the
+# pre-flight still passes — the window F-061 is about, which a test cannot
+# open any other way without raw syscalls (an RLIMIT_FSIZE between the
+# pre-flight and the append). 0 in the binary; nothing but tests sets it.
+var _audit_fail_appends = 0;
+fn audit_test_fail_appends(on): i64 { _audit_fail_appends = on; return 0; }
+
+# F-061: report a mutation whose trail entry could not be written, after
+# the pre-flight passed (a full disk, a file-size limit). `undone` = 1
+# when the caller took the mutation back; otherwise `left` says what is
+# on disk and unrecorded. Callers stop the run after this: the trail
+# that refused one entry will refuse the next.
+fn audit_report_unwritten(abs_tgt, undone, left): i64 {
+    var t0 = "hapi: audit-trail write failed for ";
+    eprint(t0, strlen(t0));
+    eprint(abs_tgt, strlen(abs_tgt));
+    if (undone == 1) {
+        var t1 = "\n  it was taken back; this run left nothing unrecorded\n";
+        eprint(t1, strlen(t1));
+    } else {
+        var t2 = "\n  it was NOT taken back: ";
+        eprint(t2, strlen(t2));
+        eprint(left, strlen(left));
+        eprint("\n", 1);
+    }
+    var t3 = "  nothing after it was touched\n";
+    eprint(t3, strlen(t3));
+    return 0;
+}
+
 fn _audit_append_bytes(buf, n): Result {
+    if (_audit_fail_appends == 1) { return Err(HapiAuditWriteFailed); }
     # A composer that overflowed its buffer returns -1. Refuse the
     # write rather than handing a negative length to the writer: a
     # truncated line has no `\n`, so the next entry would concatenate

@@ -124,9 +124,15 @@ fn _hul_is_ours(entry, current): i64 {
 }
 
 # Remove one live entry. Returns:
-#    0 — removed cleanly, audit appended
+#    0 — removed and recorded (or already absent: nothing to record)
 #    1 — refused (current state diverges from trail)
-#   -1 — IO error (sys_unlink or audit write failed)
+#   -1 — could not remove it; nothing changed
+#   -2 — removed, but its trail entry could not be written, so the link
+#        was put back: nothing changed (F-061)
+#   -3 — removed, entry not written, and the link could not be put back:
+#        gone and NOT recorded
+# On -2 / -3 the caller reports (audit_report_unwritten) and stops: the
+# trail that refused this entry will refuse the next.
 fn _hul_remove_one(entry): i64 {
     var abs_tgt = hae_abs_target(entry);
     if (abs_tgt == 0) { return 1; }
@@ -152,8 +158,23 @@ fn _hul_remove_one(entry): i64 {
         hae_pkg(entry), hae_pkg_version(entry), hae_manifest_hash(entry),
         hae_source(entry), hae_target(entry),
         hae_abs_source(entry), hae_abs_target(entry));
-    if (is_err_result(ar_t) == 1) { return 0 - 1; }
+    if (is_err_result(ar_t) == 1) {
+        # Put back exactly this link, with the text it had, as `link`'s
+        # write path takes back exactly its own (F-018). Through 1.2.1 it
+        # stayed removed: the trail still called it live, and the run said
+        # "unlinked 0 / N" over links it had deleted (F-061).
+        if (hapi_symlink(current, abs_tgt) < 0) { return 0 - 3; }
+        return 0 - 2;
+    }
     return 0;
+}
+
+# The F-061 report for a -2 / -3 from _hul_remove_one.
+fn hul_report_unwritten(entry, rc): i64 {
+    var abs_tgt = hae_abs_target(entry);
+    if (rc == 0 - 2) { return audit_report_unwritten(abs_tgt, 1, 0); }
+    return audit_report_unwritten(abs_tgt, 0,
+      "the link is removed and the trail still calls it live");
 }
 
 fn _hul_cstr_eq(a, b): i64 {
@@ -219,12 +240,17 @@ fn cmd_unlink(pkg_arg): i64 {
     var removed = 0;
     var refused = 0;
     var errored = 0;
+    var stop = 0;
     var i = 0;
-    while (i < nlive) {
+    while (i < nlive && stop == 0) {
         var entry = vec_get(live, i);
         var rc = _hul_remove_one(entry);
         var abs_tgt = hae_abs_target(entry);
-        if (rc == 0) {
+        if (rc < 0 - 1) {
+            hul_report_unwritten(entry, rc);
+            errored = errored + 1;
+            stop = 1;
+        } elif (rc == 0) {
             _hul_puts("  - ");
             _hul_puts(abs_tgt);
             if (hapi_dry_run() == 1) { _hul_puts("  (dry-run)"); }

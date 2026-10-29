@@ -6,6 +6,141 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _Nothing yet._
 
+## [1.3.0] - 2026-10-28
+
+> **sync: no package, and `--prune`.** The two open dogfood issues, both on `sync`, and
+> both additive. A recovery is now one command: `hapi sync` with no package syncs every
+> package under `HAPI_PACKAGE_ROOTS`. A dropped manifest row is now one trail entry, not
+> an 11-entry rotation: `hapi sync --prune` removes the links whose rows left the
+> manifest. The design, and what was weighed instead, is
+> [ADR 0006](docs/adr/0006-sync-package-roots-and-prune.md). The manifest schema (ADR
+> 0001) and the audit-trail line shape (ADR 0002) are unchanged: neither form writes a
+> new field.
+
+### Added
+
+- **`hapi sync` with no package** syncs every package under `HAPI_PACKAGE_ROOTS`.
+  - The variable is colon-separated, and every entry must be absolute.
+  - Each root is scanned one level deep for `<root>/<name>/hapi.cyml`. Dot-names and
+    directories without a manifest are ignored.
+  - The scan follows no symlink: a symlinked package directory or manifest is named in
+    a note and skipped, so a root bounds exactly what gets linked.
+  - Two packages sharing a name are both refused, because the trail could not tell
+    their links apart.
+  - Packages sync in name order, each exactly as `hapi sync <dir>` would. A failing
+    one does not stop the rest, and `synced N / M packages` closes the run.
+  - The trail is then read only to *name* packages it has live links for whose
+    directory no root holds. They are not synced, because their scope cannot be known.
+  - `HAPI_PACKAGE_ROOTS` grants nothing: every target is still bounded by the scope,
+    `--root` and ADR 0005.
+  - Unset, or a relative entry, is exit 2; a root that cannot be listed, or no package
+    found, is exit 1.
+  ([`docs/development/issues/archived/2026-05-24-no-arg-sync-bootstrap-recovery.md`](docs/development/issues/archived/2026-05-24-no-arg-sync-bootstrap-recovery.md))
+- **`hapi sync [<pkg>] --prune`** also removes the links whose rows left the
+  manifest, one `op:unlink` each (the entry `hapi unlink` writes, so `rollback`
+  reverses it the same way).
+  - **A link is a candidate when it is all of:** a live `op:link` under the manifest's
+    name; with its source in *this* package directory; with its target in *this* run's
+    scope; and with no row still in the manifest targeting it. So a same-named package
+    elsewhere, or a `--root` run, is never pruned by another.
+  - **A link that is no longer the one hapi wrote** refuses the whole package, and
+    `--force` does not override that.
+  - **The package is planned whole before any write.** The link half's refusals come
+    first, then the prune half, then F-055's trail preflight, the removals, and the
+    creates.
+  - The dogfood case, one row of six dropped, writes 1 entry where the rotation wrote
+    11, and the kept links are never touched.
+  ([`docs/development/issues/archived/2026-05-20-sync-prune-deferred-row-removal-rotation.md`](docs/development/issues/archived/2026-05-20-sync-prune-deferred-row-removal-rotation.md))
+- **`--force` on `sync`, with `--prune`.** Prune refuses past half of the package's
+  live links, so an emptied or truncated manifest is caught; `--force` lifts that limit
+  **and nothing else**. `sync` still never overwrites a conflict (that is
+  `link --force`), and `sync --force` without `--prune` is exit 2.
+
+### Changed
+
+- **`hapi --help`** shows the new `sync` forms. The `sync` line became five lines; the
+  rest of the text is unchanged.
+- **`hapi sync` with no package** was usage, exit 2. It is still exit 2 when
+  `HAPI_PACKAGE_ROOTS` is unset, now with a message naming the variable.
+- **`hapi sync --force`** was "unexpected flag", exit 2. It is still exit 2 without
+  `--prune`, now saying what `--force` means on `sync`.
+- **Internal:** `cmd_link` is split into `_hlnk_plan_run` (parse, plan, every refusal,
+  no write) and `_hlnk_execute`, so that `sync --prune` can plan both halves before
+  writing either. Behaviour is identical: the 819-line golden, run on 1.2.1 and on the
+  split alone, is byte-identical.
+
+### Security
+
+P(-1) re-ran: no-arg sync turns a directory walk into write targets, and prune removes
+links. The record is the *1.3.0 addendum* of
+[`docs/audit/2026-10-28-audit.md`](docs/audit/2026-10-28-audit.md). It walked the four
+threat classes and found one defect, on the removal path prune shares with `unlink`.
+
+- **F-061 [MEDIUM] — a removal whose trail entry could not be written stayed removed.**
+  F-055 (1.1.1) made `unlink` prove the trail writable before it removes anything. But
+  an append can still fail after that pre-flight passed: a full disk, or a file-size
+  limit. Staged with `ulimit -f` on 1.2.1, `hapi unlink p` deleted both of the
+  package's links, recorded neither, and reported `unlinked 0 / 2`. The trail went on
+  calling them live.
+  - **`unlink`, `sync --prune` and rollback's link reversal** now put the link back,
+    with the text it had.
+  - **Rollback's unlink reversal** removes the link it just re-created.
+  - All of them stop the run there, with `audit-trail write failed for <target>` and
+    whether the change was taken back. This mirrors what `link` has done for its own
+    links since F-018.
+  - **An `adopt` reversal**, three steps, is not taken back but reported exactly.
+  - Forward `adopt` already said "adopt succeeded but audit-trail write failed", and
+    is unchanged.
+
+Every guard above, and F-061's take-back, is held by a test that a seeded revert turns
+red: 26 of 26, including two F-055 pre-flight reverts. The take-back would otherwise
+hide those on disk, so their tests now also assert which path refused.
+
+### Tests
+
+- `tests/hapi.tcyr` 826 → **970** assertions (121 → 130 groups). Eight new groups cover:
+  - the dogfood prune, the limit, and ownership (a replaced link refuses even with
+    `--force`);
+  - scoping by package directory and by scope;
+  - the trail guards (a torn tail, a corrupt interior);
+  - the scan: two roots, dot-dirs, a symlinked package, a failing package mid-run,
+    no-arg `--prune`, twins, and every configuration refusal;
+  - the CLI, including the trail note;
+  - F-061 on every path: link, unlink, prune, and rollback's link, unlink and adopt
+    reversals. These are driven by a new test hook, `audit_test_fail_appends`, which
+    fails the append while the pre-flight still passes; that is the window, and a
+    `.tcyr` cannot open it with an rlimit without raw syscalls. The hook also gives
+    `link`'s F-018 take-back its first test.
+
+  The flag matrix gains `--prune`, accepted on `sync` only, and `sync`'s `--force`.
+- `tests/agnos.tcyr` 55 → **61** (8 → 9 groups): a scan and a prune with the scope at
+  `/`, which runs on agnos under mirshi too. The scan's directory listing and prune's
+  unlink both have agnos arms.
+- Verified:
+  - x86_64, `--aarch64`, `--agnos` and `CYRIUS_DCE=1` builds;
+  - `cyrius lint` 0 warnings;
+  - `cyrius test` and `cyrius test --aarch64`;
+  - `cyrius fuzz` and `cyrius bench`;
+  - `scripts/concurrency-test.sh`;
+  - `scripts/agnos-smoke.sh` under mirshi, all five checks;
+  - `cyrius deps --verify` 114 / 114.
+
+  The 1.2.1 golden diffs only in the usage text, the version line, and the two `sync`
+  forms above.
+
+### Notes
+
+- **Benchmarks:** per-package `sync` is flat against 1.2.1, with a byte-identical
+  trail. One no-arg `hapi sync` over the harness's 100 packages takes 80–84 ms cold and
+  63–67 ms warm, where the 100-process loop it replaces takes ~133 / ~109, and it writes
+  the same trail byte for byte. The DCE binary went 580,928 → 603,424 bytes. See
+  `docs/benchmarks.md`.
+- **One root, one scope.** The packages under a root are synced into the run's scope,
+  so keep `--root` packages under a root of their own.
+- A package synced through a different spelling of its directory (a symlinked path)
+  does not recognise its earlier links, so `--prune` leaves them. That is an under-prune,
+  which fails safe, and `hapi unlink` still removes them.
+
 ## [1.2.1] - 2026-10-28
 
 > **cmdit fallout.** A patch on 1.2.0's migration, with no new surface and no change in

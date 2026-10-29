@@ -85,7 +85,7 @@ directions, roughly ordered by invasiveness:
   would let the recovery `sync` rebuild the trail to match the
   live set. Additive flag; no contract change. Interacts with the
   no-arg-sync work — see
-  [`2026-05-24-no-arg-sync-bootstrap-recovery.md`](2026-05-24-no-arg-sync-bootstrap-recovery.md).
+  [`2026-05-24-no-arg-sync-bootstrap-recovery.md`](archived/2026-05-24-no-arg-sync-bootstrap-recovery.md).
 - **Reconstruct from status (additive verb/flag).** A one-shot
   that walks the manifests, and for every `OK` row synthesizes the
   trail entry it *would* have written. Heavier; only worth it if
@@ -108,7 +108,7 @@ seeded with the 2 operations the recovery actually performed.
 
 ## Cross-references
 
-- [`2026-05-24-no-arg-sync-bootstrap-recovery.md`](2026-05-24-no-arg-sync-bootstrap-recovery.md)
+- [`2026-05-24-no-arg-sync-bootstrap-recovery.md`](archived/2026-05-24-no-arg-sync-bootstrap-recovery.md)
   — same recovery event; the no-arg-sync ergonomics half.
 - [ADR 0002](../../adr/0002-audit-trail-format.md) — trail format
   + local-trust model (F-004 lineage).

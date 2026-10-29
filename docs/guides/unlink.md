@@ -77,8 +77,25 @@ removed normally.
 | code | meaning                                                          |
 |------|------------------------------------------------------------------|
 | 0    | every live entry removed (or already absent)                     |
-| 1    | at least one entry refused (user-mutated) or IO error            |
+| 1    | at least one entry refused (user-mutated) or IO error, or the trail refused an entry (below) |
 | 2    | bad usage (missing package name)                                 |
+
+## When the trail refuses an entry
+
+`unlink` proves the trail is writable before it removes anything (F-055),
+but a write can still fail after that (a full disk, a file-size limit).
+Since 1.3.0 the link whose entry could not be written is **put back**,
+and the run stops there:
+
+```
+hapi: audit-trail write failed for /home/me/.zshenv
+  it was taken back; this run left nothing unrecorded
+  nothing after it was touched
+```
+
+Through 1.2.1 the link stayed removed while the trail still called it
+live, and the run reported `unlinked 0 / N` over the links it had deleted
+(F-061). Fix the trail's disk and re-run.
 
 ## See also
 

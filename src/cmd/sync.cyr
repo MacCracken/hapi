@@ -1,35 +1,464 @@
-# cmd/sync.cyr — `hapi sync <package>`
+# cmd/sync.cyr — `hapi sync [<package>] [--prune [--force]]`
 #
 # Re-apply a package's manifest idempotently. State that already
 # matches the manifest is a no-op (no audit writes); missing
 # links get created (one audit entry each); user-mutated state
-# is refused.
+# is refused. Without `--prune`, sync is `hapi link <pkg>` without
+# `--force`: the verb is the user-facing intent, "make this match".
 #
-# At v0.6.0 sync is operationally identical to `hapi link <pkg>`
-# without `--force` — link is already idempotent by design (M2
-# acceptance test), and that's exactly the contract sync wants.
-# The verb is the user-facing intent: "make this match" vs
-# link's "create these now". Reconciliation beyond what link does
-# (e.g. prune trail entries no longer in the manifest) is tracked at
-# docs/development/issues/2026-05-20-sync-prune-deferred-row-removal-rotation.md.
+# 1.3.0 adds two forms (ADR 0006):
+#   - No package: sync every package under HAPI_PACKAGE_ROOTS, each
+#     root scanned one level deep for `<root>/<name>/hapi.cyml`. A
+#     recovery is one command, not a shell loop. The scan follows no
+#     symlink and reads no trail to decide what to sync; the trail is
+#     only consulted afterwards, to name packages it knows that no
+#     root holds.
+#   - `--prune`: also remove the links this package made whose row
+#     has left its manifest — one `op:unlink` each, as `hapi unlink`
+#     writes. Refused past half the package's live links unless
+#     `--force`, which on sync means only that; sync never overwrites
+#     a conflict (that is `hapi link --force`).
 #
-# Exit codes — passed through from cmd_link:
-#   0  state matches manifest after the run
-#   1  conflict, parse error, or IO failure
-#   2  bad usage
+# Exit codes:
+#   0  state matches the manifest(s) after the run
+#   1  conflict, refused prune, parse error, IO failure, or (with no
+#      package) any package that failed or no package found
+#   2  bad usage (incl. no package and HAPI_PACKAGE_ROOTS unset)
 
 include "src/cmd/link.cyr"
+include "src/cmd/unlink.cyr"   # _hul_live_entries_for / _hul_is_ours / _hul_remove_one
+include "src/audit_reader.cyr"
+include "lib/fs.cyr"           # dir_list_checked
 
 fn _hsy_puts(s): i64 { print(s, strlen(s)); return 0; }
 fn _hsy_eputs(s): i64 { eprint(s, strlen(s)); return 0; }
 
-fn cmd_sync(pkg_arg): i64 {
-    if (pkg_arg == 0) {
-        _hsy_eputs("usage: hapi sync <package-dir|hapi.cyml>\n");
-        return 2;
+# Test hook, like cap_set_allowlist: when set (non-zero) it stands in
+# for $HAPI_PACKAGE_ROOTS. Reset to 0 to restore the environment.
+var _hsy_roots_override = 0;
+fn sync_set_package_roots(s): i64 { _hsy_roots_override = s; return 0; }
+
+# Read the trail for a step that must not act on a partial view: an
+# unreadable trail or a malformed interior line is refused, as unlink
+# refuses it. An ABSENT trail is Ok(empty). Returns Ok(trail) / Err(1).
+fn _hsy_read_trail(what): Result {
+    var tr_t, tr_v = audit_read_default_r();
+    if (is_err_result(tr_t) == 1) {
+        var trc = tr_v;
+        _hsy_eputs("hapi: ");
+        _hsy_eputs(hapi_ar_err_msg(trc));
+        if (trc == HapiArCorrupt) {
+            _hsy_eputs(" (line ");
+            _hsy_eputs(_har_itoa(audit_corrupt_line()));
+            _hsy_eputs(")");
+        }
+        _hsy_eputs("\n  refusing to ");
+        _hsy_eputs(what);
+        _hsy_eputs(" on a partial view of the trail\n");
+        return Err(1);
     }
+    return Ok(tr_v);
+}
+
+fn _hsy_in_plan(plans, abs_tgt): i64 {
+    var n = vec_len(plans);
+    var i = 0;
+    while (i < n) {
+        if (_hul_cstr_eq(hlnk_plan_abs_target(vec_get(plans, i)), abs_tgt) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _hsy_refuse_prune_head(m, why): i64 {
+    _hsy_eputs("hapi: refusing to prune `");
+    var nm = hapi_mf_name(m);
+    eprint(str_data(nm), str_len(nm));
+    _hsy_eputs("` — ");
+    _hsy_eputs(why);
+    return 0;
+}
+
+fn _hsy_print_targets(entries): i64 {
+    var i = 0;
+    while (i < vec_len(entries)) {
+        _hsy_eputs("  ");
+        _hsy_eputs(hae_abs_target(vec_get(entries, i)));
+        _hsy_eputs("\n");
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Sync one package with `--prune`. The link half is planned first and
+# refused on its own terms (conflicts, escapes, a missing source); then
+# the prune half is planned, and only then is anything written: the
+# removals, then the creates. A package is refused as a whole.
+#
+# Which links are this package's to prune: live `op:link` entries
+# (_hul_live_entries_for — `adopt`'s links are rollback's, ADR 0004)
+# under the manifest's name, whose source lies in THIS package
+# directory and whose target lies in THIS run's scope. The trail keys on
+# the name alone, so without the directory test two packages sharing a
+# name would prune each other, and without the scope test a run under
+# $HOME would prune what a `--root` run made. A link planned for a row
+# still in the manifest is never a candidate.
+fn _hsy_prune_one(pkg_arg, force): i64 {
+    var pr_t, pr_v = _hlnk_plan_run(pkg_arg, 0);
+    if (is_err_result(pr_t) == 1) { return pr_v; }
+    var run = pr_v;
+    var m = hlnk_run_manifest(run);
+    var pkg_dir = hlnk_run_pkg_dir(run);
+    var scope = hlnk_run_scope_root(run);
+    var plans = hlnk_run_plans(run);
+
+    var tr_t, tr_v = _hsy_read_trail("prune");
+    if (is_err_result(tr_t) == 1) { return 1; }
+    var live = _hul_live_entries_for(tr_v, _fsl_str_to_cstr(hapi_mf_name(m)));
+
+    var owned = 0;               # this package's live links, in this scope
+    var prune = vec_new();       # ...whose row left the manifest, still ours on disk
+    var mutated = vec_new();     # ...whose row left, but the link is not ours any more
+    var i = 0;
+    while (i < vec_len(live)) {
+        var e = vec_get(live, i);
+        var src = hae_abs_source(e);
+        var tgt = hae_abs_target(e);
+        if (src != 0 && tgt != 0) {
+            if (_fsl_within(src, pkg_dir) == 1 && _fsl_within(tgt, scope) == 1) {
+                owned = owned + 1;
+                if (_hsy_in_plan(plans, tgt) == 0) {
+                    var probe = link_probe(tgt);
+                    var kind = link_probe_kind(probe);
+                    if (kind == HAPI_LP_SYMLINK && _hul_is_ours(e, link_probe_target(probe)) == 1) {
+                        vec_push(prune, e);
+                    } elif (kind != HAPI_LP_ABSENT) {
+                        vec_push(mutated, e);
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    # hapi removes only what it created; --force does not change that.
+    if (vec_len(mutated) > 0) {
+        _hsy_refuse_prune_head(m, "a link whose row left the manifest is no longer\n");
+        _hsy_eputs("  the one hapi made (hapi removes only what it created; --force does not\n");
+        _hsy_eputs("  override this):\n");
+        _hsy_print_targets(mutated);
+        return 1;
+    }
+    # The safety limit: an emptied or truncated manifest must not take
+    # the package's links with it on one keystroke.
+    var np = vec_len(prune);
+    if (np * 2 > owned && force == 0) {
+        _hsy_refuse_prune_head(m, "");
+        fmt_int_fd(2, np);
+        _hsy_eputs(" of its ");
+        fmt_int_fd(2, owned);
+        _hsy_eputs(" live links left the manifest, more than half\n  (rerun with --prune --force to remove them):\n");
+        _hsy_print_targets(prune);
+        return 1;
+    }
+
+    if (hapi_dry_run() == 0 && _hlnk_will_write(run, 0) + np > 0) {
+        if (hlnk_preflight("sync") != 0) { return 1; }
+    }
+
+    var refused = 0;
+    var j = 0;
+    while (j < np) {
+        var pe = vec_get(prune, j);
+        var rc = _hul_remove_one(pe);
+        if (rc == 0) {
+            _hsy_puts("  - ");
+            _hsy_puts(hae_abs_target(pe));
+            if (hapi_dry_run() == 1) { _hsy_puts("  (dry-run)"); }
+            _hsy_puts("\n");
+        } elif (rc == 1) {
+            _hsy_eputs("  ! ");
+            _hsy_eputs(hae_abs_target(pe));
+            _hsy_eputs("  (changed since it was planned; skipped)\n");
+            refused = refused + 1;
+        } elif (rc == 0 - 1) {
+            _hsy_eputs("hapi: could not prune ");
+            _hsy_eputs(hae_abs_target(pe));
+            _hsy_eputs(" (IO error)\n");
+            return 1;
+        } else {
+            hul_report_unwritten(pe, rc);
+            return 1;
+        }
+        j = j + 1;
+    }
+    var lrc = _hlnk_execute(run, 0);
+    _hsy_puts("pruned ");
+    fmt_int(np - refused);
+    _hsy_puts(" (no longer in the manifest)\n");
+    if (lrc != 0 || refused > 0) { return 1; }
+    return 0;
+}
+
+fn _hsy_one(pkg_arg, prune, force): i64 {
     _hsy_puts("syncing ");
     _hsy_puts(pkg_arg);
     _hsy_puts("...\n");
-    return cmd_link(pkg_arg, 0);
+    if (prune == 0) { return cmd_link(pkg_arg, 0); }
+    return _hsy_prune_one(pkg_arg, force);
 }
+
+# Byte order, for a scan whose output does not depend on readdir order.
+fn _hsy_name_cmp(a, b): i64 {
+    var i = 0;
+    while (load8(a + i) != 0 && load8(a + i) == load8(b + i)) { i = i + 1; }
+    return load8(a + i) - load8(b + i);
+}
+
+fn _hsy_note(path, why): i64 {
+    _hsy_eputs("hapi: note: skipped ");
+    _hsy_eputs(path);
+    _hsy_eputs(" (");
+    _hsy_eputs(why);
+    _hsy_eputs(")\n");
+    return 0;
+}
+
+# Scan one package root, one level deep, appending each package
+# directory to `found`. A child is a package when it is a directory (not
+# a symlink to one) holding a regular-file `hapi.cyml`. Dot-names are
+# skipped; a symlink that would have been a package is named, not
+# followed, so a root bounds exactly what the scan picks up. Returns 0,
+# or -1 when the root could not be listed.
+fn _hsy_scan_root(root, found): i64 {
+    var names = vec_new();
+    if (dir_list_checked(str_from(root), names) < 0) {
+        _hsy_eputs("hapi: could not list the package root ");
+        _hsy_eputs(root);
+        _hsy_eputs("\n");
+        return 0 - 1;
+    }
+    var cnames = vec_new();
+    var i = 0;
+    while (i < vec_len(names)) {
+        vec_push(cnames, _fsl_str_to_cstr(vec_get(names, i)));
+        i = i + 1;
+    }
+    vec_sort_by(cnames, &_hsy_name_cmp);
+    var j = 0;
+    while (j < vec_len(cnames)) {
+        var nm = vec_get(cnames, j);
+        if (load8(nm) != 46) {
+            var dir = _fsl_path_join(root, nm);
+            var mf = _fsl_path_join(dir, "hapi.cyml");
+            var dk = link_probe_kind(link_probe(dir));
+            var mk = link_probe_kind(link_probe(mf));
+            if (dk == HAPI_LP_DIRECTORY) {
+                if (mk == HAPI_LP_FILE) { vec_push(found, dir); }
+                elif (mk != HAPI_LP_ABSENT) { _hsy_note(mf, "not a regular file; the scan follows no symlink"); }
+            } elif (dk == HAPI_LP_SYMLINK && mk != HAPI_LP_ABSENT) {
+                _hsy_note(dir, "a symlink; the scan follows none — sync it by path");
+            }
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+# The package directory a trail link entry came from: its abs_source
+# with the row's own `source` taken off the end (link writes the one as
+# the other joined to the package directory). 0 when they do not line up.
+fn _hsy_entry_pkg_dir(e): i64 {
+    var abs_src = hae_abs_source(e);
+    var src = hae_source(e);
+    if (abs_src == 0 || src == 0) { return 0; }
+    var an = strlen(abs_src);
+    var sn = strlen(src);
+    if (sn == 0 || an <= sn + 1) { return 0; }
+    if (memeq(abs_src + an - sn, src, sn) == 0) { return 0; }
+    if (load8(abs_src + an - sn - 1) != 47) { return 0; }
+    var dl = an - sn - 1;
+    if (dl == 0) { dl = 1; }      # the package was "/" itself
+    var out = alloc(dl + 1);
+    memcpy(out, abs_src, dl);
+    store8(out + dl, 0);
+    return out;
+}
+
+# Report-only (ADR 0006): name the packages the trail has live links
+# for whose directory no root holds. Not synced — the scan cannot know
+# the scope such a package was linked into, and guessing $HOME is how a
+# `--root` package would land in the wrong tree.
+fn _hsy_report_unscanned(found): i64 {
+    var tr_t, tr_v = audit_read_default_r();
+    if (is_err_result(tr_t) == 1) {
+        _hsy_eputs("hapi: note: the audit trail could not be read, so packages it\n");
+        _hsy_eputs("  knows outside HAPI_PACKAGE_ROOTS are not listed\n");
+        return 0;
+    }
+    var trail = tr_v;
+    var names = vec_new();
+    var i = 0;
+    while (i < vec_len(trail)) {
+        var e = vec_get(trail, i);
+        var pn = hae_pkg(e);
+        if (pn != 0 && _hul_cstr_eq(hae_op(e), "link") == 1) {
+            var seen = 0;
+            var k = 0;
+            while (k < vec_len(names)) {
+                if (_hul_cstr_eq(vec_get(names, k), pn) == 1) { seen = 1; }
+                k = k + 1;
+            }
+            if (seen == 0) { vec_push(names, pn); }
+        }
+        i = i + 1;
+    }
+    var told = vec_new();
+    var a = 0;
+    while (a < vec_len(names)) {
+        var live = _hul_live_entries_for(trail, vec_get(names, a));
+        var b = 0;
+        while (b < vec_len(live)) {
+            var le = vec_get(live, b);
+            var dir = _hsy_entry_pkg_dir(le);
+            var held = 0;
+            var f = 0;
+            while (f < vec_len(found)) {
+                if (dir != 0 && _hul_cstr_eq(vec_get(found, f), dir) == 1) { held = 1; }
+                f = f + 1;
+            }
+            if (dir != 0 && held == 0) {
+                var dup = 0;
+                var t = 0;
+                while (t < vec_len(told)) {
+                    if (_hul_cstr_eq(vec_get(told, t), dir) == 1) { dup = 1; }
+                    t = t + 1;
+                }
+                if (dup == 0) {
+                    vec_push(told, dir);
+                    _hsy_eputs("hapi: note: the trail has live links for `");
+                    _hsy_eputs(vec_get(names, a));
+                    _hsy_eputs("` from ");
+                    _hsy_eputs(dir);
+                    _hsy_eputs(",\n  which no package root holds; not synced\n");
+                }
+            }
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    return 0;
+}
+
+# `hapi sync` with no package: every package under HAPI_PACKAGE_ROOTS.
+# Each is synced exactly as `hapi sync <dir>` would be, and a failing
+# package does not stop the rest — a recovery should do all it can and
+# then say what it could not.
+fn _hsy_all(prune, force): i64 {
+    var env = _hsy_roots_override;
+    if (env == 0) { env = getenv("HAPI_PACKAGE_ROOTS"); }
+    if (env == 0 || strlen(env) == 0) {
+        _hsy_eputs("hapi: `sync` with no package needs HAPI_PACKAGE_ROOTS: the directories\n");
+        _hsy_eputs("  that hold your packages, colon-separated, each scanned one level deep\n");
+        _hsy_eputs("usage: hapi sync [<package-dir|hapi.cyml>] [--prune [--force]]\n");
+        return 2;
+    }
+
+    # Split on ':'. Every entry must be absolute: a relative one would
+    # scan wherever the shell happens to be, which is the hazard an
+    # explicit root exists to remove.
+    var roots = vec_new();
+    var n = strlen(env);
+    var start = 0;
+    var i = 0;
+    while (i <= n) {
+        if (i == n || load8(env + i) == 58) {
+            if (i > start) {
+                var r = alloc(i - start + 1);
+                memcpy(r, env + start, i - start);
+                store8(r + i - start, 0);
+                if (load8(r) != 47) {
+                    _hsy_eputs("hapi: HAPI_PACKAGE_ROOTS entry is not an absolute path: ");
+                    _hsy_eputs(r);
+                    _hsy_eputs("\n");
+                    return 2;
+                }
+                vec_push(roots, fsl_lexical_normalize(r));
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+
+    var failed = 0;
+    var found = vec_new();
+    var ri = 0;
+    while (ri < vec_len(roots)) {
+        if (_hsy_scan_root(vec_get(roots, ri), found) < 0) { failed = failed + 1; }
+        ri = ri + 1;
+    }
+    var total = vec_len(found);
+    if (total == 0) {
+        if (failed == 0) {
+            _hsy_eputs("hapi: no packages under HAPI_PACKAGE_ROOTS (");
+            _hsy_eputs(env);
+            _hsy_eputs(")\n");
+        }
+        return 1;
+    }
+
+    # Two packages sharing a name cannot be told apart in the trail, which
+    # keys on the name: `unlink` would take both, `--prune` would judge one
+    # by the other's rows. Refuse both rather than pick.
+    var mnames = vec_new();
+    var k = 0;
+    while (k < total) {
+        var mr_t, mr_v = hapi_mf_parse_file_r(_fsl_path_join(vec_get(found, k), "hapi.cyml"));
+        if (is_err_result(mr_t) == 1) { vec_push(mnames, 0); }
+        else { vec_push(mnames, _fsl_str_to_cstr(hapi_mf_name(mr_v))); }
+        k = k + 1;
+    }
+    var ok = 0;
+    var p = 0;
+    while (p < total) {
+        var dir = vec_get(found, p);
+        var mine = vec_get(mnames, p);
+        var twin = 0;
+        var q = 0;
+        while (q < total) {
+            if (q != p && mine != 0 && _hul_cstr_eq(vec_get(mnames, q), mine) == 1) { twin = vec_get(found, q); }
+            q = q + 1;
+        }
+        if (twin != 0) {
+            _hsy_eputs("hapi: refusing to sync ");
+            _hsy_eputs(dir);
+            _hsy_eputs(" — package `");
+            _hsy_eputs(mine);
+            _hsy_eputs("` is also\n  ");
+            _hsy_eputs(twin);
+            _hsy_eputs(", and the audit trail cannot tell them apart\n");
+            failed = failed + 1;
+        } elif (_hsy_one(dir, prune, force) == 0) {
+            ok = ok + 1;
+        } else {
+            failed = failed + 1;
+        }
+        p = p + 1;
+    }
+
+    _hsy_report_unscanned(found);
+    _hsy_puts("synced ");
+    fmt_int(ok);
+    _hsy_puts(" / ");
+    fmt_int(total);
+    _hsy_puts(" packages\n");
+    if (failed > 0) { return 1; }
+    return 0;
+}
+
+fn cmd_sync_run(pkg_arg, prune, force): i64 {
+    if (pkg_arg == 0) { return _hsy_all(prune, force); }
+    return _hsy_one(pkg_arg, prune, force);
+}
+
+fn cmd_sync(pkg_arg): i64 { return cmd_sync_run(pkg_arg, 0, 0); }

@@ -1,9 +1,29 @@
+> ## ✅ RESOLVED in 1.3.0 (2026-10-28)
+>
+> `hapi sync <pkg> --prune` (and `hapi sync --prune` over every package)
+> removes the links this package made whose row has left its manifest,
+> one `op:unlink` each. The dogfood case, one row of six dropped, now
+> writes **1** trail entry instead of 11, and the five kept links are never
+> touched. The proposal landed modified in four ways:
+> - **Candidates.** A candidate must also come from *this package
+>   directory* and lie in *this run's scope*, so two packages sharing a
+>   name, or a `--root` run, are not pruned by each other.
+> - **The limit.** Prune refuses past half of the package's live links
+>   unless `--force`, which on `sync` lifts that limit and nothing else.
+> - **Diverged rows.** A row whose target is still in the manifest is
+>   never pruned; a diverged one stays a conflict, as the proposal had it.
+> - **Ownership.** A link that is no longer the one hapi wrote refuses
+>   the package, `--force` or not.
+>
+> [ADR 0006](../../../adr/0006-sync-package-roots-and-prune.md);
+> `CHANGELOG.md` `[1.3.0]`.
+
 # `hapi sync` cannot prune trail rows that left the manifest — row removal needs full rotation
 
 **Discovered:** 2026-05-20 during M7 dotfile dogfooding (zsh package figlet-row removal)
 **Severity:** Low — ergonomic papercut with a working rotation
 **Affects:** hapi 0.6.0 through 0.7.0 (and forward until a sync-prune surface lands)
-**Scheduled:** 1.3.0, with no-arg sync — [`../roadmap.md`](../roadmap.md) § *1.3.0 — sync: no argument, and `--prune`*
+**Scheduled:** 1.3.0, with no-arg sync — shipped; see the banner
 
 ## Summary
 

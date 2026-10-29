@@ -1,8 +1,23 @@
+> ## ✅ RESOLVED in 1.3.0 (2026-10-28)
+>
+> `hapi sync` with no package syncs every package under
+> `HAPI_PACKAGE_ROOTS` (colon-separated, absolute), each root scanned one
+> level deep for `<root>/<name>/hapi.cyml`. That is the root scan this
+> issue asked for, as the **only** source of what to sync. The trail is
+> read afterwards to name packages it knows that no root holds, and never
+> to sync them: their scope cannot be known safely. The scan follows no
+> symlink and refuses two packages sharing a name. A failing package does
+> not stop the rest. Measured over 100 packages, one no-arg process takes
+> 80–84 ms cold where the 100-process loop took ~133, and writes a
+> byte-identical trail. Design and the alternatives weighed:
+> [ADR 0006](../../../adr/0006-sync-package-roots-and-prune.md); release
+> record: `CHANGELOG.md` `[1.3.0]`.
+
 # No-arg `hapi sync` — bootstrap/recovery needs one command, not a loop
 
 **Discovered:** 2026-05-24 during a drive-move / system-restart dotfile recovery
 **Severity:** Low — ergonomic; a known post-v1.0 roadmap item, now with dogfood pressure
-**Scheduled:** 1.3.0, with `sync --prune` — [`../roadmap.md`](../roadmap.md) § *1.3.0 — sync: no argument, and `--prune`*
+**Scheduled:** 1.3.0, with `sync --prune` — shipped; see the banner
 **Affects:** hapi 1.0.0 — `hapi sync` requires a `<package-dir|hapi.cyml>` argument; there is no no-arg form that syncs every tracked package.
 
 ## Summary
@@ -45,7 +60,7 @@ The roadmap names two mechanisms: (a) recover `pkg_dir` from a
 live audit entry, or (b) a tree-walk heuristic. **Today's event
 is direct evidence that (a) is the wrong primary mechanism.** The
 drive move wiped the audit trail (see
-[`2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](2026-05-24-audit-trail-lost-on-state-dir-wipe.md)),
+[`2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](../2026-05-24-audit-trail-lost-on-state-dir-wipe.md)),
 so a trail-driven `hapi sync` would have discovered **zero**
 packages in precisely the scenario where no-arg sync is most
 valuable — the empty-trail bootstrap. The mechanism that actually
@@ -90,11 +105,11 @@ from a trail that a drive move can erase.
 
 ## Cross-references
 
-- [`2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](2026-05-24-audit-trail-lost-on-state-dir-wipe.md)
+- [`2026-05-24-audit-trail-lost-on-state-dir-wipe.md`](../2026-05-24-audit-trail-lost-on-state-dir-wipe.md)
   — same recovery event; why trail-recovery is the wrong discovery
   mechanism for this command.
-- [`../roadmap.md`](../roadmap.md) — *Manifest discovery for no-arg
+- [`../../roadmap.md`](../../roadmap.md) — *Manifest discovery for no-arg
   `hapi sync`* (this issue is the dogfood-pressure record + the
   root-scan design correction).
-- [`../state.md`](../state.md) — `cmd_sync` shape + the post-v1.0
+- [`../../state.md`](../../state.md) — `cmd_sync` shape + the post-v1.0
   per-package-discovery note.

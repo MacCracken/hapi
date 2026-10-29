@@ -54,7 +54,7 @@ enum HapiVerb {
 # The flags a verb accepts, as a bit set.
 enum HapiFlag {
     HAPI_F_FORCE = 1; HAPI_F_STRICT = 2; HAPI_F_DRY_RUN = 4;
-    HAPI_F_ROOT = 8; HAPI_F_BACKUP_TO = 16;
+    HAPI_F_ROOT = 8; HAPI_F_BACKUP_TO = 16; HAPI_F_PRUNE = 32;
 }
 
 # `hapi --version` prints `hapi <version>`. The number is
@@ -86,7 +86,11 @@ fn hapi_print_usage(): i64 {
     println("  status <path>             show drift between manifest and on-disk symlinks");
     println("  list                      list packages tracked in the audit trail");
     println("  check <path> [--strict]   parse + display a manifest, optionally strict");
-    println("  sync <path>               re-apply a manifest (idempotent)");
+    println("  sync [<path>] [--prune]   re-apply a manifest (idempotent); with no path,");
+    println("                            every package under HAPI_PACKAGE_ROOTS");
+    println("                            (colon-separated). --prune also removes links");
+    println("                            whose row left the manifest; past half of a");
+    println("                            package's links it needs --force");
     println("");
     println("global flags:");
     println("  --root <path>             open a non-$HOME scope (link/adopt/status/list/sync)");
@@ -198,7 +202,9 @@ fn _hapi_verb_flags(v): i64 {
     if (v == HAPI_V_STATUS)     { return HAPI_F_ROOT; }
     if (v == HAPI_V_LIST)       { return HAPI_F_ROOT; }
     if (v == HAPI_V_CHECK)      { return HAPI_F_STRICT; }
-    if (v == HAPI_V_SYNC)       { return HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO; }
+    if (v == HAPI_V_SYNC) {
+        return HAPI_F_DRY_RUN | HAPI_F_ROOT | HAPI_F_BACKUP_TO | HAPI_F_PRUNE | HAPI_F_FORCE;
+    }
     # inspect takes none, and still owes exit 2 for one, not the
     # exit 1 that means "bad manifest" (F-033).
     return 0;
@@ -285,6 +291,7 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     var f_force  = _hapi_bool_flag(vh, set, HAPI_F_FORCE, "force", "replace a conflicting target");
     var f_strict = _hapi_bool_flag(vh, set, HAPI_F_STRICT, "strict", "refuse unknown manifest keys");
     var f_dry    = _hapi_bool_flag(vh, set, HAPI_F_DRY_RUN, "dry-run", "print actions; no syscalls or audit writes");
+    var f_prune  = _hapi_bool_flag(vh, set, HAPI_F_PRUNE, "prune", "also remove links whose row left the manifest");
     var f_root   = _hapi_value_flag(vh, set, HAPI_F_ROOT, "root", "path", "open a non-$HOME scope");
     var f_backup = _hapi_value_flag(vh, set, HAPI_F_BACKUP_TO, "backup-to", "dir",
       "snapshot a file before overwriting it");
@@ -302,6 +309,13 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     }
     if (_hapi_values_ok(vh, f_root, "--root", "path") == 0) { return 2; }
     if (_hapi_values_ok(vh, f_backup, "--backup-to", "directory") == 0) { return 2; }
+    # On sync, --force only lifts --prune's limit; alone it would read as
+    # link's "overwrite", which sync never does.
+    if (v == HAPI_V_SYNC && cmdit_get_bool(vh, f_force) == 1 && cmdit_get_bool(vh, f_prune) == 0) {
+        _hapi_eputs("hapi: `sync --force` needs `--prune`: on sync it only lifts prune's limit,\n");
+        _hapi_eputs("  and sync never overwrites a conflict (that is `hapi link --force`)\n");
+        return 2;
+    }
 
     var n = cmdit_repeat_count(vh, f_root);
     var i = 0;
@@ -324,7 +338,9 @@ fn _hapi_run_verb(h, argc, argv): i64 {
     if (v == HAPI_V_STATUS)     { return cmd_status(p0); }
     if (v == HAPI_V_LIST)       { return cmd_list(); }
     if (v == HAPI_V_CHECK)      { return cmd_check(p0, cmdit_get_bool(vh, f_strict)); }
-    if (v == HAPI_V_SYNC)       { return cmd_sync(p0); }
+    if (v == HAPI_V_SYNC) {
+        return cmd_sync_run(p0, cmdit_get_bool(vh, f_prune), cmdit_get_bool(vh, f_force));
+    }
     return 2;
 }
 

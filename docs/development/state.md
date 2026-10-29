@@ -5,27 +5,31 @@
 
 ## Version
 
-**1.2.1** (2026-10-28) — cmdit fallout, on the cyrius 6.7 line (pin
-`6.7.18`). No surface change: the `--dry-run` flag moved to its own leaf
-so a command no longer includes the dispatcher, and each verb's parse is
-finalized as `cmdit_parse_verb` would. A model-checked differential fuzz
-of 50,000 command lines against 1.1.1 found no behavioural fallout.
+**1.3.0** (2026-10-28) — `sync` with no package, and `--prune`
+([ADR 0006](../adr/0006-sync-package-roots-and-prune.md)), on the cyrius
+6.7 line (pin `6.7.18`).
 
-**1.2.0** (2026-10-28) — adopting cmdit. The hand-rolled argv walk in `src/main.cyr` is replaced by
-cmdit 1.5.0 (`[deps.cmdit]`), and the dispatcher lives in `src/cli.cyr`.
-The v1.0 command surface is kept message for message, checked against an
-819-line golden of the 1.1.1 binary; what changed is additive
-(`<verb> --help` / `--version`, `--root=PATH` / `--backup-to=DIR`, `--`,
-a lone `-` as a positional) plus two error-precedence shifts on lines
-with more than one error. P(-1) re-ran on the argument surface (the
-*1.2.0 addendum* of
-[`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)): F-013,
-F-019, F-033 and F-051 hold, and F-060 (a stray NUL on an empty
-`--root`) is fixed. 1.1.1 before it repaired that pass's F-035 – F-059;
-F-059 (`adopt` on a real agnos kernel) stays accepted. The manifest
-schema and the audit-trail line shape are unchanged. Both suites pass on
-x86_64 and on aarch64 under qemu, and `tests/agnos.tcyr` also passes on
-agnos under mirshi.
+- **No package.** `hapi sync` syncs every package under
+  `HAPI_PACKAGE_ROOTS`, each root scanned one level deep. The scan follows
+  no symlink, and the trail only names packages outside the roots.
+- **`--prune`.** `hapi sync [<pkg>] --prune` removes the links whose rows
+  left the manifest, one `op:unlink` each. It is refused past half of a
+  package's live links unless `--force`, which on `sync` means only that.
+- **P(-1).** Its pass (the *1.3.0 addendum* of
+  [`../audit/2026-10-28-audit.md`](../audit/2026-10-28-audit.md)) found
+  and fixed **F-061**: a removal whose trail entry failed after the
+  pre-flight stayed removed and unrecorded, in `unlink` and `rollback`
+  since F-055. Such a change is now taken back.
+- **Unchanged:** the manifest schema and the audit-trail line shape.
+  Both suites pass on x86_64 and on aarch64 under qemu, and
+  `tests/agnos.tcyr` also passes on agnos under mirshi.
+
+Before it, 1.2.0 / 1.2.1 moved argument parsing to cmdit 1.5.0
+(`[deps.cmdit]`), keeping every 1.1.1 message (checked against an
+819-line golden). They added the forms getopt brings (`<verb> --help` /
+`--version`, `--root=PATH` / `--backup-to=DIR`, `--`, a lone `-`) and
+fixed F-060. 1.1.1 repaired F-035 – F-059; F-059 (`adopt` on a real
+agnos kernel) stays accepted.
 
 Release-by-release detail lives in
 [`../../CHANGELOG.md`](../../CHANGELOG.md), and the findings with their
@@ -80,9 +84,10 @@ subsets, registered only on the verbs that take them:
 `--root <path>` (link / adopt / sync / status / list),
 `--dry-run` (link / unlink / adopt / sync / rollback /
 checkpoint), and `--backup-to <dir>` (parsed on link / sync / adopt; effective
-on `link --force` / `adopt` only — `sync` has no `--force`, so it
+on `link --force` / `adopt` only — `sync` never overwrites, so it
 is inert there) —
-opt-in pre-`--force` snapshot.
+opt-in pre-`--force` snapshot. Since 1.3.0 `sync` also takes `--prune`,
+and `--force` with it, which lifts prune's limit and nothing else.
 
 ### Current command surface (frozen at v1.0)
 
@@ -103,7 +108,9 @@ opt-in pre-`--force` snapshot.
 
 Additive since 1.2.0: `hapi <verb> --help` / `-h` and `--version` /
 `-v` (exit 0), `--root=PATH` and `--backup-to=DIR`, `--` to end a
-verb's flags, and a lone `-` as a positional. Nothing is accepted
+verb's flags, and a lone `-` as a positional. Since 1.3.0: `hapi sync`
+with no package (every package under `HAPI_PACKAGE_ROOTS`; exit 2 when it
+is unset), and `sync --prune [--force]`. Nothing is accepted
 before the verb, and a leading `--help` / `--version` answers whatever
 follows it.
 
@@ -172,6 +179,9 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   v0.8.0; XDG path resolution with test override hook).
   `audit_manifest_hash_raw(path)` retains the v0.x `sha1:`
   raw-bytes variant for trail-format diagnostics.
+  `audit_report_unwritten` is the F-061 report for a mutation whose
+  entry the trail refused after the pre-flight passed, and the test hook
+  `audit_test_fail_appends` opens exactly that window.
 - `src/audit_reader.cyr` — JSONL reader; hand-rolled scanner
   over the ADR 0002 field set
 - `src/fs_link.cyr` — symlink primitives (probe / compute
@@ -182,7 +192,10 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
   resolve into a given directory — the package guard). `link_probe`
   classifies with `stat`.
 - `src/cmd/inspect.cyr` — manifest dump
-- `src/cmd/link.cyr` — pre-flight + create + audit
+- `src/cmd/link.cyr` — `_hlnk_plan_run` parses the manifest, classifies
+  every row and makes every refusal before any write; `_hlnk_execute`
+  creates and audits. Split in 1.3.0 so `sync --prune` can plan both
+  halves first. On a refused trail entry a new link is taken back (F-018).
 - `src/cmd/unlink.cyr` — trail-driven removal
 - `src/cmd/adopt.cyr` — file-into-package move + symlink +
   manifest edit + audit
@@ -197,9 +210,14 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 - `src/cmd/check.cyr` — inspect with `--strict` (rejects
   unknown sections / keys via the `_hapi_mf_strict` flag
   added to `manifest.cyr`)
-- `src/cmd/sync.cyr` — thin wrapper over `cmd_link` (link
-  without `--force`); the verb communicates intent while
-  the engine is shared
+- `src/cmd/sync.cyr` — `link` without `--force` for one package, plus
+  (1.3.0, ADR 0006) the no-package scan of `HAPI_PACKAGE_ROOTS`
+  (`_hsy_all`: one level, no symlinks followed, twins refused, failures
+  do not stop the run, the trail only reported from) and `--prune`
+  (`_hsy_prune_one`: candidates must be this package directory's live
+  `op:link`s in this scope whose row is gone and whose link is still
+  hapi's; refused past half without `--force`; planned whole, then
+  pre-flight, removals, creates). Test hook `sync_set_package_roots`.
 - `src/cap.cyr` — the capability boundary. `cap_check_root_r(path)`
   vets `--root` on the PHYSICALLY resolved root (1.1.1, F-051): inside
   the resolved `$HOME`, or inside a resolved `HAPI_ALLOWED_ROOTS` entry
@@ -264,7 +282,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 
 ## Tests
 
-- `tests/hapi.tcyr` — primary suite. **826 assertions across 121 test
+- `tests/hapi.tcyr` — primary suite. **970 assertions across 130 test
   groups.** Re-derive rather than recount by hand — these figures have
   rotted twice, and the per-tier breakdown below drifted 16 groups
   short before the 2026-08-26 sweep:
@@ -276,18 +294,18 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
     | sort | uniq -c | sort -rn                 # per-tier breakdown
   ```
 
-  Groups by tier, as measured at 1.2.0: link 10, cli 9, cap 9,
-  rollback 8, manifest 8, manifest_write 8, check 8, backup 7, adopt 7,
-  fs_link 6, dry-run 6, status 5, canonical 5, audit_reader 5,
-  audit-repair 4, audit 4, unlink 4, sync 3, list 3, checkpoint 1,
+  Groups by tier, as measured at 1.3.0: link 10, cli 10, sync 10,
+  cap 9, rollback 8, manifest 8, manifest_write 8, check 8, backup 7,
+  adopt 7, fs_link 6, dry-run 6, status 5, canonical 5, audit_reader 5,
+  audit 5, audit-repair 4, unlink 4, list 3, checkpoint 1,
   agnos_compat 1. The `cli` tier (1.2.0) runs `hapi_cli_run` with a
   synthetic argv and its stdout / stderr captured through `dup2`, so the
   v1.0 messages are asserted byte for byte.
-- `tests/agnos.tcyr` — **55 assertions across 8 groups**, all
+- `tests/agnos.tcyr` — **61 assertions across 9 groups**, all
   target-neutral: the agnos-conditional paths (no-follow open,
   exclusive create, absent trail, trail and manifest round trips,
-  backup copy, the fs shims, and `link` / `status` / `unlink` with the
-  scope at `/`). `cyrius test` runs it on x86_64 and aarch64; the agnos
+  backup copy, the fs shims, `link` / `status` / `unlink` with the
+  scope at `/`, and since 1.3.0 a package-root scan and a prune). `cyrius test` runs it on x86_64 and aarch64; the agnos
   smoke builds it with `--agnos` and runs it under mirshi. Absolute
   paths only, no chmod, no environment — what an agnos run allows.
 
@@ -297,7 +315,7 @@ verb (**reserved until v2.0** — F-025, ADR 0001).
 beside it as shell harnesses. **CI runs both.**
 
 The suite itself also runs on aarch64 — `cyrius test --aarch64` under
-`qemu-aarch64` (826 / 826 and 55 / 55 at 1.2.0). **CI runs it** as of 1.0.12
+`qemu-aarch64` (970 / 970 and 61 / 61 at 1.3.0). **CI runs it** as of 1.0.12
 (`Test (aarch64, under qemu)`, after installing `qemu-user`; a missing
 qemu fails the step, it never skips). Before that the aarch64 step was
 compile-only, which is how the `O_NOFOLLOW` literal went unseen from
@@ -380,9 +398,9 @@ means downstream packagers (zugot recipes) and user manifests.
 
 ## Next
 
-The 2026-10-28 P(-1) pass is **closed** in 1.1.1, and its 1.2.0
-addendum (the argument surface under cmdit) closed with F-060 fixed;
-1.2.1 carried that migration's fallout.
+The 2026-10-28 P(-1) pass is **closed** in 1.1.1. Its 1.2.0 addendum
+(the argument surface under cmdit) closed with F-060 fixed, and its
+1.3.0 addendum (`sync`'s scan and prune) with F-061 fixed.
 Every finding is fixed except F-059, accepted as an agnos kernel gap
 ([`issues/2026-10-28-adopt-on-agnos-kernel.md`](issues/2026-10-28-adopt-on-agnos-kernel.md)).
 Two upstream follow-ups came out of it, both filed upstream on
@@ -393,6 +411,7 @@ rename-over-existing (an agnos issue file). [`roadmap.md`](roadmap.md)
 
 Forward-looking work is **not** listed here — it lives in
 [`roadmap.md`](roadmap.md), which carries only work that has not
-shipped. **Next is 1.3.0, `sync` with no argument and `--prune`**;
-1.4.0 – 1.7.0 are planned there one theme per minor, with upstream-gated work listed apart. Open dogfood papercuts are in
-[`issues/`](issues/) (4 open, 7 archived).
+shipped. **Next is 1.4.0, `created_dirs` on `op:link`**; 1.5.0 –
+1.7.0 are planned there one theme per minor, with upstream-gated work
+listed apart. Open dogfood papercuts are in [`issues/`](issues/) (2
+open, 9 archived).

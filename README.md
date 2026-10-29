@@ -38,18 +38,22 @@ Third leg of the terminal-aesthetics set:
   rollback is exactly *"replay the trail in reverse."*
 - **Idempotent** — re-running `hapi sync` over a clean tree produces
   zero filesystem changes and zero audit growth.
+- **One-command recovery** — with `HAPI_PACKAGE_ROOTS` naming the
+  directories that hold your packages, a bare `hapi sync` re-links all of
+  them. `hapi sync --prune` also removes links whose rows left a
+  manifest, never more than half a package's without `--force`.
 
 ## Status
 
-**v1.2.1** — the v1.0 contract, frozen 2026-05-23, still holds:
+**v1.3.0** — the v1.0 contract, frozen 2026-05-23, still holds:
 command surface (ten verbs plus five global flags), `hapi.cyml`
 manifest schema (ADR 0001), and audit-trail format (ADR 0002) are all
 contractual. 1.2.0 is the first release to add surface, all of it
 additive: argument parsing moved to
 [cmdit](https://github.com/MacCracken/cmdit), which brings
 `--root=PATH`, `--` and `hapi <verb> --help`, with every 1.1.1 message
-kept; 1.2.1 cleans up after the move. The releases before it added
-teeth: 1.0.5 → 1.0.10 closed all
+kept. 1.3.0 adds `hapi sync` with no package and `sync --prune`, the
+two dogfood issues on `sync`. The releases before 1.2.0 added teeth: 1.0.5 → 1.0.10 closed all
 twenty findings of the
 [2026-08-25 P(-1) audit](docs/audit/2026-08-25-audit.md), and 1.1.1
 repairs the [2026-10-28 pass](docs/audit/2026-10-28-audit.md), which
@@ -65,7 +69,7 @@ for the v1.0 surface.
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/hapi   # compile
 ./build/hapi --help                    # see the verb set
-cyrius test                            # 826 + 55 assertions, two suites
+cyrius test                            # 970 + 61 assertions, two suites
 ```
 
 A worked example lives at
@@ -78,19 +82,20 @@ file with `hapi adopt ~/.somerc somepackage`.
 - [`docs/guides/`](docs/guides/) — per-verb how-tos (link, sync,
   rollback, adopt, …) plus cross-cutting flags (`--root`,
   `--dry-run`, `--backup-to`) and the upstream-drift merge ritual.
-- [`docs/adr/`](docs/adr/) — five Architecture Decision Records.
-  All frozen at v1.0.
+- [`docs/adr/`](docs/adr/) — six Architecture Decision Records: the
+  five frozen at v1.0, and 0006 (`sync`'s package roots and `--prune`).
 - [`docs/audit/`](docs/audit/) — the P(-1) security audit passes
   (index + four dated passes). The
   [2026-10-28 pass](docs/audit/2026-10-28-audit.md) is the current one;
-  its findings F-035 – F-059 are repaired in 1.1.1, and its 1.2.0
-  addendum re-walks the argument surface under cmdit (F-060).
+  its findings F-035 – F-059 are repaired in 1.1.1, its 1.2.0
+  addendum re-walks the argument surface under cmdit (F-060), and its
+  1.3.0 addendum covers `sync`'s scan and prune (F-061).
 - [`docs/benchmarks.md`](docs/benchmarks.md) — sync over a 100-pkg
   synthetic home.
 - [`docs/development/state.md`](docs/development/state.md) — live
   state snapshot.
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) —
-  the plan: 1.3.0 (sync) through 1.7.0, upstream-gated work, and
+  the plan: 1.4.0 through 1.7.0, upstream-gated work, and
   v2.0 candidates.
 
 ## License

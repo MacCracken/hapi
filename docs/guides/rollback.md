@@ -94,7 +94,18 @@ fixed.
 | code | meaning                                                       |
 |------|---------------------------------------------------------------|
 | 0    | rollback completed (any per-entry skips were silent)          |
-| 1    | at least one entry hit an IO error mid-reversal; an adopt was reverted but its manifest row could not be removed (the reason is printed); the closing marker could not be written; or the trail is not writable (nothing was changed) |
+| 1    | at least one entry hit an IO error mid-reversal; an adopt was reverted but its manifest row could not be removed (the reason is printed); the closing marker could not be written; the trail is not writable (nothing was changed); or the trail refused a reversal's entry (below) |
+
+### When the trail refuses an entry
+
+A write can fail after the pre-flight passed (a full disk, a file-size
+limit). Since 1.3.0, a reversal whose entry could not be written is
+**taken back** and the run stops there: a removed link is put back, and a
+re-created one is removed again (F-061). Through 1.2.1 the change stayed
+on disk, unrecorded, reported only as an IO error. The one exception is
+an `adopt` reversal, which is three steps (the link, the file, the
+manifest row) and is not taken back. Instead it is reported exactly: the
+file is back and its row removed, but the trail still says adopted.
 
 ## See also
 

@@ -132,12 +132,17 @@ was owed alongside it, per-component symlink resolution, shipped in
   can set `HAPI_ALLOWED_ROOTS` can expand their own scope. Treat it as
   a sanity rail, not a security boundary — and note there is no kavach
   swap coming to change that.
-- **`--root`'s own check is lexical**; `..` segments are collapsed
-  before the prefix-match (the F-001 repair in the
-  [v0.9.0 hardening pass](../audit/2026-05-23-audit.md)). Symlink
-  resolution applies to **write targets**, not to the `--root` value
-  itself — see *Resolved containment* above. F-002 and F-015 closed in
-  1.0.8.
+- **`--root` is granted where it resolves.** Its `..` segments are
+  collapsed (the F-001 repair in the
+  [v0.9.0 hardening pass](../audit/2026-05-23-audit.md)), and since 1.1.1
+  its symlinks are followed before the prefix match (F-051), as every
+  write target's are (F-002 / F-015, 1.0.8) — see *Resolved containment*
+  above.
+- **`HAPI_PACKAGE_ROOTS` (1.3.0) is not a grant.** It tells a no-package
+  `hapi sync` where to *read* packages from. Every row those packages
+  plant is still bounded by the scope and this page's rules, exactly as
+  for a package named on the command line
+  ([`sync.md`](sync.md), [ADR 0006](../adr/0006-sync-package-roots-and-prune.md)).
 - `$HOME` is always implicitly allowed and does not need to
   appear in the allowlist.
 - The allowlist accepts **absolute paths only**; relative
